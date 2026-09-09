@@ -6,7 +6,7 @@ ENV TERM=xterm \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Инструменты для сборки + ffmpeg (экспортируем фрагменты) + системные библиотеки для OpenCV.
+# ffmpeg (экспорт фрагментов) + системные библиотеки для OpenCV/PyAV.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libgl1 \
@@ -27,5 +27,4 @@ WORKDIR /srv/videocutter/backend
 
 EXPOSE 8001
 
-# При старте: ждём БД, применяем миграции, поднимаем dev-сервер.
-CMD ["sh", "-c", "python manage.py migrate && python manage.py runserver 0.0.0.0:8001"]
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8001"]

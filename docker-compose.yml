@@ -1,39 +1,20 @@
-# VideoCutter — автономное окружение (Postgres + backend + ui).
-# Запуск из корня репозитория: docker compose up --build
+# VideoCutter — автономное окружение (backend + ui).
+# Workspace-ы: папки с видео + fragments.tsv на общем volume.
+# Запуск: docker compose up --build
 services:
-  videocutter_db:
-    container_name: videocutter_db
-    image: postgres:15-alpine
-    restart: always
-    environment:
-      POSTGRES_USER: ${VC_DB_USER:-videocutter}
-      POSTGRES_PASSWORD: ${VC_DB_PASSWORD:-videocutter}
-      POSTGRES_DB: ${VC_DB_NAME:-videocutter}
-    volumes:
-      - videocutter_db:/var/lib/postgresql/data
-
   videocutter_backend:
     container_name: videocutter_backend
     build:
       context: .
       dockerfile: backend/Dockerfile
     restart: always
-    depends_on:
-      - videocutter_db
     environment:
-      VC_DB_ENGINE: postgres
-      VC_DB_NAME: ${VC_DB_NAME:-videocutter}
-      VC_DB_USER: ${VC_DB_USER:-videocutter}
-      VC_DB_PASSWORD: ${VC_DB_PASSWORD:-videocutter}
-      VC_DB_HOST: videocutter_db
-      VC_DB_PORT: "5432"
-      VC_MEDIA_ROOT: /data/vc_media
-      VC_EXPORT_ROOT: /data/vc_exports
+      VC_WORKSPACE_ROOT: /data/workspaces
       DJANGO_ALLOWED_HOSTS: "*"
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
     volumes:
-      - videocutter_media:/data/vc_media
+      - videocutter_workspaces:/data/workspaces
     ports:
       - "${VC_BACKEND_PORT:-8001}:8001"
 
@@ -49,5 +30,4 @@ services:
       - "${VC_UI_PORT:-3000}:80"
 
 volumes:
-  videocutter_db:
-  videocutter_media:
+  videocutter_workspaces:

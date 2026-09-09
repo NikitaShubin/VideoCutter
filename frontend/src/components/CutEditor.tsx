@@ -10,7 +10,7 @@ import { FragmentModel } from "../model/fragmentModel";
 import type { ExportItem, VideoPairDetail } from "../types";
 
 interface Props {
-  pairId: number;
+  pairId: string;
   onBack: () => void;
 }
 

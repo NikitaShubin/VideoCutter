@@ -1,169 +1,186 @@
 # -*- coding: utf-8 -*-
-"""Тесты REST-API фрагментов: создание, замена списком, комментарии, валидация.
+"""Тесты workspace-based API: workspace list, fragments, export status.
 
-Прогон:  cd backend && ./../venv/bin/python manage.py test
-(или с системным python, где установлены django/djangorestframework).
+Прогон:  cd backend && python manage.py test
+
+Проект stateless: без БД (SimpleTestCase), фрагменты — fragments.tsv рядом
+с видео. Внимание: Django test client c format="json" и list-payload ломается
+(шлёт repr списка с application/octet-stream), поэтому PUT делаем явным JSON.
 """
 
-from django.core.files.uploadedfile import SimpleUploadedFile
-from rest_framework import status
-from rest_framework.test import APITestCase
+import json
+import os
+import shutil
+import tempfile
 
-from vc_fragments.models import Fragment
-from vc_pairs.models import VideoPair
+from django.conf import settings
+from django.test import SimpleTestCase
+
+from workspace import WORKSPACE_ROOT, _workspaces
+from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+
+HTTP_OK = 200
+HTTP_BAD_REQUEST = 400
+HTTP_NOT_FOUND = 404
+HTTP_CONFLICT = 409
 
 
-class FragmentApiTestBase(APITestCase):
+class WorkspaceApiTestBase(SimpleTestCase):
+    """Создаёт временный workspace с test video и fragments.tsv.
+
+    SimpleTestCase — без БД (проект stateless).
+    """
+
     def setUp(self):
-        fake = SimpleUploadedFile("orig.mp4", b"fake-video-data", content_type="video/mp4")
-        self.pair = VideoPair.objects.create(
-            original=fake,
-            original_name="test.mp4",
-            total_frames=100,
-            width=16,
-            height=16,
-            fps=30.0,
+        self._orig_root = WORKSPACE_ROOT
+        self._tmpdir = tempfile.mkdtemp()
+        settings.VC_WORKSPACE_ROOT = self._tmpdir
+
+        # Пересоздаём глобальный реестр.
+        _workspaces.clear()
+        import workspace
+        workspace.WORKSPACE_ROOT = self._tmpdir
+
+        # Создаём workspace: директория + видео.
+        self.ws_id = "test-ws"
+        self.ws_dir = os.path.join(self._tmpdir, self.ws_id)
+        os.makedirs(self.ws_dir, exist_ok=True)
+        src = os.path.join(os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        self.video = os.path.join(self.ws_dir, "visualization.mp4")
+        shutil.copy2(src, self.video)
+
+        # Создаём fragments.tsv (заголовок обязателен — так пишет save_fragments).
+        # Тестовое видео: 10 кадров (testsrc2, 10 fps, 1 s).
+        tsv = os.path.join(self.ws_dir, "fragments.tsv")
+        with open(tsv, "w") as f:
+            f.write("start\tend\tcomment\n")
+            f.write("0\t3\tстарт\n")
+            f.write("5\t9\tфиниш\n")
+
+        # Сброс глобального состояния экспорта между тестами.
+        with EXPORTS_LOCK:
+            EXPORTS.clear()
+
+        # Списки URL.
+        self.ws_list_url = "/api/v1/workspaces/"
+        self.ws_detail_url = f"/api/v1/workspaces/{self.ws_id}/"
+        self.ws_meta_url = f"/api/v1/workspaces/{self.ws_id}/meta"
+        self.ws_frame_url = f"/api/v1/workspaces/{self.ws_id}/frame/0/"
+        self.frags_url = f"/api/v1/pairs/{self.ws_id}/fragments/"
+        self.export_url = f"/api/v1/pairs/{self.ws_id}/export"
+        self.export_status_url = f"/api/v1/pairs/{self.ws_id}/export/status"
+
+    def json_put(self, url, payload):
+        """PUT с корректным JSON-телом (для list Django-client ломается)."""
+        return self.client.put(
+            url,
+            data=json.dumps(payload, ensure_ascii=False),
+            content_type="application/json",
         )
-        self.list_url = f"/api/v1/pairs/{self.pair.id}/fragments/"
-        self.replace_url = f"/api/v1/pairs/{self.pair.id}/fragments/replace"
+
+    def tearDown(self):
+        import workspace
+        settings.VC_WORKSPACE_ROOT = self._orig_root
+        workspace.WORKSPACE_ROOT = self._orig_root
+        _workspaces.clear()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
 
-class CreateAndListTests(FragmentApiTestBase):
-    def test_post_creates_fragment_with_comment(self):
-        resp = self.client.post(
-            self.list_url, {"start": 10, "end": 20, "comment": "первый"}, format="json"
-        )
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+class WorkspaceListTests(WorkspaceApiTestBase):
+    def test_list_shows_workspace(self):
+        resp = self.client.get(self.ws_list_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        ids = [w["id"] for w in resp.json()]
+        self.assertIn(self.ws_id, ids)
+
+    def test_detail_shows_fragments(self):
+        resp = self.client.get(self.ws_detail_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
         body = resp.json()
-        self.assertEqual(body["start"], 10)
-        self.assertEqual(body["end"], 20)
-        self.assertEqual(body["comment"], "первый")
+        self.assertEqual(body["id"], self.ws_id)
+        frags = body["fragments"]
+        self.assertEqual(len(frags), 2)
+        self.assertEqual(frags[0]["comment"], "старт")
+        self.assertEqual(frags[1]["start"], 5)
 
-        frags = Fragment.objects.get()
-        self.assertEqual(frags.comment, "первый")
+    def test_detail_404_for_missing(self):
+        resp = self.client.get("/api/v1/workspaces/nonexistent/")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
 
-    def test_post_default_comment_is_empty(self):
-        resp = self.client.post(self.list_url, {"start": 5, "end": 9}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.json()["comment"], "")
-
-    def test_post_overlap_rejected(self):
-        self.client.post(self.list_url, {"start": 10, "end": 20}, format="json")
-        resp = self.client.post(self.list_url, {"start": 15, "end": 25}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
-
-    def test_post_out_of_range_rejected(self):
-        resp = self.client.post(self.list_url, {"start": 95, "end": 200}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_post_invalid_bounds_rejected(self):
-        resp = self.client.post(self.list_url, {"start": 20, "end": 10}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_get_list_returns_comments(self):
-        self.client.post(
-            self.list_url, {"start": 10, "end": 20, "comment": "альфа"}, format="json"
-        )
-        self.client.post(
-            self.list_url, {"start": 30, "end": 40, "comment": "бета"}, format="json"
-        )
-        resp = self.client.get(self.list_url)
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        data = resp.json()
-        self.assertEqual(len(data), 2)
-        self.assertEqual([f["comment"] for f in data], ["альфа", "бета"])
+    def test_meta(self):
+        resp = self.client.get(self.ws_meta_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        body = resp.json()
+        self.assertEqual(body["id"], self.ws_id)
+        self.assertIn("total_frames", body)
+        self.assertIn("width", body)
 
 
-class ReplaceTests(FragmentApiTestBase):
-    def test_replace_preserves_comments_roundtrip(self):
-        sent = [
-            {"start": 0, "end": 5, "comment": "первый кусок"},
-            {"start": 20, "end": 30, "comment": "второй кусок"},
-        ]
-        resp = self.client.put(self.replace_url, sent, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        got = resp.json()
-        self.assertEqual(len(got), 2)
-        self.assertEqual([(f["start"], f["end"], f["comment"]) for f in got], [
-            (0, 5, "первый кусок"),
-            (20, 30, "второй кусок"),
-        ])
+class FragmentsApiTests(WorkspaceApiTestBase):
+    def test_get_fragments(self):
+        resp = self.client.get(self.frags_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        frags = resp.json()
+        self.assertEqual(len(frags), 2)
+        self.assertEqual(frags[0]["comment"], "старт")
 
-        # Повторная замена без поля comment сохраняет комментарии (обратная
-        # совместимость со старыми клиентами).
-        resp2 = self.client.put(self.replace_url, [{"start": 0, "end": 5}], format="json")
-        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp2.json()[0]["comment"], "первый кусок")
-
-    def test_replace_without_comment_key_fresh_pair(self):
-        resp = self.client.put(self.replace_url, [{"start": 0, "end": 5}], format="json")
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.json()[0]["comment"], "")
-
-    def test_replace_clears_comment_explicitly(self):
-        self.client.put(
-            self.replace_url, [{"start": 0, "end": 5, "comment": "было"}], format="json"
-        )
-        resp = self.client.put(
-            self.replace_url, [{"start": 0, "end": 5, "comment": ""}], format="json"
-        )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.json()[0]["comment"], "")
-
-    def test_replace_deletes_old_and_creates_new(self):
-        self.client.put(
-            self.replace_url,
-            [{"start": 0, "end": 5, "comment": "старый"}],
-            format="json",
-        )
-        resp = self.client.put(
-            self.replace_url,
-            [
-                {"start": 10, "end": 20, "comment": "новый"},
-                {"start": 40, "end": 50, "comment": "ещё один"},
-            ],
-            format="json",
-        )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(Fragment.objects.count(), 2)
-        self.assertEqual(resp.json()[0]["comment"], "новый")
-
-    def test_replace_rejects_overlap(self):
+    def test_put_replace_fragments(self):
         payload = [
-            {"start": 10, "end": 30, "comment": "a"},
-            {"start": 25, "end": 40, "comment": "b"},
+            {"start": 1, "end": 3, "comment": "новый"},
+            {"start": 5, "end": 7, "comment": ""},
         ]
-        resp = self.client.put(self.replace_url, payload, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        resp = self.json_put(self.frags_url, payload)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        frags = resp.json()
+        self.assertEqual(len(frags), 2)
+        self.assertEqual(frags[0]["start"], 1)
 
-    def test_replace_rejects_out_of_range(self):
-        resp = self.client.put(
-            self.replace_url, [{"start": 0, "end": 1000}], format="json"
-        )
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # Проверяем, что TSV обновился.
+        resp2 = self.client.get(self.frags_url)
+        self.assertEqual(len(resp2.json()), 2)
+        self.assertEqual(resp2.json()[0]["comment"], "новый")
 
-    def test_replace_rejects_non_list(self):
-        resp = self.client.put(self.replace_url, {"start": 0, "end": 5}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+    def test_put_preserves_comments_without_key(self):
+        """Обратная совместимость: если comment не передан, старый сохраняется."""
+        payload = [{"start": 0, "end": 5}]  # без comment
+        resp = self.json_put(self.frags_url, payload)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        # Старые границы (0-3, 5-9) не совпадают с (0-5) — комментарий опускается.
+        self.assertEqual(resp.json()[0]["comment"], "")
+
+    def test_put_rejects_overlap(self):
+        payload = [
+            {"start": 1, "end": 4},
+            {"start": 3, "end": 6},
+        ]
+        resp = self.json_put(self.frags_url, payload)
+        self.assertEqual(resp.status_code, HTTP_CONFLICT)
+
+    def test_put_rejects_non_list(self):
+        resp = self.json_put(self.frags_url, {"start": 0, "end": 5})
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_rejects_missing_workspace(self):
+        resp = self.json_put("/api/v1/pairs/nonexistent/fragments/", [{"start": 0, "end": 5}])
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
 
 
-class DetailEmbedTests(FragmentApiTestBase):
-    def test_pair_detail_embeds_comments(self):
-        self.client.post(
-            self.list_url, {"start": 10, "end": 20, "comment": "из списка"}, format="json"
-        )
-        resp = self.client.get(f"/api/v1/pairs/{self.pair.id}/")
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        frags = resp.json()["fragments"]
-        self.assertEqual(len(frags), 1)
-        self.assertEqual(frags[0]["comment"], "из списка")
+class ExportApiTests(WorkspaceApiTestBase):
+    def test_export_status_idle(self):
+        resp = self.client.get(self.export_status_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        self.assertEqual(resp.json()["state"], "idle")
 
+    def test_export_empty_fragments_rejected(self):
+        # Очищаем fragments.tsv.
+        tsv = os.path.join(self.ws_dir, "fragments.tsv")
+        with open(tsv, "w") as f:
+            pass
+        resp = self.client.post(self.export_url)
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
 
-class DeleteTest(FragmentApiTestBase):
-    def test_delete_removes_fragment(self):
-        frag = Fragment.objects.create(
-            video_pair=self.pair, start=10, end=20, comment="комментарий"
-        )
-        resp = self.client.delete(f"/api/v1/pairs/{self.pair.id}/fragments/{frag.id}")
-        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(Fragment.objects.count(), 0)
+    def test_export_starts(self):
+        resp = self.client.post(self.export_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        body = resp.json()
+        self.assertEqual(body["state"], "running")

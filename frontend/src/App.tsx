@@ -1,16 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { listPairs } from "./api";
 import { PairList } from "./components/PairList";
-import { UploadForm } from "./components/UploadForm";
 import { CutEditor } from "./components/CutEditor";
-import type { VideoPair, VideoPairDetail } from "./types";
+import type { VideoPair } from "./types";
 
-type Screen = "list" | "upload" | "editor";
+type Screen = "list" | "editor";
 
 export function App() {
   const [screen, setScreen] = useState<Screen>("list");
   const [pairs, setPairs] = useState<VideoPair[]>([]);
-  const [pairId, setPairId] = useState<number | null>(null);
+  const [pairId, setPairId] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     listPairs().then(setPairs).catch(console.error);
@@ -20,23 +19,8 @@ export function App() {
     reload();
   }, [reload]);
 
-  const onCreated = (pair: VideoPairDetail) => {
-    reload();
-    setPairId(pair.id);
-    setScreen("editor");
-  };
-
   if (screen === "editor" && pairId !== null) {
     return <CutEditor pairId={pairId} onBack={() => setScreen("list")} />;
-  }
-
-  if (screen === "upload") {
-    return (
-      <>
-        <UploadForm onCreated={onCreated} />
-        <button className="back" onClick={() => setScreen("list")}>← Назад</button>
-      </>
-    );
   }
 
   return (
@@ -46,7 +30,6 @@ export function App() {
         setPairId(id);
         setScreen("editor");
       }}
-      onUpload={() => setScreen("upload")}
     />
   );
 }

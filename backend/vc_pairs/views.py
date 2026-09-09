@@ -1,89 +1,68 @@
 # -*- coding: utf-8 -*-
-from django.http import HttpResponse, Http404, StreamingHttpResponse
-from rest_framework import viewsets, status
-from rest_framework.decorators import action
-from rest_framework.response import Response
+"""Workspace views: список, детали, кадры, метаданные.
 
-from . import frame_provider
-from .models import VideoPair
-from .serializers import (
-    VideoPairCreateSerializer,
-    VideoPairListSerializer,
-    VideoPairDetailSerializer,
-)
+Никакой БД и никакого DRF — всё через workspace.py + frame_provider.
+"""
+
+from django.http import HttpResponse, JsonResponse
+from django.views.decorators.http import require_GET
+
+from vc_pairs import frame_provider
+from workspace import get_workspace, get_workspace_detail, list_workspaces
 
 
-class VideoPairViewSet(viewsets.ModelViewSet):
-    queryset = VideoPair.objects.all().order_by("-id")
-    http_method_names = ["get", "post", "delete", "head", "options"]
+def _ws_404(name: str) -> JsonResponse:
+    return JsonResponse({"error": f"Workspace '{name}' не найден"}, status=404)
 
-    def get_serializer_class(self):
-        if self.action == "create":
-            return VideoPairCreateSerializer
-        if self.action == "retrieve":
-            return VideoPairDetailSerializer
-        return VideoPairListSerializer
 
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        obj = serializer.save()
+@require_GET
+def workspace_list(request):
+    """GET — список всех workspace-ов (метаданные без фрагментов)."""
+    return JsonResponse(list_workspaces(), safe=False)
 
-        original_path = obj.original.path
-        try:
-            meta = frame_provider.get_metadata(original_path)
-        except ValueError as e:
-            obj.delete()
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        obj.total_frames = meta["total_frames"]
-        obj.width = meta["width"]
-        obj.height = meta["height"]
-        obj.fps = meta["fps"]
-        obj.original_name = obj.original.name.split("/")[-1]
-        if obj.visualization:
-            v_meta = frame_provider.get_metadata(obj.visualization.path)
-            obj.visualization_name = obj.visualization.name.split("/")[-1]
-            if v_meta["total_frames"] != obj.total_frames:
-                obj.delete()
-                return Response(
-                    {
-                        "error": (
-                            "Число кадров исходника и визуализации различается: "
-                            f"{obj.total_frames} vs {v_meta['total_frames']}"
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        else:
-            obj.visualization_name = ""
-        obj.save()
+@require_GET
+def workspace_detail(request, workspace_id: str):
+    """GET — полный detail workspace (метаданные + фрагменты)."""
+    data = get_workspace_detail(workspace_id)
+    if data is None:
+        return _ws_404(workspace_id)
+    return JsonResponse(data)
 
-        return Response(
-            VideoPairDetailSerializer(obj).data,
-            status=status.HTTP_201_CREATED,
+
+@require_GET
+def workspace_frame(request, workspace_id: str, index: int):
+    """Возвращает JPEG кадра по индексу (0-based)."""
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        return _ws_404(workspace_id)
+
+    kind = request.GET.get("video", "visualization")
+    path = ws.original if kind == "original" else (ws.visualization or ws.original)
+    if not path:
+        return JsonResponse({"error": "Видео не найдено в workspace"}, status=404)
+
+    jpeg, mime = frame_provider.get_frame_jpeg(path, int(index))
+    if jpeg is None:
+        meta = ws.metadata()
+        return JsonResponse(
+            {"error": f"Кадр {index} недоступен (всего кадров: {meta['total_frames']})"},
+            status=404,
         )
+    return HttpResponse(jpeg, content_type=mime)
 
-    @action(detail=True, methods=["get"], url_path="frame/(?P<index>[0-9]+)")
-    def frame(self, request, pk=None, index=None):
-        """Возвращает JPEG кадра по индексу (0-based)."""
-        obj = self.get_object()
-        index = int(index)
-        video = request.query_params.get("video", "visualization")
 
-        if video == "original" and obj.original:
-            path = obj.original.path
-        else:
-            # Просмотр идёт по визуализации; если её нет — по оригиналу.
-            path = (obj.visualization or obj.original).path
-
-        jpeg, mime = frame_provider.get_frame_jpeg(path, index)
-        if jpeg is None:
-            raise Http404(f"Кадр {index} недоступен (всего кадров: {obj.total_frames})")
-        return HttpResponse(jpeg, content_type=mime)
-
-    @action(detail=True, methods=["get"], url_path="meta")
-    def meta(self, request, pk=None):
-        """Метаданные пары (в т.ч. уже сохранённые)."""
-        obj = self.get_object()
-        return Response(VideoPairDetailSerializer(obj).data)
+@require_GET
+def workspace_meta(request, workspace_id: str):
+    """Метаданные workspace (без фрагментов)."""
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        return _ws_404(workspace_id)
+    meta = ws.metadata()
+    return JsonResponse({
+        "id": workspace_id,
+        "total_frames": meta["total_frames"],
+        "width": meta["width"],
+        "height": meta["height"],
+        "fps": meta["fps"],
+    })

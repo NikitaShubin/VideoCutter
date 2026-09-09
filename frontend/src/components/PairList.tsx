@@ -2,17 +2,15 @@ import type { VideoPair } from "../types";
 
 interface Props {
   pairs: VideoPair[];
-  onSelect: (id: number) => void;
-  onUpload: () => void;
+  onSelect: (id: string) => void;
 }
 
-export function PairList({ pairs, onSelect, onUpload }: Props) {
+export function PairList({ pairs, onSelect }: Props) {
   return (
     <div className="pair-list">
-      <h2>Видео-пары</h2>
-      <button onClick={onUpload}>Загрузить пару</button>
+      <h2>Рабочие пространства</h2>
       <ul>
-        {pairs.length === 0 && <li className="empty">Пока нет пар.</li>}
+        {pairs.length === 0 && <li className="empty">Пока нет workspace-ов.</li>}
         {pairs.map((p) => (
           <li key={p.id}>
             <button onClick={() => onSelect(p.id)}>

@@ -1,221 +1,184 @@
 # -*- coding: utf-8 -*-
+"""Fragment views: TSV-based (никакой БД, никакого DRF).
+
+Фрагменты хранятся как fragments.tsv в директории workspace.
+"""
+
+import json
 import os
 import threading
 
-from django.conf import settings
-from django.http import FileResponse, Http404
-from django.shortcuts import get_object_or_404
-from rest_framework import status
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
+from django.http import FileResponse, JsonResponse
+from django.views.decorators.http import require_GET, require_http_methods
 
 from videocutter.core.exporter import Exporter, FFmpegError
+from workspace import get_workspace
 
-from vc_pairs.models import VideoPair
-from .models import Fragment
-from .serializers import FragmentSerializer
 
-# Прогресс экспортов в памяти процесса: pair_id -> {"state": ..., ...}.
-# Подходит для dev-сервера / одного worker-а; поток обновляет dict.
-EXPORTS: dict[int, dict] = {}
+# Прогресс экспортов в памяти процесса: workspace_id -> {"state": ...}.
+EXPORTS: dict[str, dict] = {}
 EXPORTS_LOCK = threading.Lock()
 
 
-def _export_finished_ok(pair_id: int, created: list[str]) -> None:
+def _export_finished_ok(ws_id: str, created: list[str]) -> None:
     urls = []
     for i, path in enumerate(created, 1):
         filename = os.path.basename(path)
-        urls.append(
-            {
-                "index": i,
-                "filename": filename,
-                "url": f"/api/v1/pairs/{pair_id}/export/{filename}",
-            }
-        )
+        urls.append({
+            "index": i,
+            "filename": filename,
+            "url": f"/api/v1/pairs/{ws_id}/export/{filename}",
+        })
     with EXPORTS_LOCK:
-        EXPORTS[pair_id] = {"state": "done", "files": urls}
+        EXPORTS[ws_id] = {"state": "done", "files": urls}
 
 
-def _export_failed(pair_id: int, message: str) -> None:
+def _export_failed(ws_id: str, message: str) -> None:
     with EXPORTS_LOCK:
-        EXPORTS[pair_id] = {"state": "error", "error": message}
+        EXPORTS[ws_id] = {"state": "error", "error": message}
 
 
-def _run_export(pair_id: int) -> None:
-    """Выполняет нарезку фрагментов в фоне, обновляя прогресс в EXPORTS."""
+def _run_export(ws_id: str) -> None:
+    """Выполняет нарезку фрагментов в фоне."""
     try:
-        pair = get_object_or_404(VideoPair, pk=pair_id)
-        qs = Fragment.objects.filter(video_pair=pair).order_by("start")
-        out_dir = os.path.join(settings.VC_EXPORT_ROOT, str(pair.id))
+        ws = get_workspace(ws_id)
+        if ws is None:
+            _export_failed(ws_id, f"Workspace '{ws_id}' не найден")
+            return
+
+        frags = ws.load_fragments()
+        if not frags:
+            _export_failed(ws_id, "Нет фрагментов для экспорта")
+            return
+
+        out_dir = os.path.join(ws.path, "exports")
         os.makedirs(out_dir, exist_ok=True)
 
-        exporter = Exporter(pair.original.path, out_dir)
-        fragments = [(f.start, f.end) for f in qs]
+        exporter = Exporter(ws.original, out_dir)
+        fragments = [(f["start"], f["end"]) for f in frags]
         total = len(fragments)
 
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
             with EXPORTS_LOCK:
-                EXPORTS[pair_id] = {
+                EXPORTS[ws_id] = {
                     "state": "running",
                     "index": fragment_ind,
                     "total": total,
                 }
 
         created = exporter.extract_fragments(fragments, progress=progress)
-        _export_finished_ok(pair_id, created)
+        _export_finished_ok(ws_id, created)
     except FFmpegError as e:
-        _export_failed(pair_id, str(e))
-    except Exception as e:  # localStorage/файловые ошибки — текст клиенту
-        _export_failed(pair_id, str(e))
+        _export_failed(ws_id, str(e))
+    except Exception as e:
+        _export_failed(ws_id, str(e))
 
 
-@api_view(["GET", "POST"])
-def fragment_list(request, pair_id: int):
-    """GET — список фрагментов пары; POST — добавить один фрагмент (body{start,end})."""
-    pair = get_object_or_404(VideoPair, pk=pair_id)
+@require_http_methods(["GET", "PUT"])
+def fragments(request, pair_id: str):
+    """GET — список фрагментов; PUT — заменить весь список (list of {start,end,comment?})."""
+    ws = get_workspace(pair_id)
+    if ws is None:
+        return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
+
     if request.method == "GET":
-        qs = Fragment.objects.filter(video_pair=pair).order_by("start")
-        return Response(FragmentSerializer(qs, many=True).data)
+        return JsonResponse(ws.load_fragments(), safe=False)
 
-    data = {
-        "video_pair": pair_id,
-        "start": request.data.get("start"),
-        "end": request.data.get("end"),
-        "comment": request.data.get("comment", ""),
-    }
-    ser = FragmentSerializer(data=data)
-    ser.is_valid(raise_exception=True)
+    # PUT: замена списка фрагментов.
+    try:
+        items = json.loads(request.body or "null")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Некорректный JSON"}, status=400)
 
-    # Защита от пересечений и выходов за границы кадров.
-    if not (0 <= data["start"] <= data["end"] < pair.total_frames):
-        return Response(
-            {"error": f"Фрагмент вне диапазона кадров [0, {pair.total_frames})"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    existing = Fragment.objects.filter(video_pair=pair)
-    for f in existing:
-        if not (data["end"] < f.start or data["start"] > f.end):
-            return Response(
-                {"error": f"Фрагмент пересекается с уже существующим [{f.start}, {f.end}]"},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-    frag = Fragment.objects.create(
-        video_pair=pair,
-        start=data["start"],
-        end=data["end"],
-        comment=data["comment"],
-    )
-    return Response(FragmentSerializer(frag).data, status=status.HTTP_201_CREATED)
-
-
-@api_view(["PUT"])
-def fragment_replace(request, pair_id: int):
-    """Заменяет весь список фрагментов пары на переданный (body: list of {start,end})."""
-    pair = get_object_or_404(VideoPair, pk=pair_id)
-    items = request.data
     if not isinstance(items, list):
-        return Response({"error": "Ожидался список фрагментов"}, status=status.HTTP_400_BAD_REQUEST)
+        return JsonResponse({"error": "Ожидался список фрагментов"}, status=400)
+
+    meta = ws.metadata()
+    total_frames = meta["total_frames"]
+
+    # Читаем старые комментарии для обратной совместимости.
+    old_comments = {(f["start"], f["end"]): f.get("comment", "") for f in ws.load_fragments()}
 
     clean = []
-    old_comments = {
-        (f.start, f.end): f.comment
-        for f in Fragment.objects.filter(video_pair=pair)
-    }
     for item in items:
+        if not isinstance(item, dict):
+            return JsonResponse({"error": f"Неверный фрагмент: {item}"}, status=400)
         try:
             start, end = int(item["start"]), int(item["end"])
         except (KeyError, TypeError, ValueError):
-            return Response(
-                {"error": f"Неверный фрагмент: {item}"},
-                status=status.HTTP_400_BAD_REQUEST,
+            return JsonResponse({"error": f"Неверный фрагмент: {item}"}, status=400)
+        if start < 0 or (total_frames > 0 and end >= total_frames) or start > end:
+            return JsonResponse(
+                {"error": f"Фрагмент {start}-{end} вне диапазона [0, {total_frames})"},
+                status=400,
             )
-        if start < 0 or end >= pair.total_frames or start > end:
-            return Response(
-                {"error": f"Фрагмент {start}-{end} вне диапазона [0, {pair.total_frames})"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if isinstance(item, dict) and "comment" in item:
-            comment = item["comment"]
+        if "comment" in item and item["comment"] is not None:
+            comment = str(item["comment"])
         else:
             comment = old_comments.get((start, end), "")
-        clean.append((start, end, comment or ""))
+        clean.append({"start": start, "end": end, "comment": comment})
 
-    # Проверка пересечений после сортировки.
-    clean.sort(key=lambda x: (x[0], x[1]))
+    # Проверка пересечений.
+    clean.sort(key=lambda x: (x["start"], x["end"]))
     for i in range(1, len(clean)):
-        if clean[i][0] <= clean[i - 1][1]:
-            return Response(
-                {"error": "Фрагменты пересекаются"},
-                status=status.HTTP_409_CONFLICT,
-            )
+        if clean[i]["start"] <= clean[i - 1]["end"]:
+            return JsonResponse({"error": "Фрагменты пересекаются"}, status=409)
 
-    Fragment.objects.filter(video_pair=pair).delete()
-    Fragment.objects.bulk_create(
-        [
-            Fragment(video_pair=pair, start=s, end=e, comment=c)
-            for s, e, c in clean
-        ]
-    )
-    return Response(FragmentSerializer(Fragment.objects.filter(video_pair=pair), many=True).data)
+    ws.save_fragments(clean)
+    return JsonResponse(clean, safe=False)
 
 
-@api_view(["DELETE"])
-def fragment_delete(request, pair_id: int, frag_id: int):
-    frag = get_object_or_404(Fragment, pk=frag_id, video_pair_id=pair_id)
-    frag.delete()
-    return Response(status=status.HTTP_204_NO_CONTENT)
+@require_http_methods(["POST"])
+def fragment_export(request, pair_id: str):
+    """Запускает ffmpeg-нарезку в фоне; прогресс — через status."""
+    ws = get_workspace(pair_id)
+    if ws is None:
+        return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
 
-
-@api_view(["POST"])
-def fragment_export(request, pair_id: int):
-    """Запускает ffmpeg-нарезку оригиналов в фоне; прогресс — через status.
-
-    Возвращает {"state":"running","index":0,"total":N}. Результат
-    запрашивается GET /export/status/ (файлы + состояние done/error).
-    """
-    pair = get_object_or_404(VideoPair, pk=pair_id)
-    qs = Fragment.objects.filter(video_pair=pair).order_by("start")
-    if not qs.exists():
-        return Response({"error": "Нет фрагментов для экспорта"}, status=status.HTTP_400_BAD_REQUEST)
+    frags = ws.load_fragments()
+    if not frags:
+        return JsonResponse({"error": "Нет фрагментов для экспорта"}, status=400)
 
     with EXPORTS_LOCK:
         current = EXPORTS.get(pair_id)
         if current and current["state"] == "running":
-            return Response(
-                {"error": "Экспорт уже выполняется для этой пары"},
-                status=status.HTTP_409_CONFLICT,
+            return JsonResponse(
+                {"error": "Экспорт уже выполняется для этого workspace"},
+                status=409,
             )
-        EXPORTS[pair_id] = {"state": "running", "index": 0, "total": len(qs)}
+        EXPORTS[pair_id] = {"state": "running", "index": 0, "total": len(frags)}
 
     threading.Thread(target=_run_export, args=(pair_id,), daemon=True).start()
-    return Response({"state": "running", "index": 0, "total": len(qs)})
+    return JsonResponse({"state": "running", "index": 0, "total": len(frags)})
 
 
-@api_view(["GET"])
-def fragment_export_status(request, pair_id: int):
-    """Текущий статус экспорта пары: running (index/total) или done/error."""
+@require_GET
+def fragment_export_status(request, pair_id: str):
+    """Текущий статус экспорта."""
     with EXPORTS_LOCK:
         state = EXPORTS.get(pair_id)
     if not state:
-        return Response({"state": "idle"})
+        return JsonResponse({"state": "idle"})
     if "files" in state:
-        return Response({"state": "done", "files": state["files"]})
+        return JsonResponse({"state": "done", "files": state["files"]})
     if state["state"] == "error":
-        return Response({"state": "error", "error": state.get("error", "Ошибка экспорта")})
-    return Response({
+        return JsonResponse({"state": "error", "error": state.get("error", "Ошибка экспорта")})
+    return JsonResponse({
         "state": "running",
         "index": state.get("index", 0),
         "total": state.get("total", 1),
     })
 
 
-@api_view(["GET"])
-def fragment_export_download(request, pair_id: int, path: str):
-    """Скачивает экспортированный фрагмент (файлы уже сгенерированы)."""
-    pair = get_object_or_404(VideoPair, pk=pair_id)
-    base = os.path.abspath(settings.VC_EXPORT_ROOT)
-    full = os.path.abspath(os.path.join(base, str(pair.id), path))
-    if not full.startswith(os.path.join(base, str(pair.id))) or not os.path.isfile(full):
-        raise Http404("Файл не найден")
+@require_GET
+def fragment_export_download(request, pair_id: str, path: str):
+    """Скачивает экспортированный фрагмент."""
+    ws = get_workspace(pair_id)
+    if ws is None:
+        return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
+
+    base = os.path.join(ws.path, "exports")
+    full = os.path.abspath(os.path.join(base, path))
+    if not full.startswith(os.path.abspath(base)) or not os.path.isfile(full):
+        return JsonResponse({"error": "Файл не найден"}, status=404)
     return FileResponse(open(full, "rb"), as_attachment=True, filename=os.path.basename(full))
