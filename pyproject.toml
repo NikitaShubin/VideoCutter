@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "videocutter"
+version = "0.1.0"
+description = "Сервис покадровой селекции фрагментов видео (ядро VideoCutter)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python",
+]
+
+[project.optional-dependencies]
+web = [
+    "Django>=4.2",
+    "djangorestframework",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["videocutter*"]

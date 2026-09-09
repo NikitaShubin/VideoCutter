@@ -1,0 +1,11 @@
+backend/vc_media
+backend/static
+backend/db.sqlite3
+frontend
+**/__pycache__
+*.pyc
+*.pyo
+*/*.egg-info
+.venv
+venv
+.env

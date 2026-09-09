@@ -1,0 +1,250 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #1e1e2e;
+  color: #e0e0e0;
+}
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 8px;
+  gap: 8px;
+}
+
+.editor.fullscreen {
+  padding: 0;
+  gap: 4px;
+  background: #000;
+}
+
+.editor.fullscreen .video-area {
+  border-radius: 0;
+}
+
+.editor.fullscreen .statusbar {
+  border-radius: 0;
+}
+
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  background: #2a2a3e;
+  border-radius: 6px;
+}
+
+.editor-toolbar button {
+  padding: 4px 10px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #3a3a52;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+.editor-toolbar button:hover {
+  background: #4a4a66;
+}
+
+.editor-toolbar button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.pair-name {
+  font-weight: 600;
+}
+
+.info {
+  color: #9a9ab0;
+  font-size: 0.85em;
+}
+
+.video-area {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.video-area img {
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.statusbar {
+  width: 100%;
+  height: 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: #2ecc40;
+}
+
+.editor-comment {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  max-width: 60%;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.65);
+  border-radius: 6px;
+  font-size: 0.9em;
+}
+
+.editor-comment .comment-text {
+  color: #c8c8d8;
+  white-space: pre-wrap;
+}
+
+.editor-comment textarea {
+  width: 300px;
+  max-width: 50vw;
+  min-height: 56px;
+  resize: vertical;
+  background: #1e1e2e;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 6px;
+  font: inherit;
+}
+
+.editor-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: #6a6a80;
+  font-size: 0.8em;
+}
+
+.flash {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  padding: 8px 14px;
+  background: #2e8b57;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.error {
+  color: #ff6b6b;
+  margin-top: 8px;
+}
+
+.loading {
+  padding: 24px;
+  text-align: center;
+  color: #9a9ab0;
+}
+
+/* Список пар */
+.pair-list,
+.upload {
+  max-width: 720px;
+  margin: 40px auto;
+  padding: 24px;
+  background: #2a2a3e;
+  border-radius: 10px;
+}
+
+.pair-list h2,
+.upload h2 {
+  margin-top: 0;
+}
+
+.pair-list ul {
+  list-style: none;
+  padding: 0;
+}
+
+.pair-list li {
+  margin-bottom: 6px;
+}
+
+.pair-list li button {
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #3a3a52;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+.pair-list li button:hover {
+  background: #4a4a66;
+}
+
+.pair-list li.empty {
+  color: #6a6a80;
+  padding: 12px;
+}
+
+.upload label {
+  display: block;
+  margin-bottom: 12px;
+  color: #b0b0c0;
+}
+
+.upload input[type="file"] {
+  display: block;
+  margin-top: 4px;
+}
+
+.upload button[type="submit"] {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  background: #2e8b57;
+  color: #fff;
+  cursor: pointer;
+}
+
+.upload button[type="submit"]:disabled {
+  opacity: 0.6;
+}
+
+.back {
+  display: block;
+  margin: 0 auto;
+  padding: 6px 14px;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #3a3a52;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+.export-list {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  max-width: 320px;
+  padding: 12px;
+  background: #2a2a3e;
+  border-radius: 8px;
+}
+
+.export-list h3 {
+  margin-top: 0;
+  font-size: 0.95em;
+}
+
+.export-list a {
+  color: #7fb2ff;
+}
