@@ -1,5 +1,5 @@
 import type {
-  ExportResponse,
+  ExportStatus,
   Fragment,
   VideoPair,
   VideoPairDetail,
@@ -63,8 +63,14 @@ export function replaceFragments(
   }).then((r) => json<Fragment[]>(r));
 }
 
-export function exportFragments(pairId: number): Promise<ExportResponse> {
+export function startExport(pairId: number): Promise<ExportStatus> {
   return fetch(`${BASE}/pairs/${pairId}/export`, { method: "POST" }).then((r) =>
-    json<ExportResponse>(r),
+    json<ExportStatus>(r),
+  );
+}
+
+export function getExportStatus(pairId: number): Promise<ExportStatus> {
+  return fetch(`${BASE}/pairs/${pairId}/export/status`).then((r) =>
+    json<ExportStatus>(r),
   );
 }

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import threading
 
 from django.conf import settings
 from django.http import FileResponse, Http404
@@ -13,6 +14,59 @@ from videocutter.core.exporter import Exporter, FFmpegError
 from vc_pairs.models import VideoPair
 from .models import Fragment
 from .serializers import FragmentSerializer
+
+# Прогресс экспортов в памяти процесса: pair_id -> {"state": ..., ...}.
+# Подходит для dev-сервера / одного worker-а; поток обновляет dict.
+EXPORTS: dict[int, dict] = {}
+EXPORTS_LOCK = threading.Lock()
+
+
+def _export_finished_ok(pair_id: int, created: list[str]) -> None:
+    urls = []
+    for i, path in enumerate(created, 1):
+        filename = os.path.basename(path)
+        urls.append(
+            {
+                "index": i,
+                "filename": filename,
+                "url": f"/api/v1/pairs/{pair_id}/export/{filename}",
+            }
+        )
+    with EXPORTS_LOCK:
+        EXPORTS[pair_id] = {"state": "done", "files": urls}
+
+
+def _export_failed(pair_id: int, message: str) -> None:
+    with EXPORTS_LOCK:
+        EXPORTS[pair_id] = {"state": "error", "error": message}
+
+
+def _run_export(pair_id: int) -> None:
+    """Выполняет нарезку фрагментов в фоне, обновляя прогресс в EXPORTS."""
+    try:
+        pair = get_object_or_404(VideoPair, pk=pair_id)
+        qs = Fragment.objects.filter(video_pair=pair).order_by("start")
+        out_dir = os.path.join(settings.VC_EXPORT_ROOT, str(pair.id))
+        os.makedirs(out_dir, exist_ok=True)
+
+        exporter = Exporter(pair.original.path, out_dir)
+        fragments = [(f.start, f.end) for f in qs]
+        total = len(fragments)
+
+        def progress(fragment_ind: int, _total: int, _fragment) -> None:
+            with EXPORTS_LOCK:
+                EXPORTS[pair_id] = {
+                    "state": "running",
+                    "index": fragment_ind,
+                    "total": total,
+                }
+
+        created = exporter.extract_fragments(fragments, progress=progress)
+        _export_finished_ok(pair_id, created)
+    except FFmpegError as e:
+        _export_failed(pair_id, str(e))
+    except Exception as e:  # localStorage/файловые ошибки — текст клиенту
+        _export_failed(pair_id, str(e))
 
 
 @api_view(["GET", "POST"])
@@ -115,37 +169,45 @@ def fragment_delete(request, pair_id: int, frag_id: int):
 
 @api_view(["POST"])
 def fragment_export(request, pair_id: int):
-    """Запускает ffmpeg-нарезку оригиналов по всем фрагментам пары.
+    """Запускает ffmpeg-нарезку оригиналов в фоне; прогресс — через status.
 
-    Результат сохраняется на сервере в VC_EXPORT_ROOT/{pair_id}/.
-    Возвращает список файлов с относительными URL для скачивания.
+    Возвращает {"state":"running","index":0,"total":N}. Результат
+    запрашивается GET /export/status/ (файлы + состояние done/error).
     """
     pair = get_object_or_404(VideoPair, pk=pair_id)
     qs = Fragment.objects.filter(video_pair=pair).order_by("start")
     if not qs.exists():
         return Response({"error": "Нет фрагментов для экспорта"}, status=status.HTTP_400_BAD_REQUEST)
 
-    out_dir = os.path.join(settings.VC_EXPORT_ROOT, str(pair.id))
-    os.makedirs(out_dir, exist_ok=True)
+    with EXPORTS_LOCK:
+        current = EXPORTS.get(pair_id)
+        if current and current["state"] == "running":
+            return Response(
+                {"error": "Экспорт уже выполняется для этой пары"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        EXPORTS[pair_id] = {"state": "running", "index": 0, "total": len(qs)}
 
-    exporter = Exporter(pair.original.path, out_dir)
-    fragments = [(f.start, f.end) for f in qs]
-    try:
-        created = exporter.extract_fragments(fragments)
-    except FFmpegError as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    threading.Thread(target=_run_export, args=(pair_id,), daemon=True).start()
+    return Response({"state": "running", "index": 0, "total": len(qs)})
 
-    urls = []
-    for i, path in enumerate(created, 1):
-        filename = os.path.basename(path)
-        urls.append(
-            {
-                "index": i,
-                "filename": filename,
-                "url": f"/api/v1/pairs/{pair.id}/export/{filename}",
-            }
-        )
-    return Response({"files": urls})
+
+@api_view(["GET"])
+def fragment_export_status(request, pair_id: int):
+    """Текущий статус экспорта пары: running (index/total) или done/error."""
+    with EXPORTS_LOCK:
+        state = EXPORTS.get(pair_id)
+    if not state:
+        return Response({"state": "idle"})
+    if "files" in state:
+        return Response({"state": "done", "files": state["files"]})
+    if state["state"] == "error":
+        return Response({"state": "error", "error": state.get("error", "Ошибка экспорта")})
+    return Response({
+        "state": "running",
+        "index": state.get("index", 0),
+        "total": state.get("total", 1),
+    })
 
 
 @api_view(["GET"])

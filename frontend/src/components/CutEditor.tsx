@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  exportFragments,
   frameUrl,
+  getExportStatus,
   getPair,
   replaceFragments,
+  startExport,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
 import type { ExportItem, VideoPairDetail } from "../types";
@@ -24,6 +25,7 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [exportItems, setExportItems] = useState<ExportItem[] | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
@@ -122,19 +124,23 @@ export function CutEditor({ pairId, onBack }: Props) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // start_frame2sb_axis = np.fix((width-1)*frame/total) (floor для позитивных).
-    const sbX = (frame: number) => Math.floor((width - 1) * frame / p.totalFrames);
+    // Билинейная обратимая пара: [0,total-1] -> [0,width-1].
+    // (width-1)*frame/total не достигает последнего пикселя при последнем кадре;
+    // оригинал для позиции использовал int(width*position/total) — без "-1".
+    const span = Math.max(1, p.totalFrames - 1);
+    const sbX = (frame: number) => Math.round(frame * (width - 1) / span);
 
     // Фон — зелёный (BGR (0,255,0)).
     ctx.fillStyle = "#00ff00";
     ctx.fillRect(0, 0, width, height);
 
-    // Фрагменты — красные (BGR (255,0,0)).
+    // Фрагменты — красные (BGR (255,0,0)). Правая граница включительно,
+    // чтобы последний кадр доходил до правого края canvas.
     ctx.fillStyle = "#ff0000";
     for (const f of p.fragments) {
       const x = sbX(f.start);
       const endX = sbX(f.end);
-      ctx.fillRect(x, 0, endX - x, height);
+      ctx.fillRect(x, 0, Math.max(1, endX - x + 1), height);
     }
 
     // Затемнение от текущей позиции до конца (sb[:, current_shift:, :] //= 2).
@@ -274,64 +280,67 @@ export function CutEditor({ pairId, onBack }: Props) {
       const p = modelRef.current;
       if (!p) return;
       const k = e.key;
+      const code = e.code;
       const ctrl = e.ctrlKey || e.metaKey;
+      // Физическая клавиша: кнопка не зависит от раскладки (KeyR ~ R на любой раскладке).
+      const is = (physical: string) => code === physical || k === physical;
 
       const isEditing = (e.target as HTMLElement)?.tagName === "INPUT" || (e.target as HTMLElement)?.tagName === "TEXTAREA";
       if (isEditing) return;
 
       // Навигация.
-      if ((ctrl && k === "ArrowRight") || (ctrl && k === ">") || (ctrl && k === ".")) {
+      if (ctrl && (is("ArrowRight") || is("Period"))) {
         setPlaying(false);
         setPosition((pos) => Math.min(p.totalFrames - 1, pos + SEEK_STEP));
-      } else if ((ctrl && k === "ArrowLeft") || (ctrl && k === "<") || (ctrl && k === ",")) {
+      } else if (ctrl && (is("ArrowLeft") || is("Comma"))) {
         setPlaying(false);
         setPosition((pos) => Math.max(0, pos - SEEK_STEP));
-      } else if (k === "ArrowRight" || k === ">" || k === ".") {
+      } else if (is("ArrowRight") || is("Period")) {
         setPlaying(false);
         setPosition((pos) => Math.min(p.totalFrames - 1, pos + 1));
-      } else if (k === "ArrowLeft" || k === "<" || k === ",") {
+      } else if (is("ArrowLeft") || is("Comma")) {
         setPlaying(false);
         setPosition((pos) => Math.max(0, pos - 1));
-      } else if (k === "PageDown") {
+      } else if (is("PageDown")) {
         e.preventDefault();
         setPlaying(false);
         jump(1);
-      } else if (k === "PageUp") {
+      } else if (is("PageUp")) {
         e.preventDefault();
         setPlaying(false);
         jump(-1);
-      } else if (k === "Home") {
+      } else if (is("Home")) {
         setPlaying(false);
         setPosition(0);
-      } else if (k === "End") {
+      } else if (is("End")) {
         setPlaying(false);
         setPosition(p.totalFrames - 1);
-      } else if (k === " " || k === "Spacebar") {
+      } else if (is(" ") || is("Space") || is("Spacebar")) {
         e.preventDefault();
         setPlaying((v) => !v);
-      } else if (k === "r" || k === "R") {
+      } else if (is("KeyR")) {
         setDirection((d) => (d === 1 ? -1 : 1));
-      } else if (k === "j" || k === "J") {
+      } else if (is("KeyJ")) {
         jump(direction);
-      } else if (/^[0-9]$/.test(k)) {
-        setSpeed(Math.pow(2, parseInt(k, 10)));
-      } else if (k === "f" || k === "F") {
+      } else if (/^Digit[0-9]$/.test(code)) {
+        setSpeed(Math.pow(2, parseInt(code.slice(5), 10)));
+      } else if (is("KeyF")) {
         toggleFullscreen();
-      } else if (k === "Tab") {
+      } else if (is("Tab")) {
         e.preventDefault();
         setPreserveAspect((v) => !v);
       }
 
       // Отметка фрагментов.
-      else if (k === "ArrowUp" || k === "[") {
+      else if (is("ArrowUp") || is("BracketLeft")) {
         p.newStart(position);
         rerender();
         drawStatusbar();
-      } else if (k === "ArrowDown" || k === "]") {
+      } else if (is("ArrowDown") || is("BracketRight")) {
         p.newEnd(position);
         rerender();
         drawStatusbar();
-      } else if (k === "k" || k === "K" || k === "Insert" || k === "F12") {
+      } else if (is("KeyK") || is("Insert") || is("F12")) {
         if (keyPose === null) {
           if (p.fragments.some((f) => position >= f.start && position <= f.end)) {
             flash("Невозможно создать фрагмент внутри другого");
@@ -352,7 +361,7 @@ export function CutEditor({ pairId, onBack }: Props) {
             flash("Фрагмент пересекается с существующим");
           }
         }
-      } else if (k === "Delete" || k === "d" || k === "D") {
+      } else if (is("Delete") || is("KeyD")) {
         const res = p.delete(position);
         if (res === "ok" || res === "merged") {
           rerender();
@@ -362,21 +371,21 @@ export function CutEditor({ pairId, onBack }: Props) {
         } else if (res === "ambiguous") {
           flash("Текущий кадр — стык двух фрагментов. Переместите курсор.");
         }
-      } else if (k === "i" || k === "I") {
+      } else if (is("KeyI")) {
         startCommentEdit();
-      } else if (ctrl && (k === "z" || k === "Z")) {
+      } else if (ctrl && is("KeyZ")) {
         p.undo();
         rerender();
         drawStatusbar();
         saveToDb(p.getFragments());
-      } else if (k === "z" || k === "Z") {
+      } else if (is("KeyZ")) {
         p.redo();
         rerender();
         drawStatusbar();
         saveToDb(p.getFragments());
-      } else if (k === "e" || k === "E") {
+      } else if (is("KeyE")) {
         handleExport();
-      } else if (k === "Escape" || k === "q" || k === "Q") {
+      } else if (is("Escape") || is("KeyQ")) {
         if (!document.fullscreenElement) onBack();
       }
     };
@@ -393,14 +402,45 @@ export function CutEditor({ pairId, onBack }: Props) {
 
   const handleExport = async () => {
     setExporting(true);
+    setExportProgress(0);
+    const pollTimer = window.setInterval(async () => {
+      try {
+        const st = await getExportStatus(pairId);
+        if (st.state === "running") {
+          const total = st.total ?? 1;
+          setExportProgress((st.index ?? 0) / Math.max(1, total));
+        } else {
+          window.clearInterval(pollTimer);
+          setExporting(false);
+          setExportProgress(null);
+          if (st.state === "done") {
+            setExportItems(st.files ?? []);
+            flash(`Экспортировано фрагментов: ${st.files?.length ?? 0}`);
+          } else if (st.state === "error") {
+            flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
+          }
+        }
+      } catch (e) {
+        window.clearInterval(pollTimer);
+        setExporting(false);
+        setExportProgress(null);
+        flash(`Ошибка опроса экспорта: ${(e as Error).message}`);
+      }
+    }, 500);
     try {
-      const res = await exportFragments(pairId);
-      setExportItems(res.files);
-      flash(`Экспортировано фрагментов: ${res.files.length}`);
+      const st = await startExport(pairId);
+      if (st.state !== "running") {
+        window.clearInterval(pollTimer);
+        setExporting(false);
+        setExportProgress(null);
+        if (st.state === "error") flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
+        else flash("Экспорт не запущен");
+      }
     } catch (e) {
-      flash(`Ошибка экспорта: ${(e as Error).message}`);
-    } finally {
+      window.clearInterval(pollTimer);
       setExporting(false);
+      setExportProgress(null);
+      flash(`Ошибка экспорта: ${(e as Error).message}`);
     }
   };
 
@@ -420,10 +460,23 @@ export function CutEditor({ pairId, onBack }: Props) {
             кадр {position + 1}/{pair.total_frames} · показано {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
           </span>
           <span className="info">скорость: {speed}· {direction === -1 ? "[назад]" : "[вперёд]"}</span>
-          <button onClick={() => handleExport()} disabled={exporting}>
-            {exporting ? "Экспорт…" : "Экспорт (E)"}
+          <button
+            className="toolbar-export"
+            onClick={() => handleExport()}
+            disabled={exporting}
+          >
+            {exportProgress !== null && (
+              <span
+                className="toolbar-export-progress"
+                style={{ width: `${Math.round(exportProgress * 100)}%` }}
+              />
+            )}
+            <span className="toolbar-export-label">
+              {exportProgress !== null
+                ? `${Math.round(exportProgress * 100)}%`
+                : "Экспорт (E)"}
+            </span>
           </button>
-          <button onClick={onBack}>Выход</button>
         </div>
       )}
 
@@ -438,8 +491,8 @@ export function CutEditor({ pairId, onBack }: Props) {
           }}
         />
         {(!isFullscreen || editingComment) && (
-          <div className="editor-comment">
-            {editingComment ? (
+          editingComment ? (
+            <div className="editor-comment">
               <textarea
                 ref={commentRef}
                 rows={3}
@@ -457,12 +510,14 @@ export function CutEditor({ pairId, onBack }: Props) {
                 }}
                 onBlur={commitComment}
               />
-            ) : (
+            </div>
+          ) : modelRef.current?.fragmentAt(position)?.comment ? (
+            <div className="editor-comment">
               <span className="comment-text">
-                {modelRef.current?.fragmentAt(position)?.comment || "—"}
+                {modelRef.current?.fragmentAt(position)?.comment}
               </span>
-            )}
-          </div>
+            </div>
+          ) : null
         )}
       </div>
 
@@ -480,7 +535,7 @@ export function CutEditor({ pairId, onBack }: Props) {
           const pixel = Math.min(canvas.width - 1, Math.max(0, x));
           const target = Math.min(
             p.totalFrames - 1,
-            Math.round(pixel * p.totalFrames / (canvas.width - 1)),
+            Math.round(pixel * Math.max(1, p.totalFrames - 1) / (canvas.width - 1)),
           );
           setPlaying(false);
           setPosition(target);

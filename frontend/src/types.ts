@@ -33,6 +33,10 @@ export interface ExportItem {
   url: string;
 }
 
-export interface ExportResponse {
-  files: ExportItem[];
+export interface ExportStatus {
+  state: "idle" | "running" | "done" | "error";
+  index?: number;
+  total?: number;
+  files?: ExportItem[];
+  error?: string;
 }

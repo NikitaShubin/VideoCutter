@@ -59,6 +59,25 @@ body {
   cursor: default;
 }
 
+/* Кнопка-«статусбар» экспорта: заполняется пропорционально прогрессу. */
+.toolbar-export {
+  position: relative;
+  overflow: hidden;
+  min-width: 130px;
+}
+
+.toolbar-export .toolbar-export-progress {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #00c853;
+  opacity: 0.35;
+  transition: width 0.3s ease;
+}
+
+.toolbar-export .toolbar-export-label {
+  position: relative;
+}
+
 .pair-name {
   font-weight: 600;
 }
