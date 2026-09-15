@@ -12,13 +12,12 @@ import { HelpModal } from "./HelpModal";
 import {
   FrameScheduler,
   nextPlayPosition,
-  overlayStart,
   pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
   timelineFrame,
-  timelinePix,
 } from "../model/frameScheduler";
+import { paintStatusbar } from "../model/statusbar";
 import type { ExportItem, VideoPairDetail } from "../types";
 
 interface Props {
@@ -163,59 +162,21 @@ export function CutEditor({ pairId, onBack }: Props) {
   // Статус-бар (таймлайн). Воспроизводит draw_statusbar из PyVideoCutter:
   // зелёный фон, красные фрагменты, затемнение от позиции до конца,
   // выбранный диапазон добавляет синий канал (globalCompositeOperation).
+  // Отрисовка вынесена в чистый model/statusbar.ts (общий с превью списка).
   const drawStatusbar = useCallback(() => {
     const canvas = statusRef.current;
     const p = modelRef.current;
     if (!canvas || !p) return;
-    const width = canvas.width;
-    const height = canvas.height;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    // Фон — зелёный (BGR (0,255,0)).
-    ctx.fillStyle = "#00ff00";
-    ctx.fillRect(0, 0, width, height);
-
-    // Фрагменты — красные (BGR (255,0,0)). Правая граница включительно,
-    // чтобы последний кадр доходил до правого края canvas.
-    ctx.fillStyle = "#ff0000";
-    for (const f of p.fragments) {
-      const x = timelinePix(f.start, width, p.totalFrames);
-      const endX = timelinePix(f.end, width, p.totalFrames);
-      ctx.fillRect(x, 0, Math.max(1, endX - x + 1), height);
-    }
-
-    // Затемнение «после текущего кадра» (sb[:, current_shift:, :] //= 2):
-    // зона стартует на одну колонку правее позиции, поэтому пиксель текущего
-    // кадра никогда не затемняется — у конца сегмента его последний пиксель
-    // остаётся полностью красным (нет «недокраса»). Позиция кадра указывается
-    // отдельным маркером ниже, а не границей света/тени, поэтому тёмная зона
-    // не участвует в позиционировании и её сдвиг не «прилипает» к границе.
-    const curX = overlayStart(position, width, p.totalFrames);
-    ctx.fillStyle = "rgba(0,0,0,0.5)";
-    ctx.fillRect(curX, 0, width - curX, height);
-
-    // Выбранный диапазон (key pose → position): добавляем синий канал = 255,
-    // как в оригинале (sb[:, start:end, 0] = 255). "lighter" складывает каналы:
-    // зелёный → циан, красный → пурпурный.
-    if (keyPose !== null) {
-      const [s, e] = [Math.min(keyPose, position), Math.max(keyPose, position)];
-      const x = timelinePix(s, width, p.totalFrames);
-      const endX = timelinePix(e, width, p.totalFrames);
-      ctx.save();
-      ctx.globalCompositeOperation = "lighter";
-      ctx.fillStyle = "#0000ff";
-      ctx.fillRect(x, 0, endX - x, height);
-      ctx.restore();
-    }
-
-    // Маркер текущего кадра — тонкая линия отдельного цвета ровно на пикселе
-    // позиции (поверх всех слоёв). Тот же timelinePix, что и границы сегментов,
-    // поэтому при остановке на границе маркер стоит в одной колонке с ней
-    // (нет «недокраса»: граничный пиксель яркий, маркер виден на нём).
-    const cursorX = timelinePix(position, width, p.totalFrames);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(cursorX, 0, 1, height);
+    paintStatusbar(ctx, {
+      width: canvas.width,
+      height: canvas.height,
+      totalFrames: p.totalFrames,
+      fragments: p.fragments,
+      position,
+      keyPose,
+    });
   }, [keyPose, position]);
 
   useEffect(() => {

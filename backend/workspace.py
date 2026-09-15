@@ -235,12 +235,28 @@ def get_workspace(name: str) -> Optional[Workspace]:
         return _workspaces.get(name)
 
 
+def _workspace_updated_at(ws: Workspace) -> float:
+    """Время последней работы: mtime fragments.tsv, иначе mtime папки."""
+    tsv = ws.fragments_path()
+    try:
+        if os.path.isfile(tsv):
+            return os.path.getmtime(tsv)
+        return os.path.getmtime(ws.path)
+    except OSError:
+        return 0.0
+
+
 def list_workspaces() -> List[dict]:
-    """Возвращает список workspace-ов (метаданные без фрагментов)."""
+    """Возвращает список workspace-ов с фрагментами, позицией и временем правки.
+
+    Сортировка — по `updated_at` (свежее вверху): превью статус-бара в списке
+    и порядок «недавние сверху» опираются на эти же данные.
+    """
     ws_map = scan_workspaces()
     result = []
     for name, ws in ws_map.items():
         meta = ws.metadata()
+        frags = ws.load_fragments()
         result.append({
             "id": name,
             "original_name": os.path.basename(ws.original) if ws.original else "",
@@ -249,7 +265,11 @@ def list_workspaces() -> List[dict]:
             "width": meta["width"],
             "height": meta["height"],
             "fps": meta["fps"],
+            "fragments": frags,
+            "position": ws.load_position(),
+            "updated_at": _workspace_updated_at(ws),
         })
+    result.sort(key=lambda w: w["updated_at"], reverse=True)
     return result
 
 
@@ -272,4 +292,5 @@ def get_workspace_detail(name: str) -> Optional[dict]:
         "fps": meta["fps"],
         "fragments": frags,
         "position": ws.load_position(),
+        "updated_at": _workspace_updated_at(ws),
     }

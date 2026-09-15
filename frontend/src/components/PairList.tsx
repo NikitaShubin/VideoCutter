@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { deleteWorkspace, uploadWorkspace } from "../api";
 import type { VideoPair } from "../types";
+import { StatusbarPreview } from "./StatusbarPreview";
 
 interface Props {
   pairs: VideoPair[];
@@ -45,9 +46,10 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
     setError("");
     setProgress(0);
     try {
-      await uploadWorkspace(name.trim() || fileStem(file.name), file, setProgress);
+      const created = await uploadWorkspace(name.trim() || fileStem(file.name), file, setProgress);
       reset();
       onChanged();
+      onSelect(created.id); // сразу открываем на редактирование
     } catch (err) {
       setError((err as Error).message);
       setProgress(null);
@@ -124,7 +126,19 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
         {pairs.map((p) => (
           <li key={p.id}>
             <button className="pair-open" onClick={() => onSelect(p.id)}>
-              {p.original_name} · {p.visualization_name || ""} · {p.total_frames} кадров · {p.width}×{p.height}
+              <StatusbarPreview
+                className="pair-bg"
+                totalFrames={p.total_frames}
+                fragments={p.fragments}
+                position={p.position}
+              />
+              <span className="pair-label">
+                {p.original_name}
+                {p.visualization_name ? ` → ${p.visualization_name}` : ""}
+              </span>
+              <span className="pair-meta">
+                {p.total_frames} кадров · {p.width}×{p.height}
+              </span>
             </button>
             <button
               className="pair-delete"

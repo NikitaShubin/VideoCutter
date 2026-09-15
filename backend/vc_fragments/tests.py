@@ -94,6 +94,39 @@ class WorkspaceListTests(WorkspaceApiTestBase):
         ids = [w["id"] for w in resp.json()]
         self.assertIn(self.ws_id, ids)
 
+    def test_list_item_has_preview_data(self):
+        """Элемент списка несёт фрагменты/позицию/время правки — для превью."""
+        resp = self.client.get(self.ws_list_url)
+        item = next(w for w in resp.json() if w["id"] == self.ws_id)
+        self.assertEqual(len(item["fragments"]), 2)
+        self.assertEqual(item["position"], 0)
+        self.assertTrue(isinstance(item["updated_at"], (int, float)))
+        self.assertGreater(item["updated_at"], 0)
+
+    def test_list_sorted_by_updated_at_desc(self):
+        """Свежие правки (mtime fragments.tsv) — вверху списка."""
+        # Второй workspace без правок: старый mtime папки.
+        other = os.path.join(self._tmpdir, "old-ws")
+        os.makedirs(other, exist_ok=True)
+        shutil.copy2(self.video, os.path.join(other, "video.mp4"))
+        old = 1_000_000_000
+        os.utime(other, (old, old))
+
+        resp = self.client.get(self.ws_list_url)
+        items = resp.json()
+        ids = [w["id"] for w in items]
+        self.assertEqual(ids[0], self.ws_id)  # у него есть свежий fragments.tsv
+
+        # Обновляем mtime чужого TSV — он становится первым.
+        tsv = os.path.join(other, "fragments.tsv")
+        with open(tsv, "w") as f:
+            f.write("start\tend\tcomment\n0\t3\tx\n")
+        now = 2_000_000_000
+        os.utime(tsv, (now, now))
+        ids2 = [w["id"] for w in self.client.get(self.ws_list_url).json()]
+        self.assertEqual(ids2[0], "old-ws")
+        self.assertEqual(ids2[1], self.ws_id)
+
     def test_detail_shows_fragments(self):
         resp = self.client.get(self.ws_detail_url)
         self.assertEqual(resp.status_code, HTTP_OK)

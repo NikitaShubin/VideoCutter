@@ -20,7 +20,15 @@ export function App() {
   }, [reload]);
 
   if (screen === "editor" && pairId !== null) {
-    return <CutEditor pairId={pairId} onBack={() => setScreen("list")} />;
+    return (
+      <CutEditor
+        pairId={pairId}
+        onBack={() => {
+          setScreen("list");
+          reload(); // после правок обновляем статус-бар и порядок «недавние сверху»
+        }}
+      />
+    );
   }
 
   return (

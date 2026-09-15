@@ -12,12 +12,12 @@ export interface VideoPair {
   width: number;
   height: number;
   fps: number;
-}
-
-export interface VideoPairDetail extends VideoPair {
   fragments: Fragment[];
   position: number;
+  updated_at: number;
 }
+
+export interface VideoPairDetail extends VideoPair {}
 
 export interface ExportItem {
   index: number;
