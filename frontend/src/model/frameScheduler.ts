@@ -112,3 +112,20 @@ export function nextPlayPosition(
   if (next >= total) return { pos: total - 1, direction: -1, stop: true };
   return { pos: next, direction, stop: false };
 }
+
+// Ближайшая граница сегмента в направлении движения (J — «проиграть до
+// границы»). Границами считаются начала и концы фрагментов, а также края
+// видео. Строгое сравнение: уже стоя на границе, J уводит к следующей.
+export function segmentBoundaryForward(
+  position: number,
+  direction: 1 | -1,
+  keyframes: number[],
+  total: number,
+): number {
+  const ks = [0, ...keyframes.filter((k) => k > 0 && k < total - 1), total - 1];
+  if (direction === 1) {
+    return ks.find((f) => f > position) ?? total - 1;
+  }
+  const left = ks.filter((f) => f < position);
+  return left.length ? left[left.length - 1] : 0;
+}

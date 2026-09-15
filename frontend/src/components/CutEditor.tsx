@@ -12,6 +12,7 @@ import {
   FrameScheduler,
   nextPlayPosition,
   pickLoadTarget,
+  segmentBoundaryForward,
 } from "../model/frameScheduler";
 import type { ExportItem, VideoPairDetail } from "../types";
 
@@ -112,11 +113,21 @@ export function CutEditor({ pairId, onBack }: Props) {
   // (shownFrame === position), поэтому каждый кадр реально отображается,
   // без пропусков. Скорость задаёт паузу между кадрами (0-9 — прореживание).
   const totalFrames = pair?.total_frames ?? 0;
+  // Цель J-воспроизведения («до границы»): остановка без разворота направления.
+  const playTargetRef = useRef<number | null>(null);
   useEffect(() => {
     if (!playing) return;
     if (shownFrame !== position) return; // ждём, пока текущий кадр встанет в <img>
     const delay = Math.round(1000 / (30 * speed));
     const id = window.setTimeout(() => {
+      const target = playTargetRef.current;
+      if (target !== null && position + direction === target) {
+        // J: доехали до ближайшей границы — стоп точно на ней, без разворота.
+        playTargetRef.current = null;
+        setPosition(target);
+        setPlaying(false);
+        return;
+      }
       const step = nextPlayPosition(position, direction, totalFrames);
       if (step.stop) {
         // Дошли до начала/конца: разворачиваемся на воспроизведение
@@ -310,6 +321,8 @@ export function CutEditor({ pairId, onBack }: Props) {
     epochRef.current++;
     inflightRef.current.clear();
     modeRef.current = "jump";
+    // Новое обычное воспроизведение не должно упираться в протухшую цель J.
+    playTargetRef.current = null;
     pumpRef.current();
   };
 
@@ -335,6 +348,21 @@ export function CutEditor({ pairId, onBack }: Props) {
       }
       setPosition(ks[0]);
     }
+  };
+
+  // J: непрерывное воспроизведение от текущей позиции до ближайшей границы
+  // сегмента (начало/конец фрагмента, края видео) в текущем направлении.
+  const playToBoundary = () => {
+    const p = modelRef.current;
+    if (!p) return;
+    cancelPending();
+    playTargetRef.current = segmentBoundaryForward(
+      position,
+      direction,
+      p.keyFrames(),
+      p.totalFrames,
+    );
+    setPlaying(true);
   };
 
   const flash = (m: string) => {
@@ -441,7 +469,7 @@ export function CutEditor({ pairId, onBack }: Props) {
       } else if (is("KeyR")) {
         setDirection((d) => (d === 1 ? -1 : 1));
       } else if (is("KeyJ")) {
-        jump(direction);
+        if (!e.repeat) playToBoundary();
       } else if (/^Digit[0-9]$/.test(code)) {
         setSpeed(Math.pow(2, parseInt(code.slice(5), 10)));
       } else if (is("KeyF")) {

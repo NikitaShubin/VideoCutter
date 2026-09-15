@@ -11,6 +11,7 @@ import {
   FrameScheduler,
   nextPlayPosition,
   pickLoadTarget,
+  segmentBoundaryForward,
 } from "../frontend/src/model/frameScheduler.ts";
 
 let passed = 0;
@@ -223,6 +224,43 @@ check("drain: стрим-догоняние после буфера допуст
   assert.equal(s.shownIndex, 6);
   assert.equal(s.deliverStreaming(8, "u8", 1), true);
   assert.equal(s.shownIndex, 8); // догнал — промежуточные дропнуты
+});
+
+// --- segmentBoundaryForward: J — прокрутка до ближайшей границы ---
+// Фрагменты: [100,200], [300,350]; total=400. Границы: 0,100,200,300,350,399.
+const KF = [100, 200, 300, 350];
+const TOTAL = 400;
+
+check("J: внутри фрагмента — вперёд к концу, назад к началу", () => {
+  assert.equal(segmentBoundaryForward(150, 1, KF, TOTAL), 200);
+  assert.equal(segmentBoundaryForward(150, -1, KF, TOTAL), 100);
+});
+
+check("J: в промежутке — вперёд к следующему началу, назад к прошлому концу", () => {
+  assert.equal(segmentBoundaryForward(260, 1, KF, TOTAL), 300);
+  assert.equal(segmentBoundaryForward(260, -1, KF, TOTAL), 200);
+});
+
+check("J: уже на границе — уводит к следующей строгой", () => {
+  assert.equal(segmentBoundaryForward(200, 1, KF, TOTAL), 300);
+  assert.equal(segmentBoundaryForward(100, -1, KF, TOTAL), 0);
+  assert.equal(segmentBoundaryForward(350, 1, KF, TOTAL), 399);
+});
+
+check("J: до первого фрагмента назад → 0, после последнего вперёд → последний кадр", () => {
+  assert.equal(segmentBoundaryForward(50, -1, KF, TOTAL), 0);
+  assert.equal(segmentBoundaryForward(380, 1, KF, TOTAL), 399);
+});
+
+check("J: без фрагментов — до краёв видео", () => {
+  assert.equal(segmentBoundaryForward(150, 1, [], TOTAL), 399);
+  assert.equal(segmentBoundaryForward(150, -1, [], TOTAL), 0);
+});
+
+check("J: границы у краёв не дублируются (0/total-1 не ломают фильтрацию)", () => {
+  // Фрагмент начинается с 0 и кончается последним кадром.
+  assert.equal(segmentBoundaryForward(5, 1, [0, 399], TOTAL), 399);
+  assert.equal(segmentBoundaryForward(398, -1, [0, 399], TOTAL), 0);
 });
 
 console.log(`ok: ${passed} проверок`);

@@ -97,6 +97,7 @@ export function HelpModal({ open, onClose }: Props) {
               <tr><td><span className="kbd">Пробел</span></td><td>play / pause</td></tr>
               <tr><td>{k("0 – 9")}</td><td>скорость воспроизведения</td></tr>
               <tr><td><span className="kbd">R</span></td><td>направление: вперёд / назад</td></tr>
+              <tr><td><span className="kbd">J</span></td><td>прокрутить до ближайшей границы фрагмента (начало/конец) и остановиться</td></tr>
             </tbody>
           </table>
         </div>
