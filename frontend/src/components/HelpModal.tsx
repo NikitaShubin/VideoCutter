@@ -124,7 +124,7 @@ export function HelpModal({ open, onClose }: Props) {
               <tr><td><span className="kbd">F</span></td><td>полноэкранный режим</td></tr>
               <tr><td><span className="kbd">Tab</span></td><td>сохранять пропорции кадра / растягивать</td></tr>
               <tr><td><span className="kbd">Esc</span></td><td>закрыть справку / выйти из полноэкранного режима</td></tr>
-              <tr><td>{k("Esc или Q")}</td><td>назад к списку пар (вне полноэкранного режима)</td></tr>
+              <tr><td>{k("Esc или Q")}</td><td>назад к списку пар (позиция кадра запоминается)</td></tr>
               <tr><td>{k("H или ?")}</td><td>показать / скрыть эту справку</td></tr>
             </tbody>
           </table>
@@ -145,7 +145,8 @@ export function HelpModal({ open, onClose }: Props) {
           <div className="help-legend">
             <span><i className="help-swatch" style={{ background: "#00ff00" }} /> фон — вся последовательность кадров</span>
             <span><i className="help-swatch" style={{ background: "#ff0000" }} /> фрагмент</span>
-            <span><i className="help-swatch" style={{ background: "rgba(0,0,0,0.5)" }} /> затемнение до конца видео</span>
+            <span><i className="help-swatch" style={{ background: "rgba(0,0,0,0.5)" }} /> затемнение — кадры после текущего</span>
+            <span><i className="help-swatch" style={{ background: "#ffffff" }} /> маркер текущего кадра</span>
             <span><i className="help-swatch" style={{ background: "#00ffff" }} /> выбранный диапазон (на зелёном)</span>
             <span><i className="help-swatch" style={{ background: "#ff00ff" }} /> выбранный диапазон (на фрагменте)</span>
           </div>
