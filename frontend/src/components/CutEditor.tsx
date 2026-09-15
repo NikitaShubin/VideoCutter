@@ -7,6 +7,11 @@ import {
   startExport,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
+import {
+  FrameScheduler,
+  nextPlayPosition,
+  pickLoadTarget,
+} from "../model/frameScheduler";
 import type { ExportItem, VideoPairDetail } from "../types";
 
 interface Props {
@@ -38,7 +43,6 @@ export function CutEditor({ pairId, onBack }: Props) {
   const statusRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const editorRef = useRef<HTMLDivElement | null>(null);
-  const timerRef = useRef<number | null>(null);
 
   // Синхронизация состояния с полноэкранным режимом браузера (вкл/выкл через Esc).
   useEffect(() => {
@@ -57,60 +61,70 @@ export function CutEditor({ pairId, onBack }: Props) {
 
   // Клиентский кэш кадров + предзагрузка: кадр подставляется в <img> только
   // после загрузки, поэтому пустой/чёрный экран при перемотке не моргает.
-  const shownFrameRef = useRef(-1);
-  const wantedFrameRef = useRef(-1);
-  const frameCacheRef = useRef<Map<number, string>>(new Map());
-  const inFlightRef = useRef<Map<number, HTMLImageElement>>(new Map());
+  //
+  // Три режима показа (номер/полоса всегда обновляются мгновенно):
+  //  - тапы (accumulate) → drain: показ каждого кадра по пути к позиции;
+  //  - прыжки (таймлайн, PageUp/Down, )Home/End, одиночный Ctrl+→) → jump:
+  //    сразу целевой кадр, без промежуточных;
+  //  - удержание стрелки (e.repeat, в т.ч. Ctrl+) → chase: позиция бежит,
+  //    экран догоняет, дропая кадры, с маркером до догона. Переход на
+  //    удержание отменяет незаконченный буфер тапов (epoch++).
   const MAX_CACHE = 60;
   const SEEK_STEP = 10;
+  const CHASE_CAP = 6;
+  const schedRef = useRef<FrameScheduler | null>(null);
+  if (!schedRef.current) schedRef.current = new FrameScheduler(MAX_CACHE);
+  const [shownFrame, setShownFrame] = useState(-1);
+  const modeRef = useRef<"drain" | "jump">("jump");
+  const chaseRef = useRef(false);
+  const heldDirRef = useRef<1 | -1>(1);
+  const epochRef = useRef(0);
+  const inflightRef = useRef<Set<number>>(new Set());
+  const rightHeldRef = useRef(false);
+  const leftHeldRef = useRef(false);
 
   // Загрузка пары + фрагментов.
   useEffect(() => {
     getPair(pairId).then((p) => {
       setPair(p);
       setPosition(0);
-      shownFrameRef.current = -1;
-      wantedFrameRef.current = -1;
-      frameCacheRef.current.clear();
-      inFlightRef.current.clear();
+      schedRef.current = new FrameScheduler(MAX_CACHE);
+      setShownFrame(-1);
+      modeRef.current = "jump";
+      chaseRef.current = false;
+      epochRef.current++;
+      inflightRef.current.clear();
+      rightHeldRef.current = false;
+      leftHeldRef.current = false;
       modelRef.current = new FragmentModel(p.total_frames);
       modelRef.current.setInitial(
         p.fragments.map((f) => ({ start: f.start, end: f.end, comment: f.comment ?? "" })),
       );
       rerender();
     });
-    return () => {
-      if (timerRef.current) window.clearInterval(timerRef.current);
-    };
   }, [pairId]);
 
-  // Таймер воспроизведения.
+  // Воспроизведение: позиция продвигается только ПОСЛЕ показа текущего кадра
+  // (shownFrame === position), поэтому каждый кадр реально отображается,
+  // без пропусков. Скорость задаёт паузу между кадрами (0-9 — прореживание).
+  const totalFrames = pair?.total_frames ?? 0;
   useEffect(() => {
     if (!playing) return;
-    timerRef.current = window.setInterval(() => {
-      const p = modelRef.current;
-      if (!p) return;
-      setPosition((pos) => {
-        const next = pos + direction * speed;
-        if (next < 0) {
-          // Дошли до начала: разворачиваемся на воспроизведение вперёд,
-          // иначе пробел после остановки не запустит видео обратно.
-          setDirection(1);
-          setPlaying(false);
-          return 0;
-        }
-        if (next >= p.totalFrames) {
-          setDirection(-1);
-          setPlaying(false);
-          return p.totalFrames - 1;
-        }
-        return next;
-      });
-    }, 30);
-    return () => {
-      if (timerRef.current) window.clearInterval(timerRef.current);
-    };
-  }, [playing, speed, direction]);
+    if (shownFrame !== position) return; // ждём, пока текущий кадр встанет в <img>
+    const delay = Math.round(1000 / (30 * speed));
+    const id = window.setTimeout(() => {
+      const step = nextPlayPosition(position, direction, totalFrames);
+      if (step.stop) {
+        // Дошли до начала/конца: разворачиваемся на воспроизведение
+        // в обратную сторону, иначе пробел после остановки не запустит видео.
+        setDirection(step.direction);
+        setPlaying(false);
+      } else {
+        setPosition(step.pos);
+      }
+    }, delay);
+    return () => window.clearTimeout(id);
+  }, [playing, position, shownFrame, direction, speed, totalFrames]);
 
   // Статус-бар (таймлайн). Воспроизводит draw_statusbar из PyVideoCutter:
   // зелёный фон, красные фрагменты, затемнение от позиции до конца,
@@ -167,59 +181,138 @@ export function CutEditor({ pairId, onBack }: Props) {
     drawStatusbar();
   }, [drawStatusbar, position, keyPose, pair]);
 
-  // Показ кадра: ставим src только когда кадр полностью загружен и декодирован.
-  const applyFrame = useCallback(
+  // Показ кадра: ставим src, помечаем кадр как показанный (state — чтобы
+  // эффекты и индикатор загрузки реагировали на появление кадра).
+  const showFrame = useCallback(
     (idx: number) => {
+      if (!pair) return;
       const el = imageRef.current;
-      if (!pair || !el) return;
-      shownFrameRef.current = idx;
-      el.src = frameUrl(pair.id, idx);
+      if (el) el.src = frameUrl(pair.id, idx);
+      schedRef.current?.show(idx);
+      setShownFrame(idx);
     },
     [pair],
   );
 
-  useEffect(() => {
-    if (!pair || position === shownFrameRef.current) return;
-    const target = position;
-    wantedFrameRef.current = target;
+  // Единая точка загрузки/показа кадра. Вызывается реактивно (смена позиции
+  // или показанного кадра) и императивно при смене режима навигации.
+  const pump = useCallback(() => {
+    const sched = schedRef.current;
+    if (!pair || !sched) return;
+    const chase = chaseRef.current;
+    const pos = position;
+    const shown = shownFrame;
+    if (pos === shown) return;
 
-    const cached = frameCacheRef.current.get(target);
+    const target = chase
+      ? pos
+      : pickLoadTarget({ shown, position: pos, mode: modeRef.current });
+    if (target === shown) return;
+
+    // Дедупликация: кадр уже грузится.
+    const inflight = inflightRef.current;
+    if (inflight.has(target)) return;
+    // Chase: ограничиваем поток одновременных запросов — остальные кадры
+    // «пропускаются» (следующее изменение позиции запросит новее).
+    if (chase && inflight.size >= CHASE_CAP) return;
+
+    const { gen, cached } = sched.begin(target);
     if (cached) {
-      applyFrame(target);
+      showFrame(target);
       return;
     }
 
-    // Не запускаем второй запрос, если какой-то кадр уже в полёте:
-    // при непрерывном воспроизведении позиция меняется быстрее, чем
-    // приходит ответ, и параллельные запросы забивают сеть.
-    if (inFlightRef.current.size > 0) return;
-
+    const myEpoch = epochRef.current;
+    const myChase = chase;
+    inflight.add(target);
     const img = new Image();
-    inFlightRef.current.set(target, img);
     img.onload = () => {
-      inFlightRef.current.delete(target);
-      frameCacheRef.current.set(target, img.src);
-      if (frameCacheRef.current.size > MAX_CACHE) {
-        const oldest = frameCacheRef.current.keys().next().value;
-        if (oldest !== undefined) frameCacheRef.current.delete(oldest);
-      }
-      // Показываем кадр, если он ближе к цели, чем уже показанный
-      // (при воспроизведении wanted всё время «убегает» вперёд, и точное
-      // равенство требовало бы перемотку назад — кадр бы никогда не встал).
-      const want = wantedFrameRef.current;
-      const shown = shownFrameRef.current;
-      const isCloser = Math.abs(want - target) < Math.abs(want - shown);
-      if (isCloser && shown !== target) {
-        applyFrame(target);
+      inflight.delete(target);
+      // Режим сменился с момента запроса (chase/буфер тапов брошен, прыжок) —
+      // ответ устарел, не показываем.
+      if (myEpoch !== epochRef.current) return;
+      if (myChase) {
+        if (sched.deliverStreaming(target, img.src, heldDirRef.current)) {
+          showFrame(target);
+        }
+      } else if (sched.deliver(target, gen, img.src)) {
+        showFrame(target);
       }
     };
-    img.onerror = () => inFlightRef.current.delete(target);
+    img.onerror = () => {
+      inflight.delete(target);
+      if (myEpoch !== epochRef.current) return;
+      // Кадр не загрузился: разблокируем покадровое воспроизведение/догон,
+      // иначе воспроизведение залипнет на битом кадре.
+      if (!myChase && gen === sched.generation) setShownFrame(pos);
+    };
     img.src = frameUrl(pair.id, target);
-  }, [position, pair, applyFrame]);
+  }, [pair, position, shownFrame, showFrame]);
+
+  const pumpRef = useRef<() => void>(() => {});
+  pumpRef.current = pump;
+
+  useEffect(() => {
+    pump();
+  }, [pump]);
+
+  // --- Режимы навигации (утдерживание vs тапы vs прыжки) ---
+  // Прыжок: сразу целевой кадр, буфер/стрим отменяются.
+  const jumpMode = () => {
+    if (chaseRef.current || modeRef.current !== "jump") {
+      epochRef.current++;
+      inflightRef.current.clear();
+    }
+    chaseRef.current = false;
+    modeRef.current = "jump";
+    pumpRef.current();
+  };
+
+  // Тап: накопление — показ всех промежуточных кадров по пути (drain).
+  const tapMode = () => {
+    if (chaseRef.current || modeRef.current !== "drain") {
+      epochRef.current++;
+      inflightRef.current.clear();
+    }
+    chaseRef.current = false;
+    modeRef.current = "drain";
+    pumpRef.current();
+  };
+
+  // Удержание: real-time стрим с дропом, буфер тапов отбрасывается сразу.
+  const startChase = (dir: 1 | -1) => {
+    if (!chaseRef.current) {
+      epochRef.current++;
+      inflightRef.current.clear();
+      chaseRef.current = true;
+      modeRef.current = "jump"; // хвост после отпускания — строгая докачка
+    }
+    heldDirRef.current = dir;
+    pumpRef.current();
+  };
+
+  // Отпускание: строгая докачка финального кадра до текущей позиции.
+  const endChase = () => {
+    if (!chaseRef.current) return;
+    chaseRef.current = false;
+    epochRef.current++;
+    inflightRef.current.clear();
+    modeRef.current = "jump";
+    pumpRef.current();
+  };
+
+  // Отмена накопления (пробел — переход к воспроизведению).
+  const cancelPending = () => {
+    epochRef.current++;
+    inflightRef.current.clear();
+    modeRef.current = "jump";
+    pumpRef.current();
+  };
 
   const jump = (dir: 1 | -1) => {
     const p = modelRef.current;
     if (!p) return;
+    jumpMode(); // прыжок без промежуточных кадров
     const ks = [0, ...p.keyFrames(), p.totalFrames - 1];
     if (dir === 1) {
       for (const f of ks) {
@@ -289,17 +382,30 @@ export function CutEditor({ pairId, onBack }: Props) {
       if (isEditing) return;
 
       // Навигация.
-      if (ctrl && (is("ArrowRight") || is("Period"))) {
+      const rightKey = is("ArrowRight") || is("Period");
+      const leftKey = is("ArrowLeft") || is("Comma");
+      if (rightKey) rightHeldRef.current = true;
+      if (leftKey) leftHeldRef.current = true;
+
+      if (ctrl && rightKey) {
         setPlaying(false);
+        if (e.repeat) startChase(1);
+        else jumpMode(); // одиночный Ctrl+→ — прыжок на 10, без промежуточных
         setPosition((pos) => Math.min(p.totalFrames - 1, pos + SEEK_STEP));
-      } else if (ctrl && (is("ArrowLeft") || is("Comma"))) {
+      } else if (ctrl && leftKey) {
         setPlaying(false);
+        if (e.repeat) startChase(-1);
+        else jumpMode();
         setPosition((pos) => Math.max(0, pos - SEEK_STEP));
-      } else if (is("ArrowRight") || is("Period")) {
+      } else if (rightKey) {
         setPlaying(false);
+        if (e.repeat) startChase(1);
+        else tapMode();
         setPosition((pos) => Math.min(p.totalFrames - 1, pos + 1));
-      } else if (is("ArrowLeft") || is("Comma")) {
+      } else if (leftKey) {
         setPlaying(false);
+        if (e.repeat) startChase(-1);
+        else tapMode();
         setPosition((pos) => Math.max(0, pos - 1));
       } else if (is("PageDown")) {
         e.preventDefault();
@@ -311,12 +417,15 @@ export function CutEditor({ pairId, onBack }: Props) {
         jump(-1);
       } else if (is("Home")) {
         setPlaying(false);
+        jumpMode();
         setPosition(0);
       } else if (is("End")) {
         setPlaying(false);
+        jumpMode();
         setPosition(p.totalFrames - 1);
       } else if (is(" ") || is("Space") || is("Spacebar")) {
         e.preventDefault();
+        cancelPending();
         setPlaying((v) => !v);
       } else if (is("KeyR")) {
         setDirection((d) => (d === 1 ? -1 : 1));
@@ -392,7 +501,23 @@ export function CutEditor({ pairId, onBack }: Props) {
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "ArrowRight" || e.code === "Period") rightHeldRef.current = false;
+      if (e.code === "ArrowLeft" || e.code === "Comma") leftHeldRef.current = false;
+      if (!rightHeldRef.current && !leftHeldRef.current) endChase();
+    };
+    const onBlur = () => {
+      rightHeldRef.current = false;
+      leftHeldRef.current = false;
+      endChase();
+    };
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position, keyPose, direction, speed, playing, drawStatusbar]);
 
@@ -452,6 +577,10 @@ export function CutEditor({ pairId, onBack }: Props) {
 
   const sel = modelRef.current?.selectedFrames() ?? 0;
 
+  // Индикатор загрузки — только при ручной навигации: при воспроизведении
+  // кадр встаёт до продвижения позиции (покадровый шаг), индикатор не нужен.
+  const frameLoading = !playing && position !== shownFrame;
+
   return (
     <div ref={editorRef} className={isFullscreen ? "editor fullscreen" : "editor"}>
       {!isFullscreen && (
@@ -486,12 +615,14 @@ export function CutEditor({ pairId, onBack }: Props) {
         <img
           ref={imageRef}
           alt={`кадр ${position}`}
+          className={frameLoading ? "frame-loading" : undefined}
           style={{
             objectFit: preserveAspect ? "contain" : "fill",
             width: "100%",
             height: "100%",
           }}
         />
+        {frameLoading && <div className="frame-spinner" aria-hidden />}
         {(!isFullscreen || editingComment) && (
           editingComment ? (
             <div className="editor-comment">
@@ -540,6 +671,7 @@ export function CutEditor({ pairId, onBack }: Props) {
             Math.round(pixel * Math.max(1, p.totalFrames - 1) / (canvas.width - 1)),
           );
           setPlaying(false);
+          jumpMode();
           setPosition(target);
         }}
       />

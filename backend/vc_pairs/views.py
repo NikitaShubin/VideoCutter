@@ -49,7 +49,11 @@ def workspace_frame(request, workspace_id: str, index: int):
             {"error": f"Кадр {index} недоступен (всего кадров: {meta['total_frames']})"},
             status=404,
         )
-    return HttpResponse(jpeg, content_type=mime)
+    response = HttpResponse(jpeg, content_type=mime)
+    # Кадры неизменны в рамках сессии: браузер кэширует сам и снимает
+    # нагрузку с бэкенда при перемотке назад (клиентский кэш — 60 кадров).
+    response["Cache-Control"] = "private, max-age=3600"
+    return response
 
 
 @require_GET

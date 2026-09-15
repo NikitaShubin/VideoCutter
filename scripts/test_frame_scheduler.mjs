@@ -1,0 +1,228 @@
+/* Тесты планировщика кадров: только самый свежий кадр встаёт на экран,
+ * даже при быстрой навигации и неупорядоченной доставке; кэш LRU;
+ * последовательное воспроизведение без пропуска кадров.
+ *
+ * Запуск: node scripts/test_frame_scheduler.mjs   (Node >= 23)
+ * Возвращает код 0 при успехе, 1 при провале любого ассерта.
+ */
+
+import assert from "node:assert/strict";
+import {
+  FrameScheduler,
+  nextPlayPosition,
+  pickLoadTarget,
+} from "../frontend/src/model/frameScheduler.ts";
+
+let passed = 0;
+
+function check(name, fn) {
+  try {
+    fn();
+    passed++;
+  } catch (err) {
+    console.error(`[FAIL] ${name}`);
+    throw err;
+  }
+}
+
+// --- быстрая навигация: показывается только свежий кадр ---
+check("быстрая навигация вперёд: показывается последний кадр, старые отбрасываются", () => {
+  const s = new FrameScheduler();
+  const a = s.begin(5);
+  const b = s.begin(6); // пользователь нажал ещё раз до ответа
+  assert.equal(a.cached, false);
+  assert.equal(b.cached, false);
+  // Ответы пришли НЕ в порядке запросов: кадр 5 позже кадра 6.
+  assert.equal(s.deliver(6, b.gen, "u6"), true);
+  s.show(6);
+  assert.equal(s.deliver(5, a.gen, "u5"), false); // устарел
+  assert.equal(s.shownIndex, 6);
+  assert.equal(s.hasCached(6), true);
+  assert.equal(s.hasCached(5), false); // устаревший кадр не кэшируется
+});
+
+check("доставка в порядке запросов тоже корректна", () => {
+  const s = new FrameScheduler();
+  const a = s.begin(5);
+  assert.equal(s.deliver(5, a.gen, "u5"), true);
+  s.show(5);
+  const b = s.begin(6);
+  assert.equal(s.deliver(6, b.gen, "u6"), true);
+  s.show(6);
+  assert.equal(s.shownIndex, 6);
+});
+
+check("навигация назад-вперёд: побеждает самая свежая цель", () => {
+  const s = new FrameScheduler();
+  const a = s.begin(10);
+  const b = s.begin(9);
+  const c = s.begin(10); // снова вперёд до прихода ответа
+  assert.equal(s.deliver(9, b.gen, "u9"), false);
+  assert.equal(s.deliver(10, a.gen, "u10-a"), false); // старше c.gen
+  assert.equal(s.deliver(10, c.gen, "u10-c"), true);
+  s.show(10);
+  assert.equal(s.shownIndex, 10);
+  assert.equal(s.hasCached(10), true);
+  assert.equal(s.hasCached(9), false);
+});
+
+// --- кэш ---
+check("попадание в кэш синхронно и не стартует сетевую загрузку", () => {
+  const s = new FrameScheduler();
+  const a = s.begin(3);
+  assert.equal(s.deliver(3, a.gen, "u3"), true);
+  s.show(3);
+  const b = s.begin(3);
+  assert.equal(b.cached, true);
+  const c = s.begin(4);
+  assert.equal(c.cached, false);
+});
+
+check("показ кадра актуализирует wanted (кэш-хит повторно не считается загрузкой)", () => {
+  const s = new FrameScheduler();
+  const a = s.begin(1);
+  s.deliver(1, a.gen, "u1");
+  s.show(1);
+  assert.equal(s.begin(1).cached, true);
+});
+
+check("LRU кэш вытесняет старые кадры при переполнении", () => {
+  const s = new FrameScheduler(3);
+  for (let i = 0; i < 4; i++) {
+    const r = s.begin(i);
+    assert.equal(s.deliver(i, r.gen, `u${i}`), true);
+    s.show(i);
+  }
+  assert.equal(s.hasCached(0), false);
+  assert.equal(s.hasCached(1), true);
+  assert.equal(s.hasCached(2), true);
+  assert.equal(s.hasCached(3), true);
+});
+
+// --- воспроизведение: позиция меняется только после показа кадра ---
+check("покадровое воспроизведение проходит все кадры без пропуска", () => {
+  const s = new FrameScheduler();
+  const total = 5;
+  let pos = 0;
+  let dir = 1;
+  const steps = [];
+  while (true) {
+    const { gen } = s.begin(pos);
+    // «Быстрый сервер»: кадр приходит сразу и становится показанным.
+    assert.equal(s.deliver(pos, gen, `u${pos}`), true);
+    s.show(pos);
+    assert.equal(s.shownIndex, pos);
+    steps.push(pos);
+    const step = nextPlayPosition(pos, dir, total);
+    if (step.stop) {
+      dir = step.direction;
+      break;
+    }
+    pos = step.pos;
+    dir = step.direction;
+  }
+  assert.deepEqual(steps, [0, 1, 2, 3, 4]); // все кадры, ни один не пропущен
+  assert.equal(dir, -1); // на конце — разворот
+});
+
+check("отставание сервера: должен показаться крайний показанный кадр, без прыжков вперёд", () => {
+  const s = new FrameScheduler();
+  const a = s.begin(0);
+  assert.equal(s.deliver(0, a.gen, "u0"), true);
+  s.show(0);
+  // Позиция ушла вперёд (пользователь нажал 3 раза), но кадры ещё качаются.
+  const b = s.begin(1);
+  assert.equal(s.deliver(1, b.gen, "u1"), true);
+  s.show(1);
+  assert.equal(s.shownIndex, 1); // показан кадр, который реально пришёл
+});
+
+// --- границы воспроизведения ---
+check("границы: стоп и разворот на обоих концах", () => {
+  assert.deepEqual(nextPlayPosition(0, -1, 10), { pos: 0, direction: 1, stop: true });
+  assert.deepEqual(nextPlayPosition(9, 1, 10), { pos: 9, direction: -1, stop: true });
+  assert.deepEqual(nextPlayPosition(4, 1, 10), { pos: 5, direction: 1, stop: false });
+  assert.deepEqual(nextPlayPosition(4, -1, 10), { pos: 3, direction: -1, stop: false });
+});
+
+check("nextPlayPosition: total=0/1 не падает", () => {
+  assert.deepEqual(nextPlayPosition(0, 1, 1), { pos: 0, direction: -1, stop: true });
+});
+
+// --- streaming (chase — удержание стрелки) ---
+check("streaming: кадры, продвигающие экран вперёд, показываются по мере прихода", () => {
+  const s = new FrameScheduler();
+  // Экран на 4, пользователь удерживает «→», позиция убежала на 9.
+  const a = s.begin(4);
+  assert.equal(s.deliver(4, a.gen, "u4"), true);
+  s.show(4);
+  assert.equal(s.deliverStreaming(5, "u5", 1), true); // догоняющий
+  assert.equal(s.shownIndex, 5);
+  assert.equal(s.deliverStreaming(7, "u7", 1), true); // ещё вперёд
+  assert.equal(s.shownIndex, 7);
+  assert.equal(s.deliverStreaming(9, "u9", 1), true); // догнал позицию
+  assert.equal(s.shownIndex, 9);
+});
+
+check("streaming: поздний «обратный» ответ не откатывает экран назад", () => {
+  const s = new FrameScheduler();
+  s.show(6);
+  assert.equal(s.deliverStreaming(5, "u5", 1), false);
+  assert.equal(s.shownIndex, 6);
+  assert.equal(s.hasCached(5), true); // кадр закэширован, но не показан
+});
+
+check("streaming назад: направление удержания учитывается", () => {
+  const s = new FrameScheduler();
+  s.show(20);
+  assert.equal(s.deliverStreaming(17, "u17", -1), true); // догоняет влево
+  assert.equal(s.shownIndex, 17);
+  assert.equal(s.deliverStreaming(15, "u15", -1), true); // ещё левее
+  assert.equal(s.shownIndex, 15);
+  assert.equal(s.deliverStreaming(4, "u4", -1), true); // догнал позицию
+  assert.equal(s.shownIndex, 4);
+  assert.equal(s.deliverStreaming(18, "u18", -1), false); // выше — не в сторону позиции
+  assert.equal(s.shownIndex, 4);
+});
+
+// --- pickLoadTarget: drain/jump ---
+check("pickLoadTarget: drain грузит следующий кадр по пути, не целевой", () => {
+  assert.equal(pickLoadTarget({ shown: 4, position: 9, mode: "drain" }), 5);
+  assert.equal(pickLoadTarget({ shown: 4, position: 4, mode: "drain" }), 4);
+  assert.equal(pickLoadTarget({ shown: 9, position: 4, mode: "drain" }), 8); // влево
+});
+
+check("pickLoadTarget: jump грузит сразу целевую позицию", () => {
+  assert.equal(pickLoadTarget({ shown: 4, position: 120, mode: "jump" }), 120);
+  assert.equal(pickLoadTarget({ shown: 120, position: 4, mode: "jump" }), 4);
+});
+
+check("drain: серия тапов показывает ВСЕ промежуточные кадры без пропуска", () => {
+  const s = new FrameScheduler();
+  s.show(3);
+  let pos = 3;
+  // Пользователь быстро нажал «→» 3 раза: позиция мгновенно 6.
+  pos = 6;
+  const shownOrder = [s.shownIndex];
+  while (pos !== s.shownIndex) {
+    const target = pickLoadTarget({ shown: s.shownIndex, position: pos, mode: "drain" });
+    const { gen } = s.begin(target);
+    assert.equal(s.deliver(target, gen, `u${target}`), true);
+    s.show(target);
+    shownOrder.push(s.shownIndex);
+  }
+  assert.deepEqual(shownOrder, [3, 4, 5, 6]);
+});
+
+check("drain: стрим-догоняние после буфера допустимо с дропом (chase не ждёт дренаж)", () => {
+  const s = new FrameScheduler();
+  s.show(2);
+  const pos = 8; // позиция убежала, буфер тапов «брошен» (переход на удержание)
+  // Chase: показывается любой продвигающий кадр, даже если 3,4,5 не пришли.
+  assert.equal(s.deliverStreaming(6, "u6", 1), true);
+  assert.equal(s.shownIndex, 6);
+  assert.equal(s.deliverStreaming(8, "u8", 1), true);
+  assert.equal(s.shownIndex, 8); // догнал — промежуточные дропнуты
+});
+
+console.log(`ok: ${passed} проверок`);

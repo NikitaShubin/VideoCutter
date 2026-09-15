@@ -106,17 +106,33 @@ VC stateless: workspace = **подпапка** в `workspaces/` с видеоф�
 | `Ctrl+Z` / `Z` | undo / redo |
 | `E` | экспорт |
 
+## Режимы навигации
+
+Номер и полоса позиции (statusbar) обновляются **мгновенно** при любом
+вводе — кадр загружается асинхронно, с маркером загрузки (спиннер
+правый нижний угол), пока `position ≠ shownFrame`.
+
+| Режим | Триггер | Поведение |
+|-------|---------|-----------|
+| **drain** | одиночный тап `←`/`→` | показывает каждый кадр по пути к целевому; тапы накапливаются в буфер во время загрузки |
+| **chase** | удержание стрелки (`e.repeat`, в т.ч. `Ctrl+`) | позиция бежит в реальном времени, экран догоняет, допуская дроп кадров; переход на удержание сразу отменяет накопленный буфер тапов (instant switch) |
+| **jump** | клик по таймлайну, `PageUp/Down`, `Home/End`, `Ctrl+→` (одиночный), `KeyJ` | загружается ровно целевой кадр, без промежуточных |
+| (playback) | пробел | последовательно: кадр показан → следующий, все без пропуска, стоп совпадает с полосой |
+
 ## Тесты
 
 ```bash
 # ядро (Js-модель фрагментов)
 node scripts/test_fragment_model.mjs
 
+# планировщик кадров (режимы навигации, кэш, воспроизведение)
+node scripts/test_frame_scheduler.mjs
+
 # ядро (Python)
-python scripts/test_fragment_core.py
+python3 scripts/test_fragment_core.py
 
 # сверка Python-ядра и JS-модели (легаси — справочно)
-python scripts/compare_fragments.py --random 50
+python3 scripts/compare_fragments.py --random 50
 
 # Django API
 cd backend && python manage.py test
