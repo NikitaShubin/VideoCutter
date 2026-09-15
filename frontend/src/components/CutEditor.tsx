@@ -7,6 +7,7 @@ import {
   startExport,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
+import { HelpModal } from "./HelpModal";
 import {
   FrameScheduler,
   nextPlayPosition,
@@ -34,6 +35,9 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [message, setMessage] = useState("");
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpOpenRef = useRef(false);
+  helpOpenRef.current = helpOpen;
 
   const modelRef = useRef<FragmentModel | null>(null);
   if (!modelRef.current) modelRef.current = new FragmentModel(0);
@@ -378,6 +382,13 @@ export function CutEditor({ pairId, onBack }: Props) {
       // Физическая клавиша: кнопка не зависит от раскладки (KeyR ~ R на любой раскладке).
       const is = (physical: string) => code === physical || k === physical;
 
+      // Справка закрывает все остальные горячие клавиши, пока открыта.
+      if (helpOpenRef.current) {
+        if (is("Escape") || is("KeyQ") || is("KeyH")) setHelpOpen(false);
+        else e.preventDefault();
+        return;
+      }
+
       const isEditing = (e.target as HTMLElement)?.tagName === "INPUT" || (e.target as HTMLElement)?.tagName === "TEXTAREA";
       if (isEditing) return;
 
@@ -438,6 +449,8 @@ export function CutEditor({ pairId, onBack }: Props) {
       } else if (is("Tab")) {
         e.preventDefault();
         setPreserveAspect((v) => !v);
+      } else if (is("KeyH") || (is("Slash") && e.shiftKey)) {
+        setHelpOpen(true);
       }
 
       // Отметка фрагментов.
@@ -608,6 +621,13 @@ export function CutEditor({ pairId, onBack }: Props) {
                 : "Экспорт (E)"}
             </span>
           </button>
+          <button
+            className="toolbar-help"
+            onClick={() => setHelpOpen(true)}
+            title="Справка (H)"
+          >
+            ?
+          </button>
         </div>
       )}
 
@@ -676,15 +696,9 @@ export function CutEditor({ pairId, onBack }: Props) {
         }}
       />
 
-      {!isFullscreen && (
-        <div className="editor-footer">
-          <span>←/→ — кадр, Ctrl+←/→ — 10 кадров, PageUp/PageDown — границы фрагментов, Home/End — край видео,</span>
-          <span>Пробел — play/pause, 0-9 — скорость, R — направление, клик по таймлайну — переход,</span>
-          <span>F — полноэкранный режим, Tab — сохранение пропорций, Esc — выход из полноэкранного режима,</span>
-          <span>↑/[/↓/] — границы фрагмента, K — пара границ, D/Del — удалить, I — комментарий к сегменту, Ctrl+Z/Z — undo/redo, E — экспорт</span>
-        </div>
-      )}
       {!isFullscreen && message && <div className="flash">{message}</div>}
+
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       {!isFullscreen && exportItems && (
         <div className="export-list">
