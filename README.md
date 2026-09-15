@@ -2,57 +2,60 @@
 
 Веб-сервис покадровой селекции фрагментов видео с визуализацией работы нейросети.
 
-Предназначен для работы с **парой видео одинаковой длины**:
-1. **визуализация** — ролик с наложенным результатом работы нейросети (НС);
-2. **оригинал** — то же видео без визуализации.
+Предназначен для работы с **видеофайлами** в workspace-ах:
+
+1. **оригинал** — видео без визуализации;
+2. **визуализация** (опционально) — ролик с наложенным результатом работы нейросети (НС),
+   распознаётся по суффиксам `_viz` / `_visualization` / `_vis` и должен иметь то же
+   число кадров.
 
 Оператор просматривает визуализацию, отмечает места, где НС справилась плохо,
 и из парных кадров **оригинала** экспортируются фрагменты (индексы 1:1).
 Это зачаток Active Learning: «худшие» для текущей модели данные отбираются вручную
 и идут на доразметку.
 
-> Статус: **MVP v0.1.0**. Архитектурный документ — `docs/architecture.md` в родительском проекте.
+> Статус: **MVP, stateless**. Архитектурный документ — `docs/architecture.md` в родительском проекте.
 
 ## Структура
 
 ```
 videocutter/
 ├── videocutter/          # ядро: чистая логика (фрагменты, статус-бар, экспорт) + порты
-├── backend/              # Django + DRF: пары видео, кадры, CRUD фрагментов, экспорт
+├── backend/              # Django (без БД): workspace-сканер, кадры, CRUD фрагментов, экспорт
 ├── frontend/             # React + TypeScript: редактор, покадровая навигация, таймлайн
-├── scripts/              # тесты ядра и сверка с легаси-поведением
+├── scripts/              # тесты ядра, сверка с легаси-поведением, vc-add.sh
 ├── tools/                # утилиты (легаси-бэкенд для сверки)
-├── docker-compose.yml    # автономный стек: Postgres + backend + ui
+├── workspaces/           # workspace-ы: папки с видео + fragments.tsv (не в git)
+├── docker-compose.yml    # автономный стек: backend + ui (без БД)
 └── pyproject.toml        # Python-пакет ядра
 ```
 
 ## Запуск
 
-### Docker (рекомендуется)
+### Docker (автономный VC, рекомендуется)
 
 ```bash
 docker compose up --build
 ```
 
-- UI: http://localhost:3000
-- API: http://localhost:8001/api/
+- UI: http://localhost:3001
+- API: http://localhost:8001/api/v1/
 
-Переменные окружения: `VC_DB_*` (БД), `VC_BACKEND_PORT`, `VC_UI_PORT`, `DJANGO_SECRET_KEY`.
+Переменные окружения: `VC_BACKEND_PORT` (8001), `VC_UI_PORT` (3001), `DJANGO_SECRET_KEY`.
 
 ### Локальная разработка
 
-Backend (Python 3.10+, по умолчанию SQLite):
+Backend (Python 3.10+, без БД):
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 pip install -r backend/requirements.txt
 cd backend
-python manage.py migrate
 python manage.py runserver 8001
 ```
 
-Frontend (Node 20+):
+Frontend (Node 20+, `node >= 23` для пряжи тестов ядра):
 
 ```bash
 cd frontend
@@ -60,13 +63,24 @@ npm install
 npm run dev
 ```
 
-Dev-фронтенд (Vite, :3000) ходит в backend через proxy (по умолчанию :8001,
-переменная `VITE_API_TARGET`).
+Dev-фронтенд (Vite) ходит в backend через proxy (переменная `VITE_API_TARGET`).
 
 ## Как начать использовать
 
-1. Откройте UI, перейдите в раздел загрузки.
-2. Загрузите **пару**: оригинал и визуализацию с одинаковым числом кадров.
+VC stateless: workspace = **подпапка** в `workspaces/` с видеофайлом и (опционально) `fragments.tsv`.
+БД нет, всё хранится на диске.
+
+1. Добавьте видео в workspace:
+
+   ```bash
+   ./scripts/vc-add.sh /path/to/video.mp4            # workspace с именем «video»
+   ./scripts/vc-add.sh /path/to/video.mp4 my_project # workspace «my_project»
+   ```
+
+   Или вручную положите `.mp4` в `workspaces/<имя_проекта>/`.
+   Каждое видео — в **отдельной папке** (в папке может лежать второе видео-визуализация
+   и `fragments.tsv`).
+2. Откройте http://localhost:3001 и обновите страницу (F5) — workspace появится в списке.
 3. В редакторе отметьте проблемные диапазоны (см. горячие клавиши).
 4. Экспортируйте фрагменты оригиналов (серверный ffmpeg).
 
@@ -95,13 +109,13 @@ Dev-фронтенд (Vite, :3000) ходит в backend через proxy (по 
 ## Тесты
 
 ```bash
-# ядро (модель фрагментов, история)
+# ядро (Js-модель фрагментов)
 node scripts/test_fragment_model.mjs
 
 # ядро (Python)
 python scripts/test_fragment_core.py
 
-# сверка поведения с легаси PyVideoCutter
+# сверка Python-ядра и JS-модели (легаси — справочно)
 python scripts/compare_fragments.py --random 50
 
 # Django API

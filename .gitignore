@@ -4,6 +4,7 @@ backend/workspaces/
 backend/db.sqlite3
 backend/*.sqlite3
 backend/static/
+workspaces/
 
 # Frontend (node_modules и сборка)
 frontend/node_modules/

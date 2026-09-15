@@ -1,6 +1,7 @@
 # VideoCutter — автономное окружение (backend + ui).
-# Workspace-ы: папки с видео + fragments.tsv на общем volume.
+# Workspace-ы: папки с видео + fragments.tsv на хосте в ./workspaces/.
 # Запуск: docker compose up --build
+# Файлы: положить .mp4 в ./workspaces/<имя_проекта>/ и обновить страницу (F5).
 services:
   videocutter_backend:
     container_name: videocutter_backend
@@ -14,7 +15,7 @@ services:
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
     volumes:
-      - videocutter_workspaces:/data/workspaces
+      - ./workspaces:/data/workspaces
     ports:
       - "${VC_BACKEND_PORT:-8001}:8001"
 
@@ -27,7 +28,4 @@ services:
     depends_on:
       - videocutter_backend
     ports:
-      - "${VC_UI_PORT:-3000}:80"
-
-volumes:
-  videocutter_workspaces:
+      - "${VC_UI_PORT:-3001}:80"
