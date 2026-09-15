@@ -143,11 +143,3 @@ export function timelinePix(frame: number, width: number, total: number): number
 export function timelineFrame(pixel: number, width: number, total: number): number {
   return Math.round(pixel * Math.max(1, total - 1) / (width - 1));
 }
-
-// Старт тёмной зоны «после текущего кадра». Пиксель текущего кадра НЕ
-// затемняется: он остаётся ярким маркером позиции. Иначе при остановке на
-// границе фрагмента пиксель границы съедался бы затемнением, и маркер
-// отставал/убегал на 1px от видимой красной границы.
-export function positionOverlayStart(position: number, width: number, total: number): number {
-  return Math.min(width - 1, timelinePix(position, width, total) + 1);
-}

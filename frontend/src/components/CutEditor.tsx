@@ -12,7 +12,6 @@ import {
   FrameScheduler,
   nextPlayPosition,
   pickLoadTarget,
-  positionOverlayStart,
   segmentBoundaryForward,
   timelineFrame,
   timelinePix,
@@ -170,10 +169,12 @@ export function CutEditor({ pairId, onBack }: Props) {
     }
 
     // Затемнение от текущей позиции до конца (sb[:, current_shift:, :] //= 2).
-    // Стартовый пиксель позиции не затемняем — он остаётся ярким маркером,
-    // поэтому при остановке на границе фрагмента маркер совпадает с ней,
-    // а не съедает её крайний пиксель (иначе зазор 1px в сторону границы).
-    const curX = positionOverlayStart(position, width, p.totalFrames);
+    // Старт тёмной зоны — ровно timelinePix(position), тем же способом, что и
+    // границы сегментов выше. Поэтому если позиция реально совпадает с границей
+    // фрагмента, смена света/тени приходится на ту же колонку, что и смена
+    // цвета фрагмента: единая точка перехода, без зазора (общая затеняемая
+    // колонка и есть позиция смены).
+    const curX = timelinePix(position, width, p.totalFrames);
     ctx.fillStyle = "rgba(0,0,0,0.5)";
     ctx.fillRect(curX, 0, width - curX, height);
 

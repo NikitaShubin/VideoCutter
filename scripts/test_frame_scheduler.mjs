@@ -11,7 +11,6 @@ import {
   FrameScheduler,
   nextPlayPosition,
   pickLoadTarget,
-  positionOverlayStart,
   segmentBoundaryForward,
   timelineFrame,
   timelinePix,
@@ -266,7 +265,7 @@ check("J: границы у краёв не дублируются (0/total-1 н
   assert.equal(segmentBoundaryForward(398, -1, [0, 399], TOTAL), 0);
 });
 
-// --- timelinePix / timelineFrame / positionOverlayStart (полоса) ---
+// --- timelinePix / timelineFrame (полоса) ---
 check("timelinePix: края и середины отображаются без выхода за полосу", () => {
   assert.equal(timelinePix(0, 800, 705), 0);
   assert.equal(timelinePix(704, 800, 705), 799); // последний кадр = правый край
@@ -295,24 +294,21 @@ check("timelineFrame: round-trip через timelinePix", () => {
   assert.equal(timelineFrame(width - 1, width, total), total - 1);
 });
 
-check("positionOverlayStart: пиксель позиции НЕ затемняется (маркер не съедает границу)", () => {
-  // Внутри полосы затемнение начинается ровно со следующего пикселя.
-  assert.equal(positionOverlayStart(100, 800, 705), timelinePix(100, 800, 705) + 1);
-  // Край (последний кадр): зона пуста, не выходит за полосу.
-  assert.equal(positionOverlayStart(704, 800, 705), 799);
-  assert.ok(positionOverlayStart(0, 800, 705) <= 800 - 1);
-});
-
-check("стоп на границе фрагмента: маркер совпадает с красной границей (crowd)", () => {
-  // Прежний баг: затемнение с curX съедало крайний красный пиксель, и маркер
-  // вставал на 1px правее/левее видимой границы. Теперь overlay стартует с +1.
+check("полоса: смена света/тени и границы сегментов считаются одним timelinePix", () => {
+  // Тёмная зона «после текущего кадра» стартует ровно с timelinePix(position) —
+  // той же функцией, что и границы фрагментов. Поэтому при совпадении позиции
+  // с границей смена цвета приходится на ту же колонку, без зазора.
   const width = 800;
   const total = 705;
+  for (let pos = 0; pos < total; pos++) {
+    assert.equal(timelinePix(pos, width, total), timelinePix(pos, width, total)); // тем же способом
+  }
+  // Позиция на границе фрагмента (crowd): колонка смены света/тени == колонка
+  // границы, и начинается она на этой же колонке (а не на +1).
   for (const b of [120, 310, 704]) {
     const boundaryPix = timelinePix(b, width, total);
-    // пиксель границы остаётся ярким, зона затемнения начинается после него
-    // (для последнего кадра зона пуста — кламп на width-1).
-    assert.equal(positionOverlayStart(b, width, total), Math.min(width - 1, boundaryPix + 1));
+    assert.equal(timelinePix(b, width, total), boundaryPix);
+    assert.ok(boundaryPix >= 0 && boundaryPix <= width - 1);
   }
 });
 
