@@ -118,7 +118,9 @@ class FragmentEditor:
                 self.fragments[ind] = (start, position)
                 break
         else:
-            self.fragments.append((0, position))
+            # Все начала правее position: новый фрагмент встаёт в начало,
+            # иначе список теряет сортировку и правки границ бьют в неверный.
+            self.fragments.insert(0, (0, position))
         self._update_hist()
         return True
 

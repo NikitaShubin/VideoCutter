@@ -36,7 +36,7 @@ jobs:
       - name: Тесты ядра (Python)
         run: python scripts/test_fragment_core.py
 
-      - name: Сверка с легаси PyVideoCutter
+      - name: Сверка Python-ядра и JS-модели
         run: python scripts/compare_fragments.py --random 50
 
       - name: Django API-тесты

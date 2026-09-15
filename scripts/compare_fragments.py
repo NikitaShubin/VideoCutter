@@ -1,14 +1,20 @@
-"""Этап B: сверка поведения редактора фрагментов с оригиналом PyVideoCutter.
+"""Сверка Python-ядра редактора фрагментов с JS-моделью фронтенда.
 
-Прогоняет одинаковые последовательности «нажатий» (add/start/end/delete/
+Прогоняет одинаковые последовательности операций (add/start/end/delete/
 undo/redo) на трёх реализациях и сравнивает состояние списка фрагментов
-после каждого шага, а также итоговое содержимое txt-файла оригинала.
+после каждого шага, а также показывает итоговое содержимое txt файла legacy.
 
 Три реализации:
   1) BackendLegacy — точная копия Backend из PyVideoCutter/main.py (tools/);
-  2) FragmentEditor — ядро VideoCutter (videocutter/core/fragment_editor.py);
+     в нём сохранена исходная (неисправленная) «механика» как справочная.
+  2) FragmentEditor — ядро VideoCutter (videocutter/core/fragment_editor.py).
   3) JS FragmentModel — реальная логика фронтенда (frontend/src/model/),
      запускается в Node (Node >= 23 умеет импортировать TS напрямую).
+
+Ключевой инвариант — FragmentEditor и FragmentModel ведут себя одинаково
+(pycore == jsfront). Legacy может расходиться: в оригинале new_end добавлял
+фрагмент [0, position] В КОНЕЦ списка, ломая сортировку (баг перекрытия
+границ); в ядре это исправлено, в legacy скопировано 1-в-1 как было.
 
 Использование:
     python3 scripts/compare_fragments.py            # детерминированный сценарий
@@ -218,20 +224,25 @@ def main():
         legacy_logs, fe_logs, js_logs, legacy_txt = run_replay(ops, args.nframes)
         n = len(ops)
         mism = []
+        legacy_mism = 0
         for i in range(n):
-            st = (legacy_logs[i]["state"], fe_logs[i]["state"], js_logs[i]["state"])
-            if st[0] != st[1] or st[1] != st[2]:
-                mism.append((i, ops[i], st))
+            py = fe_logs[i]["state"]
+            if py != js_logs[i]["state"]:
+                mism.append((i, ops[i], py, js_logs[i]["state"]))
+            if py != legacy_logs[i]["state"]:
+                legacy_mism += 1
         if mism:
             any_fail = True
-            print(f"[FAIL] {name}: {len(mism)}/{n} шагов различаются")
-            for i, op, st in mism[:12]:
+            print(f"[FAIL] {name}: {len(mism)}/{n} шагов pycore и jsfront различаются")
+            for i, op, py, js in mism[:12]:
                 print(f"   шаг {i} {op}:\n"
-                      f"      legacy: {fmt_state(st[0])} ok={legacy_logs[i]['ok']}\n"
-                      f"      pycore: {fmt_state(st[1])} ok={fe_logs[i]['ok']}\n"
-                      f"      jsfront: {fmt_state(st[2])} ok={js_logs[i]['ok']}")
+                      f"      pycore: {fmt_state(py)} ok={fe_logs[i]['ok']}\n"
+                      f"      jsfront: {fmt_state(js)} ok={js_logs[i]['ok']}")
         else:
-            print(f"[PASS] {name}: {n} шагов, все реализации совпали")
+            note = ""
+            if legacy_mism:
+                note = f" (legacy расходится на {legacy_mism} шагах — исходный формат, баг несущий)"
+            print(f"[PASS] {name}: {n} шагов, pycore и jsfront совпали{note}")
 
     # Сравнение итогового txt с оригиналом (порядок и формат).
     legacy_logs, fe_logs, js_logs, legacy_txt = run_replay(sequences[0][1], args.nframes)

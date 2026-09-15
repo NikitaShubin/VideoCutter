@@ -336,10 +336,12 @@ export function CutEditor({ pairId, onBack }: Props) {
         p.newStart(position);
         rerender();
         drawStatusbar();
+        saveToDb(p.getFragments());
       } else if (is("ArrowDown") || is("BracketRight")) {
         p.newEnd(position);
         rerender();
         drawStatusbar();
+        saveToDb(p.getFragments());
       } else if (is("KeyK") || is("Insert") || is("F12")) {
         if (keyPose === null) {
           if (p.fragments.some((f) => position >= f.start && position <= f.end)) {

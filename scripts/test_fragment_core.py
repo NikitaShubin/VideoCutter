@@ -67,6 +67,26 @@ def test_new_start_end(tmpdir):
     assert state(e) == [[10, 30], [50, 99]]
 
 
+def test_new_end_inserts_front_not_back(tmpdir):
+    # Было: new_end создавал [0, position] в конце списка → терялась сортировка,
+    # и следующий new_start правил не тот фрагмент (перекрытие).
+    e = new_editor(tmpdir)
+    e.new_start(60)  # [60, 99]
+    e.new_end(55)    # [0, 55] должен встать в начало
+    e.new_start(45)  # первый конец >= 45 — [0, 55] → [45, 55]
+    e.new_end(90)    # правый сегмент → [60, 90]
+    assert state(e) == [[45, 55], [60, 90]]
+
+
+def test_new_end_left_of_all_inserts_front(tmpdir):
+    e = new_editor(tmpdir)
+    e.new_start(60)  # [60, 99]
+    e.new_end(55)    # [0, 55] в начало
+    e.new_start(45)  # [45, 55]
+    e.new_end(30)    # нет start <= 30 → [0, 30] в начало, не в конец
+    assert state(e) == [[0, 30], [45, 55], [60, 99]]
+
+
 def test_delete_inside(tmpdir):
     e = new_editor(tmpdir)
     e.add((10, 20))
@@ -192,6 +212,8 @@ def main():
         tests = [
             test_add_inserts_sorted_and_rejects_overlap,
             test_new_start_end,
+            test_new_end_inserts_front_not_back,
+            test_new_end_left_of_all_inserts_front,
             test_delete_inside,
             test_delete_edge,
             test_delete_gap_merges,

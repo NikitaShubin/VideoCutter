@@ -103,7 +103,9 @@ setInitial(fragments: Fragment[]): void {
         return;
       }
     }
-    this.fragments.push({ start: 0, end: position, comment: "" });
+    // Все начала правее position: новый фрагмент встаёт в начало списка,
+    // иначе сортировка ломается и следующие правки границ бьют в неверный.
+    this.fragments.unshift({ start: 0, end: position, comment: "" });
     this.push();
   }
 
