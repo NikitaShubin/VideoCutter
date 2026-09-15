@@ -119,7 +119,7 @@ export function nextPlayPosition(
 export function segmentBoundaryForward(
   position: number,
   direction: 1 | -1,
-  keyframes: number[],
+  keyframes: ReadonlyArray<number>,
   total: number,
 ): number {
   const ks = [0, ...keyframes.filter((k) => k > 0 && k < total - 1), total - 1];
@@ -160,21 +160,22 @@ export function timelineFrame(pixel: number, width: number, total: number): numb
   return Math.round(pixel * Math.max(1, total - 1) / (width - 1));
 }
 
-// Старт тёмной зоны «после текущего кадра». Тот же timelinePix, что и границы
+// Старт тёмной зоны «от текущего кадра» (как в оригинале sb[:, current_shift:, :]
+// //= 2 — текущий кадр тоже затемняется). Тот же timelinePix, что и границы
 // сегментов, поэтому при реальном совпадении позиции с границей смена
 // света/тени приходится на ту же колонку, что и смена цвета сегмента:
-// - позиция == КОНЕЦ сегмента -> зона начинается со следующей колонки,
-//   т.е. ровно на правой границе сегмента (последний пиксель сегмента яркий);
-// - позиция == НАЧАЛО сегмента -> зона начинается с первого пикселя сегмента,
-//   т.е. ровно на его левой границе;
-// - внутри сегмента/вне границ -> зона «кадры после текущего», +1.
+// - по умолчанию (включая первый кадр и внутренние кадры) — с пикселя
+//   позиции, т.е. левая граница сегмента-«от текущего»;
+// - позиция == КОНЕЦ сегмента -> со следующей колонки, т.е. ровно на правой
+//   границе сегмента (его последний пиксель не затемняется).
+// Так на первом кадре вся полоса затемнена (светлой зоны «до» не существует).
 export function overlayStart(
   position: number,
   width: number,
   total: number,
-  fragments: ReadonlyArray<{ start: number }>,
+  fragments: ReadonlyArray<{ end: number }>,
 ): number {
   const pix = timelinePix(position, width, total);
-  const atStart = fragments.some((f) => f.start === position);
-  return atStart ? pix : Math.min(width - 1, pix + 1);
+  const atEnd = fragments.some((f) => f.end === position);
+  return atEnd ? Math.min(width - 1, pix + 1) : pix;
 }
