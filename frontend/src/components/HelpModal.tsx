@@ -66,7 +66,10 @@ export function HelpModal({ open, onClose }: Props) {
             <tbody>
               <tr><th>Клавиши</th><th>Действие</th></tr>
               <tr>
-                <td><span className="kbd">←</span> <span className="kbd">→</span></td>
+                <td>
+                  <span className="kbd">←</span> <span className="kbd">→</span>
+                  {" "}(и{" "}<span className="kbd">,</span>/<span className="kbd">.</span>)
+                </td>
                 <td>назад / вперёд на 1 кадр (одиночное нажатие — покадровый drain)</td>
               </tr>
               <tr>
@@ -108,7 +111,7 @@ export function HelpModal({ open, onClose }: Props) {
             <tbody>
               <tr><th>Клавиши</th><th>Действие</th></tr>
               <tr><td>{k("↑ / ] или [ / ↓")}</td><td>начало / конец фрагмента (ключевой кадр / граница)</td></tr>
-              <tr><td><span className="kbd">K</span></td><td>вставить пару границ вокруг текущей позиции</td></tr>
+              <tr><td><span className="kbd">K</span> <span className="kbd">Ins</span> <span className="kbd">F12</span></td><td>вставить пару границ вокруг текущей позиции</td></tr>
               <tr><td>{k("D / Del")}</td><td>удалить фрагмент под позицией</td></tr>
               <tr><td><span className="kbd">I</span></td><td>комментарий к сегменту (Enter — сохранить, Esc — отмена)</td></tr>
               <tr><td>{k("Ctrl+Z / Z")}</td><td>undo / redo</td></tr>

@@ -1,7 +1,7 @@
 # VideoCutter — автономное окружение (backend + ui).
 # Workspace-ы: папки с видео + fragments.tsv на хосте в ./workspaces/.
 # Запуск: docker compose up --build
-# Файлы: положить .mp4 в ./workspaces/<имя_проекта>/ и обновить страницу (F5).
+# Файлы: положить .mp4 в ./workspaces/<имя_проекта>/ или загрузить через UI кнопкой «＋ Добавить видео».
 services:
   videocutter_backend:
     container_name: videocutter_backend
