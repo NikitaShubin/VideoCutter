@@ -33,6 +33,12 @@ jobs:
       - name: Тесты ядра (JS-модель)
         run: node scripts/test_fragment_model.mjs
 
+      - name: Тесты статус-бара (JS)
+        run: node scripts/test_statusbar.mjs
+
+      - name: Тесты планировщика кадров (JS)
+        run: node scripts/test_frame_scheduler.mjs
+
       - name: Тесты ядра (Python)
         run: python scripts/test_fragment_core.py
 
