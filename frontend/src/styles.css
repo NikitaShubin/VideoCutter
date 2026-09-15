@@ -262,23 +262,39 @@ body {
 .pair-list .pair-open .pair-bg {
   position: absolute;
   inset: 0;
+  z-index: 0;
   display: block;
   width: 100%;
   height: 100%;
 }
 
+/* Один полупрозрачный фон на всю строку (а не под каждой строкой текста):
+ * приглушает яркость статус-бара целиком — силуэт фрагментов остаётся
+ * узнаваемым, а светлый текст читается без отдельных «чипов». Приглушение
+ * не трогает отрисовку (statusbar.ts), это чистый CSS-слой. */
+.pair-list .pair-open::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.5);
+  transition: background 0.15s ease;
+}
+
+.pair-list .pair-open:hover::before {
+  background: rgba(0, 0, 0, 0.3);
+}
+
 .pair-list .pair-open .pair-label,
 .pair-list .pair-open .pair-meta {
   position: relative;
-  z-index: 1;
+  z-index: 2;
 }
 
 .pair-list .pair-open .pair-label {
   display: inline-block;
   margin: 10px 12px 2px;
   padding: 2px 8px;
-  background: rgba(0, 0, 0, 0.55);
-  border-radius: 4px;
   font-weight: 600;
 }
 
@@ -286,8 +302,6 @@ body {
   display: block;
   margin: 0 12px 8px;
   padding: 1px 8px;
-  background: rgba(0, 0, 0, 0.55);
-  border-radius: 4px;
   font-size: 0.85em;
   color: #d8d8e8;
 }
