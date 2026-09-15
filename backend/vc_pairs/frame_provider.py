@@ -1,185 +1,372 @@
 """Провайдер кадров видео на сервере.
 
 Отдаёт JPEG-кадр по индексу из файла на диске (original или visualization).
-Используется браузером для точной покадровой навигации вперёд/назад.
 
-Движок — PyAV (FFmpeg): seek по точному PTS кадра, что корректнее, чем
-``cap.set(CAP_PROP_POS_FRAMES)`` у OpenCV на H.264 с B-кадрами и VFR
-(OpenCV там стабильно сдвигался на i+1/i-1 и не читал AV1).
-OpenCV остаётся только для JPEG-кодирования и будущих оверлеев.
+Движок — PyAV (FFmpeg). Точный ``idx -> PTS`` строится из демукс-пакетов
+(без декодирования) и кэшируется по (path, kind). Среди ключевых кадров
+(I-кадров) строится индекс границ GOP, чтобы декодировать только кадры
+внутри одной группы.
 
-Точный ``idx -> PTS`` строится из демукс-пакетов (без декодирования),
-что для 148k-кадрового файла занимает <1 c; кэшируется по (path, kind).
+Почему так: у H.264 не-ключевой кадр доступен только через декодирование
+всей цепочки от ближайшего I-кадра. Один „холодный" запрос к середине GOP
+требует декода всей группы (у crowd-подобных файлов GOP ~ 250 кадров,
+1080p → 1.5–2 c — это и был источник «тормозов» при перемотке). Решение —
+декодировать GOP один раз целиком, кэшировать все её кадры и префетчить
+соседние группы в фоне:
+
+  * ``_GopCache`` (LRU по GOP, лимиты: число групп и общий объём) — хит =
+    чтение из памяти без декода;
+  * прогрессивная отдача: кадр уходит клиенту сразу после его энкода,
+    остальные кадры группы дозаполняются тем же декодом;
+  * фоновый префетч GOP g+1, g+2 при обращении к g;
+  * декод групп параллелен по ядрам (пул от ``os.cpu_count()``,
+    регулируется env ``VC_DECODE_CORES``; число одновременных декодов
+    ограничено памятью через семафор);
+  * точный seek к PTS ключевого кадра (без ``-1``: при захвате цели на
+    самом I-кадре декодируется 1 кадр).
 """
 
 from __future__ import annotations
 
+import bisect
+import os
 import threading
 from collections import OrderedDict
-from typing import List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional
 
 import av
 import cv2
-import numpy as np
+
+# --- Конфигурация (зависит от числа ядер/памяти, переопределяется env) ---
+_DEFAULT_CORES = os.cpu_count() or 1
+# Одновременных декодов GOP. Для 1080p-кадра транзиентно ~6 МБ BGR + накопленный
+# JPEG группы, поэтому пул ограничиваем сверху независимо от числа ядер.
+DECODE_CORES = int(os.environ.get("VC_DECODE_CORES") or min(8, _DEFAULT_CORES))
+PREFETCH_AHEAD = int(os.environ.get("VC_PREFETCH_AHEAD") or 2)
+CACHE_MB = int(os.environ.get("VC_GOP_CACHE_MB") or 512)
+CACHE_GOPS = int(os.environ.get("VC_GOP_CACHE_GOPS") or 16)
+JPEG_QUALITY = int(os.environ.get("VC_JPEG_QUALITY") or 92)
+
+_DECODE_POOL = ThreadPoolExecutor(max_workers=DECODE_CORES)
+# Страховка по памяти: потоков декода не больше, чем DECODE_CORES, т.к. вся
+# работа идёт через пул; транзиент на 1080p-группу ~6 МБ BGR + JPEG группы.
+_HEAVY = threading.BoundedSemaphore(DECODE_CORES)
 
 
-class FrameCache:
-    """Простой потокобезопасный LRU-кэш кадров (индекс -> JPEG-байты)."""
+class _Index:
+    """Индекс кадров: display-порядок PTS и границы GOP по ключевым кадрам."""
 
-    def __init__(self, capacity: int = 64) -> None:
-        self.capacity = capacity
-        self._data: "OrderedDict[int, bytes]" = OrderedDict()
-        self._lock = threading.Lock()
+    def __init__(self, path: str) -> None:
+        try:
+            cont = av.open(path)
+        except Exception as e:
+            raise ValueError(f"Ошибка открытия видеофайла: {path} ({e})")
+        stream = cont.streams.video[0]
+        self.tb = stream.time_base
+        self.width = stream.codec_context.width
+        self.height = stream.codec_context.height
+        rate = stream.average_rate
+        self.fps = float(rate) if rate else 0.0
 
-    def get(self, key: int) -> Optional[bytes]:
-        with self._lock:
-            if key not in self._data:
-                return None
-            self._data.move_to_end(key)
-            return self._data[key]
+        pts: List[float] = []
+        kf_sec: List[float] = []
+        for pkt in cont.demux(stream):
+            if pkt.pts is None:
+                continue
+            tb = float(pkt.time_base or self.tb)
+            pts.append(pkt.pts * tb)
+            if pkt.is_keyframe:
+                kf_sec.append(pkt.pts * tb)
+        cont.close()
+        pts.sort()
+        self.total = len(pts)
+        self.pts = pts
 
-    def put(self, key: int, value: bytes) -> None:
-        with self._lock:
-            self._data[key] = value
-            self._data.move_to_end(key)
-            while len(self._data) > self.capacity:
-                self._data.popitem(last=False)
+        # Индексы отображения ключевых кадров (номер кадра, где стоит I-кадр).
+        kf_idx = sorted({
+            biz for biz in (bisect.bisect_right(pts, t) - 1 for t in kf_sec)
+            if 0 <= biz < self.total
+        })
+        if not kf_idx or kf_idx[0] != 0:
+            kf_idx = [0] + kf_idx
+        if kf_idx[-1] != self.total:
+            kf_idx.append(self.total)
+        self.bounds: List[int] = kf_idx
+
+    def gop_of(self, frame: int) -> Optional[int]:
+        """Номер GOP, содержащего кадр, или None (до первого ключевого)."""
+        if not 0 <= frame < self.total:
+            return None
+        g = bisect.bisect_right(self.bounds, frame) - 1
+        return g if 0 <= g < len(self.bounds) - 1 else None
 
 
-# Раздельный кэш для каждого (par path) -> (video kind) -> FrameCache.
-_cache_by_source: "dict[tuple[str, str], FrameCache]" = {}
-_cache_lock = threading.Lock()
+class _GopTask:
+    """Текущий декод одной GOP: кадры появляются по мере энкода.
 
-
-def _get_cache(path: str, kind: str) -> FrameCache:
-    key = (path, kind)
-    with _cache_lock:
-        if key not in _cache_by_source:
-            _cache_by_source[key] = FrameCache()
-        return _cache_by_source[key]
-
-
-class _AvHandle:
-    """Разделяемое открытие PyAV-контейнера + мьютекс на доступ к кадру.
-
-    Один контейнер на (path, kind) для всего процесса; доступ к чтению
-    регулируется блокировкой, чтобы не было гонок между загрузкой пары
-    и отдачей кадра. ``pts_map`` строится лениво из демукс-пакетов.
+    Читатели (в т.ч. из префетч-потока) ждут свой кадр по событиям.
     """
+
+    def __init__(self) -> None:
+        self.frames: Dict[int, bytes] = {}
+        self._events: Dict[int, threading.Event] = {}
+        self._lock = threading.Lock()
+        self.error: Optional[BaseException] = None
+        self.done = False
+
+    def put(self, frame: int, jpeg: bytes) -> None:
+        with self._lock:
+            self.frames[frame] = jpeg
+            ev = self._events.pop(frame, None)
+        if ev is not None:
+            ev.set()
+
+    def mark_done(self) -> None:
+        with self._lock:
+            self.done = True
+
+    def fail(self, exc: BaseException) -> None:
+        with self._lock:
+            self.error = exc
+            self.done = True
+
+    def wait(self, frame: int) -> Optional[bytes]:
+        """Ждать кадр (или завершение декода без него)."""
+        while True:
+            with self._lock:
+                j = self.frames.get(frame)
+                err = self.error
+                done = self.done
+            if j is not None:
+                return j
+            if err is not None or done:
+                return None
+            self._event_for(frame).wait(0.15)
+
+    def _event_for(self, frame: int) -> threading.Event:
+        with self._lock:
+            ev = self._events.get(frame)
+            if ev is None:
+                ev = threading.Event()
+                self._events[frame] = ev
+            return ev
+
+
+class _Provider:
+    """Провайдер одного видеофайла: индекс + кэш GOP + префетч."""
 
     def __init__(self, path: str) -> None:
         self.path = path
-        self.lock = threading.Lock()
+        self._index: Optional[_Index] = None
+        self._ilock = threading.Lock()
+        self._cache: "OrderedDict[int, Dict[int, bytes]]" = OrderedDict()
+        self._bytes = 0
+        self._tasks: Dict[int, _GopTask] = {}
+        self._scheduled: set[int] = set()
+
+    # --- индекс ---
+    def _ensure_index(self) -> _Index:
+        if self._index is None:
+            with self._ilock:
+                if self._index is None:
+                    self._index = _Index(self.path)
+        return self._index
+
+    # --- кэш ---
+    def _cache_hit(self, g: int, index: int) -> Optional[bytes]:
+        with self._ilock:
+            d = self._cache.get(g)
+            if d is None:
+                return None
+            self._cache.move_to_end(g)
+            return d.get(index)
+
+    def _cache_put(self, g: int, frames: Dict[int, bytes]) -> None:
+        with self._ilock:
+            if g in self._cache:
+                return
+            self._cache[g] = frames
+            self._bytes += sum(len(b) for b in frames.values())
+        self._evict()
+
+    def _evict(self) -> None:
+        while (len(self._cache) > CACHE_GOPS) or (self._bytes > CACHE_MB << 20):
+            with self._ilock:
+                self._cache.popitem(last=False)
+
+    # --- декод GOP ---
+    def _decode_gop(self, g: int, task: _GopTask) -> None:
+        idx = self._ensure_index()
+        start = idx.bounds[g]
+        end = min(idx.bounds[g + 1], idx.total)
+        tb = float(idx.tb)
+        seek_tick = int(idx.pts[start] / tb + 0.5)
         try:
-            self.cont = av.open(path)
-        except Exception as e:
-            raise ValueError(f"Ошибка открытия видеофайла: {path} ({e})")
+            with _HEAVY:
+                cont = av.open(self.path)
+                try:
+                    stream = cont.streams.video[0]
+                    cont.seek(seek_tick, stream=stream, backward=True, any_frame=False)
+                    i = -1
+                    for fr in cont.decode(stream):
+                        fs = (fr.pts or 0) * float(fr.time_base or tb)
+                        if fs < idx.pts[start]:
+                            continue  # B-кадры предыдущей GOP в display-порядке
+                        i += 1
+                        gi = start + i
+                        if gi >= end:
+                            break
+                        ok, buf = cv2.imencode(
+                            ".jpg", fr.to_ndarray(format="bgr24"),
+                            [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+                        if ok:
+                            task.put(gi, buf.tobytes())
+                finally:
+                    cont.close()
+            task.mark_done()
+        except BaseException as e:  # noqa: BLE001 — завершение задачи для ждунов
+            task.fail(e)
 
-        self.stream = self.cont.streams.video[0]
-        self.tb = self.stream.time_base
-        self.width = self.stream.codec_context.width
-        self.height = self.stream.codec_context.height
-        self.total_frames = int(self.stream.frames or 0)
-        rate = self.stream.average_rate
-        self.fps = float(rate) if rate else 0.0
-        self._pts_map: Optional[List[float]] = None
-        # Обёртки (напр. VP9 webm) часто не отдают stream.frames — реальный
-        # счётчик известен только из полного демукса, форсируем его сразу.
-        if not self.total_frames:
-            self.pts_map()
+    def _run_pooled(self, g: int, task: _GopTask) -> None:
+        self._decode_gop(g, task)
+        self._finish_task(g, task)
 
-    def pts_map(self) -> List[float]:
-        """Точный список PTS (сек) по индексу кадра, в порядке отображения."""
-        with self.lock:
-            if self._pts_map is not None:
-                return self._pts_map
-            pts = []
-            for pkt in self.cont.demux(self.stream):
-                if pkt.pts is not None:
-                    pts.append(pkt.pts * float(pkt.time_base or self.tb))
-            pts.sort()
-            self._pts_map = pts
-            if not self.total_frames:
-                self.total_frames = len(pts)
-            return pts
+    def _finish_task(self, g: int, task: _GopTask) -> None:
+        with self._ilock:
+            self._tasks.pop(g, None)
+            self._scheduled.discard(g)
+        if not task.error and task.frames:
+            self._cache_put(g, task.frames)
+        self._prefetch(g)
 
-    def read_frame(self, index: int) -> Optional[np.ndarray]:
-        """Читает кадр по индексу (0-based) как BGR-массив."""
-        if not 0 <= index < len(self.pts_map()):
+    def _prefetch(self, g: int) -> None:
+        idx = self._ensure_index()
+        for d in range(1, PREFETCH_AHEAD + 1):
+            ng = g + d
+            if ng >= len(idx.bounds) - 1:
+                break
+            with self._ilock:
+                if ng in self._cache or ng in self._tasks or ng in self._scheduled:
+                    continue
+                self._scheduled.add(ng)
+                task = _GopTask()
+                self._tasks[ng] = task
+            try:
+                _DECODE_POOL.submit(self._run_pooled, ng, task)
+            except Exception:
+                # Пул остановлен (завершение приложения) — убираем как несостоявшийся.
+                with self._ilock:
+                    self._tasks.pop(ng, None)
+                    self._scheduled.discard(ng)
+
+    # --- чтение кадра ---
+    def get_frame(self, index: int, quality: int = JPEG_QUALITY) -> Optional[bytes]:
+        idx = self._ensure_index()
+        if not 0 <= index < idx.total:
             return None
 
-        with self.lock:
-            target_s = self._pts_map[index]  # type: ignore[index]
+        g = idx.gop_of(index)
+        if g is not None:
+            j = self._cache_hit(g, index)
+            if j is not None:
+                # Группа в кэше — прогреваем следующие заранее, чтобы перемотка
+                # дальше не упиралась в холодную границу.
+                self._prefetch(g)
+                return j
+            task = self._task_for(g)
+            if task is not None:
+                j = task.wait(index)
+                if j is not None:
+                    return j
+        return self._read_one(index, quality)
 
-            # PYAV: seek к предыдущему ключевому кадру; backward=True — до или на.
-            offset = int(target_s / float(self.tb)) - 1 if target_s > 0 else 0
-            self.cont.seek(offset, stream=self.stream, backward=True, any_frame=False)
+    def _task_for(self, g: int) -> Optional[_GopTask]:
+        """Создать (и запустить в пуле) задачу GOP, если её ещё нет."""
+        with self._ilock:
+            task = self._tasks.get(g)
+            if task is None:
+                task = _GopTask()
+                self._tasks[g] = task
+                created = True
+            else:
+                created = False
+        if created:
+            try:
+                _DECODE_POOL.submit(self._run_pooled, g, task)
+            except Exception:
+                # Пул остановлен (завершение приложения) — как несостоявшийся.
+                with self._ilock:
+                    self._tasks.pop(g, None)
+                    self._scheduled.discard(g)
+                return None
+            # Следующие группы прогреваем сразу — параллельно текущему декоду,
+            # тогда переход через границу не застанет холодную группу.
+            self._prefetch(g)
+        return task
 
-            for frame in self.cont.decode(self.stream):
-                f_s = (frame.pts or 0) * float(frame.time_base or self.tb)
-                if f_s >= target_s:
-                    return frame.to_ndarray(format="bgr24")
-
+    # --- одиночный seek (до первого ключевого кадра и прочие огрехи) ---
+    def _read_one(self, index: int, quality: int) -> Optional[bytes]:
+        idx = self._ensure_index()
+        if not 0 <= index < idx.total:
+            return None
+        tb = float(idx.tb)
+        target_sec = idx.pts[index]
+        g = idx.gop_of(index)
+        seek_sec = idx.pts[idx.bounds[g]] if g is not None else idx.pts[0]
+        seek_tick = int(seek_sec / tb + 0.5)
+        try:
+            cont = av.open(self.path)
+            try:
+                stream = cont.streams.video[0]
+                cont.seek(seek_tick, stream=stream, backward=True, any_frame=False)
+                for fr in cont.decode(stream):
+                    fs = (fr.pts or 0) * float(fr.time_base or tb)
+                    if fs >= target_sec:
+                        ok, buf = cv2.imencode(
+                            ".jpg", fr.to_ndarray(format="bgr24"),
+                            [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                        return buf.tobytes() if ok else None
+            finally:
+                cont.close()
+        except (av.FFmpegError, ValueError):
+            return None
         return None
 
-    def close(self) -> None:
-        with self.lock:
-            if self.cont is not None:
-                self.cont.close()
-                self.cont = None  # type: ignore[assignment]
+    def metadata(self) -> dict:
+        idx = self._ensure_index()
+        return {
+            "width": idx.width,
+            "height": idx.height,
+            "total_frames": idx.total,
+            "fps": idx.fps,
+        }
 
 
-_caps: "dict[str, _AvHandle]" = {}
-_caps_lock = threading.Lock()
+# --- регистр провайдеров ---
+_providers: "Dict[str, _Provider]" = {}
+_providers_lock = threading.Lock()
 
 
-def _get_cap(path: str) -> _AvHandle:
-    with _caps_lock:
-        if path not in _caps:
-            _caps[path] = _AvHandle(path)
-        return _caps[path]
+def _get_provider(path: str) -> _Provider:
+    with _providers_lock:
+        p = _providers.get(path)
+        if p is None:
+            p = _Provider(path)
+            _providers[path] = p
+        return p
 
 
-def _frame_to_jpeg(frame: np.ndarray, quality: int = 92) -> bytes:
-    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    if not ok:
-        raise RuntimeError("Не удалось закодировать кадр в JPEG")
-    return buf.tobytes()
-
-
-def get_frame_jpeg(
-    path: str,
-    index: int,
-    *,
-    quality: int = 92,
-) -> Tuple[Optional[bytes], Optional[str]]:
+def get_frame_jpeg(path: str, index: int, *, quality: int = JPEG_QUALITY):
     """Возвращает (jpeg_bytes, mime) для кадра по индексу или (None, None)."""
-    cache = _get_cache(path, "frames")
-    cached = cache.get(index)
-    if cached is not None:
-        return cached, "image/jpeg"
-
-    cap = _get_cap(path)
-    frame = cap.read_frame(index)
-    if frame is None:
-        return None, None
-    jpeg = _frame_to_jpeg(frame, quality)
-    cache.put(index, jpeg)
-    return jpeg, "image/jpeg"
+    jpeg = _get_provider(path).get_frame(index, quality)
+    return (jpeg, "image/jpeg") if jpeg else (None, None)
 
 
 def get_metadata(path: str) -> dict:
-    cap = _get_cap(path)
-    return {
-        "width": cap.width,
-        "height": cap.height,
-        "total_frames": cap.total_frames,
-        "fps": cap.fps,
-    }
+    return _get_provider(path).metadata()
 
 
 def close_source(path: str) -> None:
-    with _caps_lock:
-        cap = _caps.pop(path, None)
-        if cap is not None:
-            cap.close()
+    with _providers_lock:
+        _providers.pop(path, None)
