@@ -135,6 +135,9 @@ export function CutEditor({ pairId, onBack }: Props) {
       if (step.stop) {
         // Дошли до начала/конца: разворачиваемся на воспроизведение
         // в обратную сторону, иначе пробел после остановки не запустит видео.
+        // J-прогон завершился на краю — устаревшая цель не должна всплывать
+        // при последующем воспроизведении.
+        playTargetRef.current = null;
         setDirection(step.direction);
         setPlaying(false);
       } else {
@@ -470,7 +473,15 @@ export function CutEditor({ pairId, onBack }: Props) {
         cancelPending();
         setPlaying((v) => !v);
       } else if (is("KeyR")) {
-        setDirection((d) => (d === 1 ? -1 : 1));
+        const nd = direction === 1 ? -1 : 1;
+        setDirection(nd);
+        // J-проигрывание в полёте: цель пересчитывается под новое направление,
+        // иначе устаревшая цель (в старом направлении) никогда не достигается
+        // обратным ходом, и остановки на границе не происходит.
+        if (playTargetRef.current !== null) {
+          const p = modelRef.current;
+          if (p) playTargetRef.current = segmentBoundaryForward(position, nd, p.keyFrames(), p.totalFrames);
+        }
       } else if (is("KeyJ")) {
         if (!e.repeat) playToBoundary();
       } else if (/^Digit[0-9]$/.test(code)) {
