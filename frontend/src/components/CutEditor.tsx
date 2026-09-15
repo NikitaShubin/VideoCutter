@@ -12,7 +12,10 @@ import {
   FrameScheduler,
   nextPlayPosition,
   pickLoadTarget,
+  positionOverlayStart,
   segmentBoundaryForward,
+  timelineFrame,
+  timelinePix,
 } from "../model/frameScheduler";
 import type { ExportItem, VideoPairDetail } from "../types";
 
@@ -153,12 +156,6 @@ export function CutEditor({ pairId, onBack }: Props) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Билинейная обратимая пара: [0,total-1] -> [0,width-1].
-    // (width-1)*frame/total не достигает последнего пикселя при последнем кадре;
-    // оригинал для позиции использовал int(width*position/total) — без "-1".
-    const span = Math.max(1, p.totalFrames - 1);
-    const sbX = (frame: number) => Math.round(frame * (width - 1) / span);
-
     // Фон — зелёный (BGR (0,255,0)).
     ctx.fillStyle = "#00ff00";
     ctx.fillRect(0, 0, width, height);
@@ -167,13 +164,16 @@ export function CutEditor({ pairId, onBack }: Props) {
     // чтобы последний кадр доходил до правого края canvas.
     ctx.fillStyle = "#ff0000";
     for (const f of p.fragments) {
-      const x = sbX(f.start);
-      const endX = sbX(f.end);
+      const x = timelinePix(f.start, width, p.totalFrames);
+      const endX = timelinePix(f.end, width, p.totalFrames);
       ctx.fillRect(x, 0, Math.max(1, endX - x + 1), height);
     }
 
     // Затемнение от текущей позиции до конца (sb[:, current_shift:, :] //= 2).
-    const curX = sbX(position);
+    // Стартовый пиксель позиции не затемняем — он остаётся ярким маркером,
+    // поэтому при остановке на границе фрагмента маркер совпадает с ней,
+    // а не съедает её крайний пиксель (иначе зазор 1px в сторону границы).
+    const curX = positionOverlayStart(position, width, p.totalFrames);
     ctx.fillStyle = "rgba(0,0,0,0.5)";
     ctx.fillRect(curX, 0, width - curX, height);
 
@@ -182,8 +182,8 @@ export function CutEditor({ pairId, onBack }: Props) {
     // зелёный → циан, красный → пурпурный.
     if (keyPose !== null) {
       const [s, e] = [Math.min(keyPose, position), Math.max(keyPose, position)];
-      const x = sbX(s);
-      const endX = sbX(e);
+      const x = timelinePix(s, width, p.totalFrames);
+      const endX = timelinePix(e, width, p.totalFrames);
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
       ctx.fillStyle = "#0000ff";
@@ -716,7 +716,7 @@ export function CutEditor({ pairId, onBack }: Props) {
           const pixel = Math.min(canvas.width - 1, Math.max(0, x));
           const target = Math.min(
             p.totalFrames - 1,
-            Math.round(pixel * Math.max(1, p.totalFrames - 1) / (canvas.width - 1)),
+            timelineFrame(pixel, canvas.width, p.totalFrames),
           );
           setPlaying(false);
           jumpMode();

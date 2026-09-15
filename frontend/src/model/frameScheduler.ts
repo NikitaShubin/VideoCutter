@@ -129,3 +129,25 @@ export function segmentBoundaryForward(
   const left = ks.filter((f) => f < position);
   return left.length ? left[left.length - 1] : 0;
 }
+
+// --- Маппинг таймлайна: кадр <-> пиксель полосы (используется статус-баром
+// и кликом по нему). Единая пара, чтобы отрисовка и ввод не расходились. ---
+
+// Кадр -> пиксель. Билинейная обратимая пара [0,total-1] -> [0,width-1]:
+// с "-1" на обоих концах последний кадр доходит до правого края.
+export function timelinePix(frame: number, width: number, total: number): number {
+  return Math.round(frame * (width - 1) / Math.max(1, total - 1));
+}
+
+// Пиксель -> кадр (клик по полосе).
+export function timelineFrame(pixel: number, width: number, total: number): number {
+  return Math.round(pixel * Math.max(1, total - 1) / (width - 1));
+}
+
+// Старт тёмной зоны «после текущего кадра». Пиксель текущего кадра НЕ
+// затемняется: он остаётся ярким маркером позиции. Иначе при остановке на
+// границе фрагмента пиксель границы съедался бы затемнением, и маркер
+// отставал/убегал на 1px от видимой красной границы.
+export function positionOverlayStart(position: number, width: number, total: number): number {
+  return Math.min(width - 1, timelinePix(position, width, total) + 1);
+}

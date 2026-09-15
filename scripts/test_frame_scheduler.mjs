@@ -11,7 +11,10 @@ import {
   FrameScheduler,
   nextPlayPosition,
   pickLoadTarget,
+  positionOverlayStart,
   segmentBoundaryForward,
+  timelineFrame,
+  timelinePix,
 } from "../frontend/src/model/frameScheduler.ts";
 
 let passed = 0;
@@ -261,6 +264,56 @@ check("J: границы у краёв не дублируются (0/total-1 н
   // Фрагмент начинается с 0 и кончается последним кадром.
   assert.equal(segmentBoundaryForward(5, 1, [0, 399], TOTAL), 399);
   assert.equal(segmentBoundaryForward(398, -1, [0, 399], TOTAL), 0);
+});
+
+// --- timelinePix / timelineFrame / positionOverlayStart (полоса) ---
+check("timelinePix: края и середины отображаются без выхода за полосу", () => {
+  assert.equal(timelinePix(0, 800, 705), 0);
+  assert.equal(timelinePix(704, 800, 705), 799); // последний кадр = правый край
+  assert.equal(timelinePix(352, 800, 705), Math.round(352 * 799 / 704));
+  assert.equal(timelinePix(200, 800, 705), Math.round(200 * 799 / 704));
+});
+
+check("timelinePix: монотонно не убывает", () => {
+  let prev = -1;
+  for (let f = 0; f < 705; f++) {
+    const p = timelinePix(f, 200, 705);
+    assert.ok(p >= prev, `timelinePix не монотонен на кадре ${f}`);
+    prev = p;
+  }
+});
+
+check("timelineFrame: round-trip через timelinePix", () => {
+  const width = 800;
+  const total = 705;
+  for (let f = 0; f < total; f++) {
+    const pix = timelinePix(f, width, total);
+    assert.ok(timelineFrame(pix, width, total) >= 0);
+    assert.ok(timelineFrame(pix, width, total) <= total - 1);
+  }
+  assert.equal(timelineFrame(0, width, total), 0);
+  assert.equal(timelineFrame(width - 1, width, total), total - 1);
+});
+
+check("positionOverlayStart: пиксель позиции НЕ затемняется (маркер не съедает границу)", () => {
+  // Внутри полосы затемнение начинается ровно со следующего пикселя.
+  assert.equal(positionOverlayStart(100, 800, 705), timelinePix(100, 800, 705) + 1);
+  // Край (последний кадр): зона пуста, не выходит за полосу.
+  assert.equal(positionOverlayStart(704, 800, 705), 799);
+  assert.ok(positionOverlayStart(0, 800, 705) <= 800 - 1);
+});
+
+check("стоп на границе фрагмента: маркер совпадает с красной границей (crowd)", () => {
+  // Прежний баг: затемнение с curX съедало крайний красный пиксель, и маркер
+  // вставал на 1px правее/левее видимой границы. Теперь overlay стартует с +1.
+  const width = 800;
+  const total = 705;
+  for (const b of [120, 310, 704]) {
+    const boundaryPix = timelinePix(b, width, total);
+    // пиксель границы остаётся ярким, зона затемнения начинается после него
+    // (для последнего кадра зона пуста — кламп на width-1).
+    assert.equal(positionOverlayStart(b, width, total), Math.min(width - 1, boundaryPix + 1));
+  }
 });
 
 console.log(`ok: ${passed} проверок`);
