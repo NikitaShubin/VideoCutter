@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import unittest
 
 from django.test import SimpleTestCase
 
@@ -83,7 +84,7 @@ class FrameProviderTest(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         if shutil.which("ffmpeg") is None:
-            raise RuntimeError("ffmpeg не найден — тесты GOP-движка скипаются")
+            raise unittest.SkipTest("ffmpeg не найден — тесты GOP-движка скипаются")
         super().setUpClass()
         cls.tmpdir = tempfile.TemporaryDirectory(prefix="vcframes_")
         cls.path = os.path.join(cls.tmpdir.name, "clip.mp4")

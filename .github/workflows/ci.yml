@@ -26,6 +26,9 @@ jobs:
       - name: Установить зависимости Python
         run: pip install -r backend/requirements.txt
 
+      - name: Установить ffmpeg (GOP-тесты frame_provider)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Установить зависимости Node
         run: npm ci
         working-directory: frontend
