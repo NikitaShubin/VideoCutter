@@ -38,6 +38,7 @@ class Workspace:
     _visualization: Optional[str] = field(default=None, repr=False)
     _meta: Optional[dict] = field(default=None, repr=False)
     _fragments: Optional[List[dict]] = field(default=None, repr=False)
+    _position: Optional[int] = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def _discover_videos(self) -> None:
@@ -107,18 +108,35 @@ class Workspace:
     def fragments_path(self) -> str:
         return os.path.join(self.path, FRAGMENTS_FILE)
 
-    def load_fragments(self) -> List[dict]:
-        """Читает fragments.tsv → список {"start": int, "end": int, "comment": str}."""
+    def _read(self) -> tuple[List[dict], int]:
+        """Читает fragments.tsv: метаданные `# position` + таблицу фрагментов.
+
+        Строки, начинающиеся с `#`, — комментарии/метаданные, в таблицу не
+        попадают (поэтому формат остаётся обычным TSV с заголовком).
+        Отсутствие строки `# position` → позиция 0 (обратная совместимость).
+        """
         if self._fragments is not None:
-            return self._fragments
+            return self._fragments, self._position or 0
 
         tsv = self.fragments_path()
         frags: List[dict] = []
+        position = 0
 
         if os.path.isfile(tsv):
             with open(tsv, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f, delimiter="\t")
-                for row in reader:
+                data_lines: List[str] = []
+                for line in f:
+                    if line.startswith("#"):
+                        key, _, value = line[1:].partition("\t")
+                        if key.strip() == "position":
+                            try:
+                                position = int(value.strip())
+                            except ValueError:
+                                pass
+                        continue
+                    data_lines.append(line)
+
+                for row in csv.DictReader(data_lines, delimiter="\t"):
                     try:
                         frags.append({
                             "start": int(row["start"]),
@@ -130,12 +148,25 @@ class Workspace:
 
         frags.sort(key=lambda x: (x["start"], x["end"]))
         self._fragments = frags
-        return frags
+        self._position = position
+        return frags, position
 
-    def save_fragments(self, fragments: List[dict]) -> None:
-        """Сохраняет список фрагментов в fragments.tsv."""
+    def load_fragments(self) -> List[dict]:
+        """Читает fragments.tsv → список {"start": int, "end": int, "comment": str}."""
+        with self._lock:
+            return self._read()[0]
+
+    def load_position(self) -> int:
+        """Текущий кадр, на котором пользователь завершил работу (по умолчанию 0)."""
+        with self._lock:
+            return self._read()[1]
+
+    def _write(self, fragments: List[dict], position: int) -> None:
+        """Пишет fragments.tsv: строку `# position` + таблицу фрагментов."""
         tsv = self.fragments_path()
+        os.makedirs(os.path.dirname(tsv) or ".", exist_ok=True)
         with open(tsv, "w", newline="", encoding="utf-8") as f:
+            f.write(f"# position\t{int(position)}\n")
             writer = csv.DictWriter(f, fieldnames=["start", "end", "comment"], delimiter="\t")
             writer.writeheader()
             for frag in fragments:
@@ -145,10 +176,24 @@ class Workspace:
                     "comment": frag.get("comment", ""),
                 })
         self._fragments = None  # Инвалидируем кэш.
+        self._position = None
+
+    def save_fragments(self, fragments: List[dict], position: Optional[int] = None) -> None:
+        """Сохраняет фрагменты; позицию берёт из аргумента или из кэша."""
+        with self._lock:
+            current = self._read()[1]
+            self._write(fragments, current if position is None else position)
+
+    def save_position(self, position: int) -> None:
+        """Сохраняет текущий кадр, не трогая список фрагментов."""
+        with self._lock:
+            frags = self._read()[0]
+            self._write(frags, position)
 
     def invalidate_cache(self) -> None:
-        """Сбрасывает кэш фрагментов (при внешних изменениях)."""
+        """Сбрасывает кэш фрагментов и позиции (при внешних изменениях)."""
         self._fragments = None
+        self._position = None
 
 
 # ─── Глобальный реестр workspace-ов (ленивое сканирование) ──────────────────
@@ -225,4 +270,5 @@ def get_workspace_detail(name: str) -> Optional[dict]:
         "height": meta["height"],
         "fps": meta["fps"],
         "fragments": frags,
+        "position": ws.load_position(),
     }

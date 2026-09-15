@@ -4,6 +4,7 @@ import {
   getExportStatus,
   getPair,
   replaceFragments,
+  savePosition,
   startExport,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
@@ -96,7 +97,12 @@ export function CutEditor({ pairId, onBack }: Props) {
   useEffect(() => {
     getPair(pairId).then((p) => {
       setPair(p);
-      setPosition(0);
+      // Возвращаемся на кадр, где пользователь завершил редактирование
+      // (сохранён в fragments.tsv); при отсутствии/выходе за диапазон — 0.
+      const saved = p.total_frames > 0
+        ? Math.min(p.total_frames - 1, Math.max(0, p.position ?? 0))
+        : 0;
+      setPosition(saved);
       schedRef.current = new FrameScheduler(MAX_CACHE);
       setShownFrame(-1);
       modeRef.current = "jump";
@@ -566,7 +572,7 @@ export function CutEditor({ pairId, onBack }: Props) {
       } else if (is("KeyE")) {
         handleExport();
       } else if (is("Escape") || is("KeyQ")) {
-        if (!document.fullscreenElement) onBack();
+        if (!document.fullscreenElement) handleBack();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -591,10 +597,25 @@ export function CutEditor({ pairId, onBack }: Props) {
   }, [position, keyPose, direction, speed, playing, drawStatusbar]);
 
   const saveToDb = (frags: { start: number; end: number; comment: string }[]) => {
-    replaceFragments(pairId, frags)
+    replaceFragments(pairId, frags, position)
       .then(() => flash("Сохранено"))
       .catch((e) => flash(`Ошибка сохранения: ${e.message}`));
   };
+
+  // Завершение редактирования: фиксируем текущий кадр и возвращаемся к списку.
+  const handleBack = () => {
+    savePosition(pairId, position).catch(() => {});
+    onBack();
+  };
+
+  // Закрытие/сворачивание вкладки: keepalive-запрос досылает позицию.
+  useEffect(() => {
+    const flush = () => {
+      savePosition(pairId, position, true).catch(() => {});
+    };
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, [pairId, position]);
 
   const handleExport = async () => {
     setExporting(true);
@@ -654,7 +675,7 @@ export function CutEditor({ pairId, onBack }: Props) {
     <div ref={editorRef} className={isFullscreen ? "editor fullscreen" : "editor"}>
       {!isFullscreen && (
         <div className="editor-toolbar">
-          <button onClick={onBack}>← Назад</button>
+          <button onClick={handleBack}>← Назад</button>
           <span className="pair-name">{pair.original_name} → {pair.visualization_name || "оригинал"}</span>
           <span className="info">
             кадр {position + 1}/{pair.total_frames} · показано {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)

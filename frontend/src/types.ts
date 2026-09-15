@@ -16,6 +16,7 @@ export interface VideoPair {
 
 export interface VideoPairDetail extends VideoPair {
   fragments: Fragment[];
+  position: number;
 }
 
 export interface ExportItem {

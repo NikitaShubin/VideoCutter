@@ -67,6 +67,7 @@ class WorkspaceApiTestBase(SimpleTestCase):
         self.ws_meta_url = f"/api/v1/workspaces/{self.ws_id}/meta"
         self.ws_frame_url = f"/api/v1/workspaces/{self.ws_id}/frame/0/"
         self.frags_url = f"/api/v1/pairs/{self.ws_id}/fragments/"
+        self.position_url = f"/api/v1/pairs/{self.ws_id}/position"
         self.export_url = f"/api/v1/pairs/{self.ws_id}/export"
         self.export_status_url = f"/api/v1/pairs/{self.ws_id}/export/status"
 
@@ -163,6 +164,62 @@ class FragmentsApiTests(WorkspaceApiTestBase):
     def test_put_rejects_missing_workspace(self):
         resp = self.json_put("/api/v1/pairs/nonexistent/fragments/", [{"start": 0, "end": 5}])
         self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+
+class PositionApiTests(WorkspaceApiTestBase):
+    def test_detail_position_default_zero(self):
+        """Без строки `# position` позиция = 0 (обратная совместимость)."""
+        body = self.client.get(self.ws_detail_url).json()
+        self.assertEqual(body["position"], 0)
+
+    def test_position_roundtrip_creates_metadata_line(self):
+        resp = self.json_put(self.position_url, {"position": 7})
+        self.assertEqual(resp.status_code, HTTP_OK)
+        self.assertEqual(resp.json()["position"], 7)
+
+        # GET и detail отражают сохранённое значение.
+        self.assertEqual(self.client.get(self.position_url).json()["position"], 7)
+        self.assertEqual(self.client.get(self.ws_detail_url).json()["position"], 7)
+
+        # Позиция лежит в fragments.tsv строкой-комментарием, фрагменты целы.
+        with open(os.path.join(self.ws_dir, "fragments.tsv")) as f:
+            text = f.read()
+        self.assertIn("# position\t7", text)
+        self.assertEqual(len(self.client.get(self.frags_url).json()), 2)
+
+    def test_put_fragments_with_position(self):
+        payload = {
+            "fragments": [{"start": 1, "end": 3, "comment": "новый"}],
+            "position": 4,
+        }
+        resp = self.json_put(self.frags_url, payload)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        self.assertEqual(self.client.get(self.position_url).json()["position"], 4)
+        frags = self.client.get(self.frags_url).json()
+        self.assertEqual(len(frags), 1)
+        self.assertEqual(frags[0]["comment"], "новый")
+
+    def test_put_fragments_list_preserves_position(self):
+        self.json_put(self.position_url, {"position": 6})
+        resp = self.json_put(self.frags_url, [{"start": 2, "end": 4}])
+        self.assertEqual(resp.status_code, HTTP_OK)
+        self.assertEqual(self.client.get(self.position_url).json()["position"], 6)
+
+    def test_position_out_of_range(self):
+        for bad in (10, -1):
+            resp = self.json_put(self.position_url, {"position": bad})
+            self.assertEqual(resp.status_code, HTTP_BAD_REQUEST, bad)
+
+    def test_position_rejects_missing_workspace(self):
+        resp = self.json_put("/api/v1/pairs/nonexistent/position", {"position": 1})
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_fragments_ignores_metadata_line(self):
+        """Метаданные `# position` не попадают в список фрагментов."""
+        self.json_put(self.position_url, {"position": 5})
+        frags = self.client.get(self.frags_url).json()
+        self.assertEqual(len(frags), 2)
+        self.assertEqual(frags[0]["comment"], "старт")
 
 
 class ExportApiTests(WorkspaceApiTestBase):

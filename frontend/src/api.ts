@@ -38,12 +38,26 @@ export function frameUrl(pairId: string, index: number, kind: "original" | "visu
 export function replaceFragments(
   pairId: string,
   fragments: { start: number; end: number; comment?: string }[],
+  position: number,
 ): Promise<{ start: number; end: number; comment?: string }[]> {
   return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/fragments/`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fragments),
+    body: JSON.stringify({ fragments, position }),
   }).then((r) => json<{ start: number; end: number; comment?: string }[]>(r));
+}
+
+export function savePosition(
+  pairId: string,
+  position: number,
+  keepalive = false,
+): Promise<{ position: number }> {
+  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/position`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ position }),
+    keepalive,
+  }).then((r) => json<{ position: number }>(r));
 }
 
 export function startExport(pairId: string): Promise<ExportStatus> {

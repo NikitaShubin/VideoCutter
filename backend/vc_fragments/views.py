@@ -76,7 +76,8 @@ def _run_export(ws_id: str) -> None:
 
 @require_http_methods(["GET", "PUT"])
 def fragments(request, pair_id: str):
-    """GET — список фрагментов; PUT — заменить весь список (list of {start,end,comment?})."""
+    """GET — список фрагментов; PUT — заменить список (list of {start,end,comment?})
+    либо объект {"fragments": [...], "position": N} (позиция пишется в тот же файл)."""
     ws = get_workspace(pair_id)
     if ws is None:
         return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
@@ -84,17 +85,38 @@ def fragments(request, pair_id: str):
     if request.method == "GET":
         return JsonResponse(ws.load_fragments(), safe=False)
 
-    # PUT: замена списка фрагментов.
+    # PUT: замена списка фрагментов (+ опционально позиции).
     try:
-        items = json.loads(request.body or "null")
+        payload = json.loads(request.body or "null")
     except json.JSONDecodeError:
         return JsonResponse({"error": "Некорректный JSON"}, status=400)
+
+    # Тело-объект несёт позицию; голый список — обратная совместимость (позиция
+    # сохраняется из кэша).
+    raw_position = None
+    if isinstance(payload, dict):
+        items = payload.get("fragments")
+        raw_position = payload.get("position")
+    else:
+        items = payload
 
     if not isinstance(items, list):
         return JsonResponse({"error": "Ожидался список фрагментов"}, status=400)
 
     meta = ws.metadata()
     total_frames = meta["total_frames"]
+
+    position = None
+    if raw_position is not None:
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError):
+            return JsonResponse({"error": f"Неверная позиция: {raw_position}"}, status=400)
+        if position < 0 or (total_frames > 0 and position >= total_frames):
+            return JsonResponse(
+                {"error": f"Позиция {position} вне диапазона [0, {total_frames})"},
+                status=400,
+            )
 
     # Читаем старые комментарии для обратной совместимости.
     old_comments = {(f["start"], f["end"]): f.get("comment", "") for f in ws.load_fragments()}
@@ -124,8 +146,42 @@ def fragments(request, pair_id: str):
         if clean[i]["start"] <= clean[i - 1]["end"]:
             return JsonResponse({"error": "Фрагменты пересекаются"}, status=409)
 
-    ws.save_fragments(clean)
+    ws.save_fragments(clean, position)
     return JsonResponse(clean, safe=False)
+
+
+@require_http_methods(["GET", "PUT"])
+def pair_position(request, pair_id: str):
+    """GET — текущий кадр; PUT {"position": N} — сохранить текущий кадр."""
+    ws = get_workspace(pair_id)
+    if ws is None:
+        return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
+
+    if request.method == "GET":
+        return JsonResponse({"position": ws.load_position()})
+
+    try:
+        payload = json.loads(request.body or "null")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Некорректный JSON"}, status=400)
+
+    if not isinstance(payload, dict) or "position" not in payload:
+        return JsonResponse({"error": "Ожидался объект {\"position\": N}"}, status=400)
+
+    try:
+        position = int(payload["position"])
+    except (TypeError, ValueError):
+        return JsonResponse({"error": f"Неверная позиция: {payload['position']}"}, status=400)
+
+    total_frames = ws.metadata()["total_frames"]
+    if position < 0 or (total_frames > 0 and position >= total_frames):
+        return JsonResponse(
+            {"error": f"Позиция {position} вне диапазона [0, {total_frames})"},
+            status=400,
+        )
+
+    ws.save_position(position)
+    return JsonResponse({"position": position})
 
 
 @require_http_methods(["POST"])
