@@ -159,3 +159,11 @@ export function timelinePix(frame: number, width: number, total: number): number
 export function timelineFrame(pixel: number, width: number, total: number): number {
   return Math.round(pixel * Math.max(1, total - 1) / (width - 1));
 }
+
+// Старт тёмной зоны «после текущего кадра»: на одну колонку правее позиции.
+// Пиксель текущего кадра не затемняется, поэтому у конца сегмента его
+// последний пиксель остаётся полностью красным — нет «недокраса». Позиция
+// кадра указывается отдельным маркером (timelinePix), а не границей этой зоны.
+export function overlayStart(position: number, width: number, total: number): number {
+  return Math.min(width - 1, timelinePix(position, width, total) + 1);
+}

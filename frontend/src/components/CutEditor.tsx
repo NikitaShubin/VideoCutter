@@ -11,6 +11,7 @@ import { HelpModal } from "./HelpModal";
 import {
   FrameScheduler,
   nextPlayPosition,
+  overlayStart,
   pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
@@ -172,13 +173,13 @@ export function CutEditor({ pairId, onBack }: Props) {
       ctx.fillRect(x, 0, Math.max(1, endX - x + 1), height);
     }
 
-    // Затемнение от текущей позиции до конца (sb[:, current_shift:, :] //= 2):
-// тёмная зона начинается с пикселя текущего кадра. Единый способ отображения —
-// тот же timelinePix, что и границы сегментов, без сдвигов и спец-случаев
-// (иначе у конца сегмента маркер «прилипал» к границе, и +1 не менял полосу).
-// Поэтому при совпадении позиции с границей маркер и граница стоят в одной
-// колонке, а на первом кадре вся полоса затемнена.
-const curX = timelinePix(position, width, p.totalFrames);
+    // Затемнение «после текущего кадра» (sb[:, current_shift:, :] //= 2):
+    // зона стартует на одну колонку правее позиции, поэтому пиксель текущего
+    // кадра никогда не затемняется — у конца сегмента его последний пиксель
+    // остаётся полностью красным (нет «недокраса»). Позиция кадра указывается
+    // отдельным маркером ниже, а не границей света/тени, поэтому тёмная зона
+    // не участвует в позиционировании и её сдвиг не «прилипает» к границе.
+    const curX = overlayStart(position, width, p.totalFrames);
     ctx.fillStyle = "rgba(0,0,0,0.5)";
     ctx.fillRect(curX, 0, width - curX, height);
 
@@ -195,6 +196,14 @@ const curX = timelinePix(position, width, p.totalFrames);
       ctx.fillRect(x, 0, endX - x, height);
       ctx.restore();
     }
+
+    // Маркер текущего кадра — тонкая линия отдельного цвета ровно на пикселе
+    // позиции (поверх всех слоёв). Тот же timelinePix, что и границы сегментов,
+    // поэтому при остановке на границе маркер стоит в одной колонке с ней
+    // (нет «недокраса»: граничный пиксель яркий, маркер виден на нём).
+    const cursorX = timelinePix(position, width, p.totalFrames);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(cursorX, 0, 1, height);
   }, [keyPose, position]);
 
   useEffect(() => {

@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   FrameScheduler,
   nextPlayPosition,
+  overlayStart,
   pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
@@ -388,6 +389,28 @@ check("полоса: маркер позиции — тот же timelinePix, ч
     assert.equal(timelinePix(b, width, total), timelinePix(b, width, total));
     assert.ok(timelinePix(b, width, total) >= 0 && timelinePix(b, width, total) <= width - 1);
   }
+});
+
+check("overlayStart: тёмная зона «после текущего» — пиксель позиции не затемняется", () => {
+  // Гарантия от «недокраса»: когда текущий кадр — конец сегмента, его последний
+  // пиксель НЕ накрывается затемнением (зона стартует со следующей колонки),
+  // и позицию указывает отдельный маркер-курсор, а не граница света/тени.
+  const width = 800;
+  const total = 705;
+  for (let f = 0; f < total - 1; f++) {
+    assert.ok(overlayStart(f, width, total) > timelinePix(f, width, total),
+      `кадр ${f}: тёмная зона накрыла пиксель позиции (недокрас)`);
+    assert.ok(overlayStart(f, width, total) <= width - 1);
+  }
+  // последний кадр: колонки «после» нет, зона классшена на последнюю колонку
+  assert.equal(overlayStart(704, width, total), width - 1);
+  // конец сегмента crowd: последний красный пиксель остаётся ярким
+  for (const e of [120, 310]) {
+    assert.equal(overlayStart(e, width, total), Math.min(width - 1, timelinePix(e, width, total) + 1));
+  }
+  // первый и последний кадры: зона в пределах полосы
+  assert.equal(overlayStart(0, width, total), 1);
+  assert.equal(overlayStart(704, width, total), width - 1);
 });
 
 console.log(`ok: ${passed} проверок`);
