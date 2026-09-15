@@ -300,6 +300,9 @@ function simulateJ(startPos, startDir, target, flipAtPos, retargetOnFlip) {
     if (t !== null && pos + dir === t) {
       pos = t;
       reason = "j-stop";
+      // На краю видео (0/последний кадр) J разворачивает направление, как
+      // обычное проигрывание пробелом; на внутренней границе — сохраняет.
+      if (t === 0 || t === TOTAL - 1) dir = dir === 1 ? -1 : 1;
       break;
     }
     const step = nextPlayPosition(pos, dir, TOTAL);
@@ -347,6 +350,25 @@ check("timelinePix: края и середины отображаются без
   assert.equal(timelinePix(704, 800, 705), 799); // последний кадр = правый край
   assert.equal(timelinePix(352, 800, 705), Math.round(352 * 799 / 704));
   assert.equal(timelinePix(200, 800, 705), Math.round(200 * 799 / 704));
+});
+
+check("J: стоп на краю видео разворачивает направление, как обычное воспроизведение", () => {
+  // Вперёд до последнего кадра: цель — последняя граница (399).
+  const fwd = simulateJ(390, 1, segmentBoundaryForward(390, 1, KF, TOTAL), null, false);
+  assert.equal(fwd.pos, TOTAL - 1);
+  assert.equal(fwd.reason, "j-stop");
+  assert.equal(fwd.dir, -1); // развернулись, следующий пуск пойдёт назад
+
+  // Назад до первого кадра: цель — 0.
+  const back = simulateJ(30, -1, segmentBoundaryForward(30, -1, KF, TOTAL), null, false);
+  assert.equal(back.pos, 0);
+  assert.equal(back.reason, "j-stop");
+  assert.equal(back.dir, 1);
+
+  // Внутренняя граница (300): направления НЕ меняем — продолжаем тем же ходом.
+  const inner = simulateJ(250, 1, segmentBoundaryForward(250, 1, KF, TOTAL), null, false);
+  assert.equal(inner.reason, "j-stop");
+  assert.equal(inner.dir, 1);
 });
 
 check("timelinePix: монотонно не убывает", () => {

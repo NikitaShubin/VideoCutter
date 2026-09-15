@@ -117,7 +117,8 @@ export function CutEditor({ pairId, onBack }: Props) {
   // (shownFrame === position), поэтому каждый кадр реально отображается,
   // без пропусков. Скорость задаёт паузу между кадрами (0-9 — прореживание).
   const totalFrames = pair?.total_frames ?? 0;
-  // Цель J-воспроизведения («до границы»): остановка без разворота направления.
+  // Цель J-воспроизведения («до границы»): стоп на ней; на краю видео (0/последний
+  // кадр) направление разворачивается, как при обычном проигрывании пробелом.
   const playTargetRef = useRef<number | null>(null);
   useEffect(() => {
     if (!playing) return;
@@ -126,9 +127,14 @@ export function CutEditor({ pairId, onBack }: Props) {
     const id = window.setTimeout(() => {
       const target = playTargetRef.current;
       if (target !== null && position + direction === target) {
-        // J: доехали до ближайшей границы — стоп точно на ней, без разворота.
+        // J: доехали до ближайшей границы — стоп точно на ней. На краю видео
+        // разворот направления, как у обычного воспроизведения (пробел): иначе
+        // после J до последнего/первого кадра следующий пуск шёл бы «в стену».
         playTargetRef.current = null;
         setPosition(target);
+        if (target === 0 || target === totalFrames - 1) {
+          setDirection(direction === 1 ? -1 : 1);
+        }
         setPlaying(false);
         return;
       }
