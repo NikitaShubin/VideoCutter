@@ -10,7 +10,6 @@ import assert from "node:assert/strict";
 import {
   FrameScheduler,
   nextPlayPosition,
-  overlayStart,
   pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
@@ -370,30 +369,25 @@ check("timelineFrame: round-trip через timelinePix", () => {
   assert.equal(timelineFrame(width - 1, width, total), total - 1);
 });
 
-check("overlayStart: при совпадении с границей тёмная зона начинается ровно на ней", () => {
-  // Тот же timelinePix, что и границы сегментов: когда позиция стоит на
-  // границе фрагмента, смена света/тени совпадает со сменой цвета сегмента
-  // (нет зазора). Конец сегмента -> зона с его правой границы (последний
-  // пиксель сегмента не затемняется). Остальное, включая первый кадр, ->
-  // зона «от текущего кадра», т.е. с пикселя позиции.
+check("полоса: маркер позиции — тот же timelinePix, что и границы (без сдвигов и прилипания)", () => {
+  // Тёмная зона «от текущего кадра» стартует ровно с timelinePix(position) —
+  // тем же способом, что и границы сегментов. Никаких спец-случаев (+1 на
+  // конце сегмента): иначе маркер прилипал к границе и +1 кадр не менял полосу.
   const width = 800;
   const total = 705;
-  const frags = [{ start: 0, end: 120 }, { start: 200, end: 310 }, { start: 500, end: 704 }];
-  // конец сегмента: тёмная зона начинается ровно на правой границе сегмента
-  for (const e of [120, 310, 704]) {
-    assert.equal(overlayStart(e, width, total, frags), Math.min(width - 1, timelinePix(e, width, total) + 1));
+  // самый первый кадр: вся полоса затемнена (светлой зоны «до» нет)
+  assert.equal(timelinePix(0, width, total), 0);
+  // соседние кадры не склеиваются в один пиксель — каждый +1 сдвигает маркер
+  let prev = -1;
+  for (let f = 0; f < total - 1; f++) {
+    assert.notEqual(timelinePix(f, width, total), timelinePix(f + 1, width, total),
+      `прилипание: кадры ${f}/${f + 1} в одном пикселе`);
   }
-  // начало сегмента: тёмная зона начинается ровно на левой границе сегмента
-  for (const s of [0, 200, 500]) {
-    assert.equal(overlayStart(s, width, total, frags), timelinePix(s, width, total));
+  // позиция на границе сегмента (crowd): маркер в той же колонке, что граница
+  for (const b of [120, 200, 310, 500, 704]) {
+    assert.equal(timelinePix(b, width, total), timelinePix(b, width, total));
+    assert.ok(timelinePix(b, width, total) >= 0 && timelinePix(b, width, total) <= width - 1);
   }
-  // крайний последний кадр: зона не выходит за полосу
-  assert.equal(overlayStart(704, width, total, frags), width - 1);
-  // внутри сегмента: «от текущего кадра» — с пикселя позиции (текущий затемняется)
-  assert.equal(overlayStart(201, width, total, frags), timelinePix(201, width, total));
-  // самый первый кадр без фрагмента, начинающегося с 0: вся полоса затемнена,
-  // светлой зоны «до первого кадра» не существует.
-  assert.equal(overlayStart(0, width, total, [{ start: 100, end: 200 }]), 0);
 });
 
 console.log(`ok: ${passed} проверок`);

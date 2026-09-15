@@ -11,7 +11,6 @@ import { HelpModal } from "./HelpModal";
 import {
   FrameScheduler,
   nextPlayPosition,
-  overlayStart,
   pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
@@ -173,14 +172,13 @@ export function CutEditor({ pairId, onBack }: Props) {
       ctx.fillRect(x, 0, Math.max(1, endX - x + 1), height);
     }
 
-    // Затемнение от текущей позиции до конца (sb[:, current_shift:, :] //= 2).
-    // Старт тёмной зоны — overlayStart: тот же timelinePix, что и границы
-    // сегментов. По умолчанию зона начинается с пикселя текущего кадра
-    // (поэтому на самом первом кадре вся полоса затемнена), а при позиции
-    // ровно на конце сегмента — со следующей колонки, т.е. на его правой
-    // границе. При совпадении позиции с границей смена света/тени стоит в
-    // одной колонке со сменой цвета сегмента — без зазора.
-    const curX = overlayStart(position, width, p.totalFrames, p.fragments);
+    // Затемнение от текущей позиции до конца (sb[:, current_shift:, :] //= 2):
+// тёмная зона начинается с пикселя текущего кадра. Единый способ отображения —
+// тот же timelinePix, что и границы сегментов, без сдвигов и спец-случаев
+// (иначе у конца сегмента маркер «прилипал» к границе, и +1 не менял полосу).
+// Поэтому при совпадении позиции с границей маркер и граница стоят в одной
+// колонке, а на первом кадре вся полоса затемнена.
+const curX = timelinePix(position, width, p.totalFrames);
     ctx.fillStyle = "rgba(0,0,0,0.5)";
     ctx.fillRect(curX, 0, width - curX, height);
 

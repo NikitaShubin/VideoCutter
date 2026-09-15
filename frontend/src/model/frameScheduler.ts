@@ -159,23 +159,3 @@ export function timelinePix(frame: number, width: number, total: number): number
 export function timelineFrame(pixel: number, width: number, total: number): number {
   return Math.round(pixel * Math.max(1, total - 1) / (width - 1));
 }
-
-// Старт тёмной зоны «от текущего кадра» (как в оригинале sb[:, current_shift:, :]
-// //= 2 — текущий кадр тоже затемняется). Тот же timelinePix, что и границы
-// сегментов, поэтому при реальном совпадении позиции с границей смена
-// света/тени приходится на ту же колонку, что и смена цвета сегмента:
-// - по умолчанию (включая первый кадр и внутренние кадры) — с пикселя
-//   позиции, т.е. левая граница сегмента-«от текущего»;
-// - позиция == КОНЕЦ сегмента -> со следующей колонки, т.е. ровно на правой
-//   границе сегмента (его последний пиксель не затемняется).
-// Так на первом кадре вся полоса затемнена (светлой зоны «до» не существует).
-export function overlayStart(
-  position: number,
-  width: number,
-  total: number,
-  fragments: ReadonlyArray<{ end: number }>,
-): number {
-  const pix = timelinePix(position, width, total);
-  const atEnd = fragments.some((f) => f.end === position);
-  return atEnd ? Math.min(width - 1, pix + 1) : pix;
-}
