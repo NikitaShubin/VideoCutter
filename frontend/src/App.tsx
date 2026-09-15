@@ -30,6 +30,7 @@ export function App() {
         setPairId(id);
         setScreen("editor");
       }}
+      onChanged={reload}
     />
   );
 }

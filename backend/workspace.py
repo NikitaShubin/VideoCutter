@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import List, Optional
 
 from vc_pairs import frame_provider
+from videocutter.standalone.workspace import VIDEO_EXTS
 
 # Корневая директория со всеми workspace-ами.
 WORKSPACE_ROOT = os.getenv("VC_WORKSPACE_ROOT", os.path.join(os.path.dirname(__file__), "workspaces"))
 
-# Расширения видеофайлов, которые мы распознаём.
-_VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".mts"}
+# Расширения видеофайлов, которые мы распознаём (общие с автономной обвязкой).
+_VIDEO_EXTS = VIDEO_EXTS
 
 # Имя файла с фрагментами (аналог txt-файла в PVC).
 FRAGMENTS_FILE = "fragments.tsv"

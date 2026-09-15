@@ -31,6 +31,48 @@ export function getPair(id: string): Promise<VideoPairDetail> {
   );
 }
 
+// Создаёт workspace загрузкой видеофайла (multipart) с прогрессом.
+export function uploadWorkspace(
+  name: string,
+  file: File,
+  onProgress?: (fraction: number) => void,
+): Promise<VideoPair> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (name) form.append("name", name);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/workspaces/`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        /* ignore */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as VideoPair);
+      } else {
+        const err = body as { error?: string } | null;
+        reject(new Error(err?.error ?? `HTTP ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
+    xhr.send(form);
+  });
+}
+
+// Безвозвратно удаляет workspace со всеми данными.
+export function deleteWorkspace(id: string): Promise<{ deleted: string }> {
+  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`, {
+    method: "DELETE",
+  }).then((r) => json<{ deleted: string }>(r));
+}
+
 export function frameUrl(pairId: string, index: number, kind: "original" | "visualization" = "visualization"): string {
   return `${BASE}/workspaces/${encodeURIComponent(pairId)}/frame/${index}/?video=${kind}`;
 }
