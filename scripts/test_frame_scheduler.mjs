@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   FrameScheduler,
   nextPlayPosition,
+  overlayStart,
   pickLoadTarget,
   segmentBoundaryForward,
   timelineFrame,
@@ -294,22 +295,28 @@ check("timelineFrame: round-trip через timelinePix", () => {
   assert.equal(timelineFrame(width - 1, width, total), total - 1);
 });
 
-check("полоса: смена света/тени и границы сегментов считаются одним timelinePix", () => {
-  // Тёмная зона «после текущего кадра» стартует ровно с timelinePix(position) —
-  // той же функцией, что и границы фрагментов. Поэтому при совпадении позиции
-  // с границей смена цвета приходится на ту же колонку, без зазора.
+check("overlayStart: при совпадении с границей тёмная зона начинается ровно на ней", () => {
+  // Тот же timelinePix, что и границы сегментов: когда позиция стоит на
+  // границе фрагмента, смена света/тени совпадает со сменой цвета сегмента
+  // (нет зазора). Конец сегмента -> зона «после текущего» с его правой
+  // границы (последний пиксель сегмента яркий). Начало сегмента -> с его
+  // первого пикселя (левая граница). Внутри/вне границ -> от следующей колонки.
   const width = 800;
   const total = 705;
-  for (let pos = 0; pos < total; pos++) {
-    assert.equal(timelinePix(pos, width, total), timelinePix(pos, width, total)); // тем же способом
+  const frags = [{ start: 0, end: 120 }, { start: 200, end: 310 }, { start: 500, end: 704 }];
+  // конец сегмента: тёмная зона начинается ровно на правой границе сегмента
+  for (const e of [120, 310, 704]) {
+    assert.equal(overlayStart(e, width, total, frags), Math.min(width - 1, timelinePix(e, width, total) + 1));
   }
-  // Позиция на границе фрагмента (crowd): колонка смены света/тени == колонка
-  // границы, и начинается она на этой же колонке (а не на +1).
-  for (const b of [120, 310, 704]) {
-    const boundaryPix = timelinePix(b, width, total);
-    assert.equal(timelinePix(b, width, total), boundaryPix);
-    assert.ok(boundaryPix >= 0 && boundaryPix <= width - 1);
+  // начало сегмента: тёмная зона начинается ровно на левой границе сегмента
+  for (const s of [0, 200, 500]) {
+    assert.equal(overlayStart(s, width, total, frags), timelinePix(s, width, total));
   }
+  // крайний последний кадр: зона не выходит за полосу
+  assert.equal(overlayStart(704, width, total, frags), width - 1);
+  // внутри сегмента (в т.ч. первый кадр после начала): «после текущего» = +1
+  assert.equal(overlayStart(201, width, total, frags), timelinePix(201, width, total) + 1);
+  assert.ok(overlayStart(0, width, total, frags) <= width - 1);
 });
 
 console.log(`ok: ${passed} проверок`);

@@ -143,3 +143,22 @@ export function timelinePix(frame: number, width: number, total: number): number
 export function timelineFrame(pixel: number, width: number, total: number): number {
   return Math.round(pixel * Math.max(1, total - 1) / (width - 1));
 }
+
+// Старт тёмной зоны «после текущего кадра». Тот же timelinePix, что и границы
+// сегментов, поэтому при реальном совпадении позиции с границей смена
+// света/тени приходится на ту же колонку, что и смена цвета сегмента:
+// - позиция == КОНЕЦ сегмента -> зона начинается со следующей колонки,
+//   т.е. ровно на правой границе сегмента (последний пиксель сегмента яркий);
+// - позиция == НАЧАЛО сегмента -> зона начинается с первого пикселя сегмента,
+//   т.е. ровно на его левой границе;
+// - внутри сегмента/вне границ -> зона «кадры после текущего», +1.
+export function overlayStart(
+  position: number,
+  width: number,
+  total: number,
+  fragments: ReadonlyArray<{ start: number }>,
+): number {
+  const pix = timelinePix(position, width, total);
+  const atStart = fragments.some((f) => f.start === position);
+  return atStart ? pix : Math.min(width - 1, pix + 1);
+}
