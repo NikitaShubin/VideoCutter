@@ -130,6 +130,22 @@ export function segmentBoundaryForward(
   return left.length ? left[left.length - 1] : 0;
 }
 
+// Смена направления во время активного J-проигрывания (R в полёте): цель
+// остановки пересчитывается под новое направление — ближайшая граница за
+// текущей позицией (строго, поэтому уже стоя на границе J уведёт дальше).
+// Если J не активен (target === null), направление просто переворачивается —
+// цель не создаётся.
+export function retargetOnDirectionChange(
+  target: number | null,
+  position: number,
+  newDirection: 1 | -1,
+  keyframes: ReadonlyArray<number>,
+  total: number,
+): number | null {
+  if (target === null) return null;
+  return segmentBoundaryForward(position, newDirection, keyframes, total);
+}
+
 // --- Маппинг таймлайна: кадр <-> пиксель полосы (используется статус-баром
 // и кликом по нему). Единая пара, чтобы отрисовка и ввод не расходились. ---
 

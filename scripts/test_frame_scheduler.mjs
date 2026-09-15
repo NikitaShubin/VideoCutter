@@ -12,6 +12,7 @@ import {
   nextPlayPosition,
   overlayStart,
   pickLoadTarget,
+  retargetOnDirectionChange,
   segmentBoundaryForward,
   timelineFrame,
   timelinePix,
@@ -264,6 +265,80 @@ check("J: границы у краёв не дублируются (0/total-1 н
   // Фрагмент начинается с 0 и кончается последним кадром.
   assert.equal(segmentBoundaryForward(5, 1, [0, 399], TOTAL), 399);
   assert.equal(segmentBoundaryForward(398, -1, [0, 399], TOTAL), 0);
+});
+
+// --- пересчёт цели J при смене направления в полёте (R во время прогона) ---
+check("R в полёте: активный J пересчитывает цель под новое направление", () => {
+  // Баг: цель считалась один раз при нажатии J; смена направления в процессе
+  // воспроизведения её не обновляла, и устаревшая цель обратным ходом не
+  // достигалась — стопа на границе не было. Теперь цель = ближайшая граница
+  // в НОВОМ направлении (та же функция сегментирования).
+  // Вперёд к 300, посреди (270) жмём R → цель 200 (строго ниже, а не 300).
+  assert.equal(retargetOnDirectionChange(300, 270, -1, KF, TOTAL), 200);
+  // Назад к 200, посреди (250) жмём R → цель 300 (строго выше).
+  assert.equal(retargetOnDirectionChange(200, 250, 1, KF, TOTAL), 300);
+  // Неактивный J: цель не создаётся — направление просто переворачивается.
+  assert.equal(retargetOnDirectionChange(null, 250, -1, KF, TOTAL), null);
+  // Смена, стоя на границе 200: строгая следующая (100), а не сам кадр —
+  // не мгновенный автостоп на месте.
+  assert.equal(retargetOnDirectionChange(300, 200, -1, KF, TOTAL), 100);
+});
+
+// Модель эффекта воспроизведения CutEditor.tsx в чистом виде: while играет —
+// каждый тик проверяет position+direction===target (J-стоп), на естественном
+// крае разворот и остановка (цель сбрасывается), иначе шаг на ±1 кадр.
+function simulateJ(startPos, startDir, target, flipAtPos, retargetOnFlip) {
+  let pos = startPos;
+  let dir = startDir;
+  let t = target;
+  let reason = "max-ticks";
+  for (let i = 0; i < TOTAL * 2 && reason === "max-ticks"; i++) {
+    if (flipAtPos !== null && pos === flipAtPos) {
+      dir = dir === 1 ? -1 : 1;
+      if (retargetOnFlip) t = retargetOnDirectionChange(t, pos, dir, KF, TOTAL);
+    }
+    if (t !== null && pos + dir === t) {
+      pos = t;
+      reason = "j-stop";
+      break;
+    }
+    const step = nextPlayPosition(pos, dir, TOTAL);
+    if (step.stop) {
+      t = null;
+      dir = step.direction;
+      reason = "edge-stop";
+      break;
+    }
+    pos = step.pos;
+  }
+  return { pos, dir, target: t, reason };
+}
+
+check("J в полёте: смена направления в середине прогона — стоп на пересчитанной границе (регрессия)", () => {
+  // Отчёт: J вперёд от 260 к 300, на 270 жмём R — обратного стопа не было.
+  // Без пересчёта прогон доезжал до края 0, разворачивался и лишь потом
+  // (после повторного пуска) добирал устаревшую цель 300.
+  const fixed = simulateJ(260, 1, segmentBoundaryForward(260, 1, KF, TOTAL), 270, true);
+  assert.equal(fixed.reason, "j-stop");
+  assert.equal(fixed.pos, 200); // ближайшая граница в обратном направлении
+  assert.equal(fixed.dir, -1);
+
+  // Контроль: если бы пересчёта не было (target оставался 300), обратный ход
+  // НЕ даёт j-stop на границе — прогон оканчивается естественным краем.
+  const broken = simulateJ(260, 1, segmentBoundaryForward(260, 1, KF, TOTAL), 270, false);
+  assert.notEqual(broken.reason, "j-stop");
+  assert.notEqual(broken.pos, 200);
+
+  // Симметрично: J назад от 400 → цель 350, посреди (на самой 350) жмём R →
+  // цель становится 399 вперёд, стоп на последней границе.
+  const revFix = simulateJ(400, -1, segmentBoundaryForward(400, -1, KF, TOTAL), 350, true);
+  assert.equal(revFix.reason, "j-stop");
+  assert.equal(revFix.pos, 399);
+
+  // Без смены направления прямое J стопает ровно на границе прошлого хода.
+  const straight = simulateJ(260, 1, segmentBoundaryForward(260, 1, KF, TOTAL), null, false);
+  assert.equal(straight.reason, "j-stop");
+  assert.equal(straight.pos, 300);
 });
 
 // --- timelinePix / timelineFrame (полоса) ---

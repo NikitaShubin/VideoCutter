@@ -13,6 +13,7 @@ import {
   nextPlayPosition,
   overlayStart,
   pickLoadTarget,
+  retargetOnDirectionChange,
   segmentBoundaryForward,
   timelineFrame,
   timelinePix,
@@ -480,7 +481,7 @@ export function CutEditor({ pairId, onBack }: Props) {
         // обратным ходом, и остановки на границе не происходит.
         if (playTargetRef.current !== null) {
           const p = modelRef.current;
-          if (p) playTargetRef.current = segmentBoundaryForward(position, nd, p.keyFrames(), p.totalFrames);
+          if (p) playTargetRef.current = retargetOnDirectionChange(playTargetRef.current, position, nd, p.keyFrames(), p.totalFrames);
         }
       } else if (is("KeyJ")) {
         if (!e.repeat) playToBoundary();
