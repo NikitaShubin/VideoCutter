@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  assignWorkspaceVideo,
   frameUrl,
   getExportStatus,
   getPair,
+  removeWorkspaceVideo,
   replaceFragments,
   savePosition,
+  setWorkspaceVideo,
   startExport,
+  swapVideos,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
 import { HelpModal } from "./HelpModal";
@@ -38,6 +42,7 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [message, setMessage] = useState("");
+  const [videoBusy, setVideoBusy] = useState(false);
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
@@ -93,30 +98,32 @@ export function CutEditor({ pairId, onBack }: Props) {
   const leftHeldRef = useRef(false);
 
   // Загрузка пары + фрагментов.
+  const loadPairInto = useCallback((p: VideoPairDetail) => {
+    setPair(p);
+    // Возвращаемся на кадр, где пользователь завершил редактирование
+    // (сохранён в fragments.tsv); при отсутствии/выходе за диапазон — 0.
+    const saved = p.total_frames > 0
+      ? Math.min(p.total_frames - 1, Math.max(0, p.position ?? 0))
+      : 0;
+    setPosition(saved);
+    schedRef.current = new FrameScheduler(MAX_CACHE);
+    setShownFrame(-1);
+    modeRef.current = "jump";
+    chaseRef.current = false;
+    epochRef.current++;
+    inflightRef.current.clear();
+    rightHeldRef.current = false;
+    leftHeldRef.current = false;
+    modelRef.current = new FragmentModel(p.total_frames);
+    modelRef.current.setInitial(
+      p.fragments.map((f) => ({ start: f.start, end: f.end, comment: f.comment ?? "" })),
+    );
+    rerender();
+  }, []);
+
   useEffect(() => {
-    getPair(pairId).then((p) => {
-      setPair(p);
-      // Возвращаемся на кадр, где пользователь завершил редактирование
-      // (сохранён в fragments.tsv); при отсутствии/выходе за диапазон — 0.
-      const saved = p.total_frames > 0
-        ? Math.min(p.total_frames - 1, Math.max(0, p.position ?? 0))
-        : 0;
-      setPosition(saved);
-      schedRef.current = new FrameScheduler(MAX_CACHE);
-      setShownFrame(-1);
-      modeRef.current = "jump";
-      chaseRef.current = false;
-      epochRef.current++;
-      inflightRef.current.clear();
-      rightHeldRef.current = false;
-      leftHeldRef.current = false;
-      modelRef.current = new FragmentModel(p.total_frames);
-      modelRef.current.setInitial(
-        p.fragments.map((f) => ({ start: f.start, end: f.end, comment: f.comment ?? "" })),
-      );
-      rerender();
-    });
-  }, [pairId]);
+    getPair(pairId).then(loadPairInto);
+  }, [pairId, loadPairInto]);
 
   // Воспроизведение: позиция продвигается только ПОСЛЕ показа текущего кадра
   // (shownFrame === position), поэтому каждый кадр реально отображается,
@@ -355,6 +362,39 @@ export function CutEditor({ pairId, onBack }: Props) {
   const flash = (m: string) => {
     setMessage(m);
     window.setTimeout(() => setMessage(""), 2000);
+  };
+
+  // ─── Управление видео: назначить роль, заменить файл, убрать, swap ───────
+  // После любой операции роли перезагружаем пару: счётчик кадров берётся из
+  // превью, поэтому пересоздаём планировщик (новые кадры с сервера).
+  const withReload = async (op: () => Promise<unknown>) => {
+    setVideoBusy(true);
+    try {
+      await op();
+      loadPairInto(await getPair(pairId));
+      flash("Сохранено");
+    } catch (e) {
+      flash(`Ошибка: ${(e as Error).message}`);
+    } finally {
+      setVideoBusy(false);
+    }
+  };
+
+  const uploadToRole = (role: "source" | "preview") => (f: File | null) => {
+    if (!f) return;
+    withReload(() => setWorkspaceVideo(pairId, role, f));
+  };
+
+  const assignToRole = (role: "source" | "preview", filename: string) => () => {
+    withReload(() => assignWorkspaceVideo(pairId, role, filename));
+  };
+
+  const dropRole = (role: "source" | "preview") => () => {
+    withReload(() => removeWorkspaceVideo(pairId, role));
+  };
+
+  const swapRoles = () => {
+    withReload(() => swapVideos(pairId));
   };
 
   const commentRef = useRef<HTMLTextAreaElement | null>(null);
@@ -637,7 +677,89 @@ export function CutEditor({ pairId, onBack }: Props) {
       {!isFullscreen && (
         <div className="editor-toolbar">
           <button onClick={handleBack}>← Назад</button>
-          <span className="pair-name">{pair.original_name} → {pair.visualization_name || "оригинал"}</span>
+          <span className="pair-name">
+            Источник: {pair.source_name}
+            {pair.preview_name !== pair.source_name && (
+              <span> · Превью: {pair.preview_name}</span>
+            )}
+          </span>
+          <div className="toolbar-videos">
+            <span className="video-role">
+              <b>Источник</b> — {pair.source_name}
+              {pair.source_name !== pair.preview_name && (
+                <>
+                  <button
+                    className="video-btn"
+                    title="Поменять роли местами (⇅)"
+                    onClick={swapRoles}
+                    disabled={videoBusy}
+                  >
+                    ⇅
+                  </button>
+                  <button
+                    className="video-btn"
+                    title="Убрать источник"
+                    onClick={dropRole("source")}
+                    disabled={videoBusy}
+                  >
+                    Убрать
+                  </button>
+                </>
+              )}
+              <label className="video-btn">
+                Заменить…
+                <input
+                  type="file"
+                  hidden
+                  accept="video/*"
+                  onChange={(e) => uploadToRole("source")(e.target.files?.[0] ?? null)}
+                />
+              </label>
+            </span>
+            <span className="video-role">
+              <b>Превью</b> —{" "}
+              {pair.preview_name === pair.source_name ? "то же видео" : pair.preview_name}
+              {pair.preview_name !== pair.source_name && (
+                <button
+                  className="video-btn"
+                  title="Убрать превью"
+                  onClick={dropRole("preview")}
+                  disabled={videoBusy}
+                >
+                  Убрать
+                </button>
+              )}
+              <label className="video-btn">
+                Заменить…
+                <input
+                  type="file"
+                  hidden
+                  accept="video/*"
+                  onChange={(e) => uploadToRole("preview")(e.target.files?.[0] ?? null)}
+                />
+              </label>
+            </span>
+            {pair.unassigned_name && (
+              <span className="video-role unassigned">
+                <b>Не размечено</b> — {pair.unassigned_name}
+                <button
+                  className="video-btn"
+                  onClick={assignToRole("source", pair.unassigned_name)}
+                  disabled={videoBusy}
+                >
+                  → источник
+                </button>
+                <button
+                  className="video-btn"
+                  onClick={assignToRole("preview", pair.unassigned_name)}
+                  disabled={videoBusy}
+                >
+                  → превью
+                </button>
+              </span>
+            )}
+            {videoBusy && <span className="video-busy">…</span>}
+          </div>
           <span className="info">
             кадр {position + 1}/{pair.total_frames} · показано {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
           </span>

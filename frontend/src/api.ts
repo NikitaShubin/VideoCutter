@@ -31,15 +31,29 @@ export function getPair(id: string): Promise<VideoPairDetail> {
   );
 }
 
-// Создаёт workspace загрузкой видеофайла (multipart) с прогрессом.
+// Создаёт workspace загрузкой видео (multipart) с прогрессом.
+// ``files`` — одно или два видео: roles "source" и/или "preview".
+// Загрузка нескольких файлов XHR пока не поддерживает прогресс по общему телу;
+// прогресс считается по первой (и обычно единственной) загрузке.
+export interface WorkspaceUploadFiles {
+  source?: File;
+  preview?: File;
+}
+
 export function uploadWorkspace(
   name: string,
-  file: File,
+  files: WorkspaceUploadFiles,
   onProgress?: (fraction: number) => void,
 ): Promise<VideoPair> {
+  const file = files.source ?? files.preview;
   return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error("Выберите хотя бы один видеофайл"));
+      return;
+    }
     const form = new FormData();
-    form.append("file", file);
+    if (files.source) form.append("source", files.source);
+    if (files.preview) form.append("preview", files.preview);
     if (name) form.append("name", name);
 
     const xhr = new XMLHttpRequest();
@@ -64,6 +78,54 @@ export function uploadWorkspace(
     xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
     xhr.send(form);
   });
+}
+
+// Добавляет/заменяет файл роли (источник/превью). При ``existing`` заодно
+// назначает прежний «нейтральный» файл роли existing (сценарий «был один файл»).
+export function setWorkspaceVideo(
+  id: string,
+  role: "source" | "preview",
+  file: File,
+  existing?: "source" | "preview",
+): Promise<VideoPair> {
+  const form = new FormData();
+  form.append("file", file);
+  if (existing) form.append("existing", existing);
+  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`, {
+    method: "POST",
+    body: form,
+  }).then((r) => json<VideoPair>(r));
+}
+
+// Назначает роль уже загруженному «неразмеченному» видеофайлу (unassigned).
+export function assignWorkspaceVideo(
+  id: string,
+  role: "source" | "preview",
+  filename: string,
+): Promise<VideoPair> {
+  const form = new FormData();
+  form.append("assign", filename);
+  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`, {
+    method: "POST",
+    body: form,
+  }).then((r) => json<VideoPair>(r));
+}
+
+// Убирает ролевой файл (нельзя удалить единственное видео).
+export function removeWorkspaceVideo(
+  id: string,
+  role: "source" | "preview",
+): Promise<VideoPair> {
+  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`, {
+    method: "DELETE",
+  }).then((r) => json<VideoPair>(r));
+}
+
+// Меняет роли двух видео местами (source <-> preview).
+export function swapVideos(id: string): Promise<VideoPair> {
+  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/swap/`, {
+    method: "POST",
+  }).then((r) => json<VideoPair>(r));
 }
 
 // Безвозвратно удаляет workspace со всеми данными.

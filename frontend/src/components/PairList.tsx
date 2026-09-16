@@ -17,13 +17,15 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
+  const [source, setSource] = useState<File | null>(null);
+  const [preview, setPreview] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState("");
 
-  const pickFile = (f: File | null) => {
-    setFile(f);
+  const pickFile = (which: "source" | "preview") => (f: File | null) => {
+    if (which === "source") setSource(f);
+    else setPreview(f);
     if (f && !nameTouched) setName(fileStem(f.name));
   };
 
@@ -31,22 +33,28 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
     setShowForm(false);
     setName("");
     setNameTouched(false);
-    setFile(null);
+    setSource(null);
+    setPreview(null);
     setProgress(null);
     setError("");
   };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file) {
-      setError("Выберите видеофайл");
+    const first = source ?? preview;
+    if (!first) {
+      setError("Выберите хотя бы один видеофайл");
       return;
     }
     setBusy(true);
     setError("");
     setProgress(0);
     try {
-      const created = await uploadWorkspace(name.trim() || fileStem(file.name), file, setProgress);
+      const created = await uploadWorkspace(
+        name.trim() || fileStem(first.name),
+        { source: source ?? undefined, preview: preview ?? undefined },
+        setProgress,
+      );
       reset();
       onChanged();
       onSelect(created.id); // сразу открываем на редактирование
@@ -86,12 +94,20 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
 
       {showForm && (
         <form className="upload" onSubmit={submit}>
-          <label>
-            Видеофайл
+          <label className="upload-role">
+            <span>Источник (из него вырезаются фрагменты)</span>
             <input
               type="file"
               accept="video/*"
-              onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => pickFile("source")(e.target.files?.[0] ?? null)}
+            />
+          </label>
+          <label className="upload-role">
+            <span>Превью (что показывается)</span>
+            <input
+              type="file"
+              accept="video/*"
+              onChange={(e) => pickFile("preview")(e.target.files?.[0] ?? null)}
             />
           </label>
           <label>
@@ -115,7 +131,7 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
             </div>
           )}
           {error && <div className="upload-error">{error}</div>}
-          <button type="submit" disabled={busy || !file}>
+          <button type="submit" disabled={busy || (!source && !preview)}>
             {progress !== null && busy ? `Загрузка ${Math.round(progress * 100)}%` : "Загрузить"}
           </button>
         </form>
@@ -133,8 +149,10 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
                 position={p.position}
               />
               <span className="pair-label">
-                {p.original_name}
-                {p.visualization_name ? ` → ${p.visualization_name}` : ""}
+                {p.source_name}
+                {p.preview_name && p.preview_name !== p.source_name
+                  ? ` → ${p.preview_name}`
+                  : ""}
               </span>
               <span className="pair-meta">
                 {p.total_frames} кадров · {p.width}×{p.height}

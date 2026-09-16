@@ -8,13 +8,21 @@
 HTTP-слой и работа с процессным реестром workspace-ов (кэш Django-процесса).
 """
 
+import os
+
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 import workspace as ws_module
 from videocutter.standalone import workspace as ws_fs
 from vc_pairs import frame_provider
-from workspace import get_workspace, get_workspace_detail, list_workspaces, scan_workspaces
+from workspace import (
+    bump_updated_at,
+    get_workspace,
+    get_workspace_detail,
+    list_workspaces,
+    scan_workspaces,
+)
 
 
 def _ws_404(name: str) -> JsonResponse:
@@ -41,12 +49,23 @@ def workspace_detail(request, workspace_id: str):
 
 
 def _workspace_upload(request) -> JsonResponse:
-    """Создаёт workspace из multipart-загрузки (поле ``file``, опц. ``name``)."""
-    upload = request.FILES.get("file")
-    if upload is None:
-        return JsonResponse({"error": "Не передан файл видео (поле 'file')"}, status=400)
+    """Создаёт workspace из multipart-полей ``source``/``preview`` (или ``file``).
 
-    raw_name = request.POST.get("name") or ws_fs.default_workspace_name(upload.name)
+    Поля ``source``/``preview`` — файлы видео (роль задаётся полем); хотя бы
+    одно обязательно. Один файл сохраняется «нейтрально» (без маркера роли),
+    пара — с маркерами ролей в имени. Опц. ``name``.
+    """
+    src_file = request.FILES.get("source") or request.FILES.get("file")
+    pv_file = request.FILES.get("preview")
+    if src_file is None and pv_file is None:
+        return JsonResponse(
+            {"error": "Не передан файл видео (поля 'source' и/или 'preview')"},
+            status=400,
+        )
+
+    raw_name = request.POST.get("name") or ws_fs.default_workspace_name(
+        (src_file if src_file is not None else pv_file).name
+    )
     try:
         name = ws_fs.sanitize_workspace_name(raw_name)
     except ws_fs.InvalidWorkspaceError as e:
@@ -56,20 +75,28 @@ def _workspace_upload(request) -> JsonResponse:
         return JsonResponse({"error": f"Workspace '{name}' уже существует"}, status=409)
 
     try:
-        ws_fs.create_workspace(ws_module.WORKSPACE_ROOT, name, upload, upload.name)
+        ws_fs.create_workspace_pair(
+            ws_module.WORKSPACE_ROOT,
+            name,
+            source=(src_file, src_file.name) if src_file else None,
+            preview=(pv_file, pv_file.name) if pv_file else None,
+        )
     except ws_fs.WorkspaceExistsError as e:
         return JsonResponse({"error": str(e)}, status=409)
     except ws_fs.InvalidWorkspaceError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
-    # Валидация: файл должен читаться как видео, иначе откатываем создание.
+    # Валидация: каждый файл должен читаться как видео, иначе откат создания.
     ws = get_workspace(name)
     try:
         if ws is None:
             raise ValueError("workspace не создан")
-        meta = ws.metadata()
-        if not meta.get("total_frames"):
-            raise ValueError("видео не содержит кадров")
+        roles = {ws.original, ws.visualization}
+        if not any(roles):
+            raise ValueError("видео не распознано (расширение файла не видео)")
+        for path in roles:
+            if path and not frame_provider.get_metadata(path).get("total_frames"):
+                raise ValueError("видео не содержит кадров")
     except Exception as e:  # noqa: BLE001 — любой сбой чтения = битый файл
         ws_fs.delete_workspace(ws_module.WORKSPACE_ROOT, name)
         scan_workspaces()
@@ -144,3 +171,182 @@ def workspace_meta(request, workspace_id: str):
         "height": meta["height"],
         "fps": meta["fps"],
     })
+
+
+# ─── Роли видео (source/preview): добавить, заменить, удалить, поменять ──────
+
+def _drop_pending(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _entry_response(workspace_id: str) -> JsonResponse:
+    entry = next((w for w in list_workspaces() if w["id"] == workspace_id), None)
+    return JsonResponse(entry if entry is not None else {"id": workspace_id})
+
+
+@require_http_methods(["POST", "DELETE"])
+def workspace_video_role(request, workspace_id: str, role: str):
+    """POST — добавить/заменить файл роли (multipart ``file``, опц. ``existing``).
+
+    Django 4.2 не заполняет ``request.FILES`` для PUT/PATCH, поэтому аплоад
+    выполняется методом POST (как и создание workspace).
+
+    ``existing`` — роль, которой назначается прежний «нейтральный» файл при
+    добавлении второго видео (сценарий: был один файл — теперь два).
+
+    DELETE — убрать ролевой файл (нельзя оставить workspace без видео).
+    """
+    if role not in ws_fs.ROLES:
+        return JsonResponse({"error": f"Неизвестная роль: {role!r}"}, status=400)
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        return _ws_404(workspace_id)
+
+    if request.method == "POST":
+        return _put_role(request, ws, role)
+    return _delete_role(ws, role)
+
+
+def _put_role(request, ws, role: str) -> JsonResponse:
+    """Добавляет/заменяет файл роли или назначает роль существующему файлу.
+
+    Два режима (нельзя передавать оба):
+      * ``file`` (multipart) — новое видео; опционально ``existing``: роль,
+        которой назначается прежний «нейтральный» файл при добавлении второго
+        видео (сценарий: был один файл — теперь два);
+      * ``assign=<имя файла>`` — назначить роль уже лежащему в workspace
+        «неразмеченному» видео (unassigned) без новой загрузки.
+    """
+    assign = request.POST.get("assign")
+    upload = request.FILES.get("file")
+    existing = request.POST.get("existing")
+
+    if assign is not None and upload is not None:
+        return JsonResponse(
+            {"error": "Нельзя передавать и 'assign', и загружаемый файл"}, status=400
+        )
+
+    if assign is not None:
+        try:
+            final = ws_fs.assign_role_file(
+                ws_module.WORKSPACE_ROOT, ws.name, role, assign
+            )
+        except ws_fs.InvalidWorkspaceError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+        self_closed = {ws.original, ws.visualization}
+        ws.invalidate_videos()
+        scan_workspaces()
+        bump_updated_at(ws)
+        for path in self_closed | {final}:
+            if path:
+                frame_provider.close_source(path)
+        return _entry_response(ws.name)
+
+    if upload is None:
+        return JsonResponse({"error": "Не передан файл (поле 'file')"}, status=400)
+
+    if existing is not None and existing not in ws_fs.ROLES:
+        return JsonResponse(
+            {"error": f"Неизвестная роль existing: {existing!r}"}, status=400
+        )
+    if existing == role:
+        return JsonResponse(
+            {"error": "existing должен быть ролью, противоположной добавляемой"},
+            status=400,
+        )
+
+    before = {"source": ws.original, "preview": ws.visualization}
+
+    # Загрузка во временный файл + валидация содержимого (не по расширению).
+    tmp = ws_fs.make_upload_temp(ws_module.WORKSPACE_ROOT, ws.name)
+    try:
+        ws_fs.write_stream(upload, tmp)
+        if not frame_provider.get_metadata(tmp).get("total_frames"):
+            raise ValueError("видео не содержит кадров")
+    except Exception as e:  # noqa: BLE001 — любой сбой чтения = битый файл
+        _drop_pending(tmp)
+        return JsonResponse({"error": f"Не удалось прочитать видео: {e}"}, status=400)
+
+    promoted = None
+    try:
+        if existing:
+            promoted = ws_fs.promote_plain_video(
+                ws_module.WORKSPACE_ROOT, ws.name, existing
+            )
+            if promoted is None:
+                raise ws_fs.InvalidWorkspaceError(
+                    "Нет нейтрального видео, чтобы назначить ему роль existing"
+                )
+        final = ws_fs.commit_role_upload(
+            ws_module.WORKSPACE_ROOT, ws.name, role, tmp, upload.name
+        )
+    except ws_fs.InvalidWorkspaceError as e:
+        _drop_pending(tmp)
+        return JsonResponse({"error": str(e)}, status=400)
+
+    # Дропаем провайдеры кадров заменённых/удалённых/временных путей.
+    for path in {before["source"], before["preview"], tmp, final, promoted}:
+        if path:
+            frame_provider.close_source(path)
+
+    ws.invalidate_videos()
+    scan_workspaces()
+    bump_updated_at(ws)
+    return _entry_response(ws.name)
+
+
+def _delete_role(ws, role: str) -> JsonResponse:
+    if ws.original == ws.visualization:
+        return JsonResponse(
+            {"error": "Нельзя удалить единственное видео workspace"}, status=400
+        )
+    old = ws.original if role == "source" else ws.visualization
+    removed = ws_fs.remove_role_file(ws_module.WORKSPACE_ROOT, ws.name, role)
+    if removed is None:
+        return JsonResponse(
+            {"error": f"Роль '{role}' не выделена явно файлом"}, status=400
+        )
+    if old and os.path.isfile(old):
+        frame_provider.close_source(old)
+
+    ws.invalidate_videos()
+    scan_workspaces()
+    bump_updated_at(ws)
+    return _entry_response(ws.name)
+
+
+@require_http_methods(["POST"])
+def workspace_swap(request, workspace_id: str):
+    """Меняет роли двух видео местами (source <-> preview)."""
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        return _ws_404(workspace_id)
+
+    s_path, p_path = ws.original, ws.visualization
+    if not s_path or not p_path or s_path == p_path:
+        return JsonResponse(
+            {"error": "Для смены ролей нужно два разных видео"}, status=400
+        )
+
+    # Промотируем неявные роли до явных, затем обмениваем файлы.
+    try:
+        if ws_fs.role_of_name(os.path.basename(s_path)) != "source":
+            ws_fs.promote_plain_video(ws_module.WORKSPACE_ROOT, ws.name, "source")
+        if ws_fs.role_of_name(os.path.basename(p_path)) != "preview":
+            ws_fs.promote_plain_video(ws_module.WORKSPACE_ROOT, ws.name, "preview")
+        ws_fs.swap_role_files(ws_module.WORKSPACE_ROOT, ws.name)
+    except ws_fs.InvalidWorkspaceError as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+    for path in {s_path, p_path}:
+        if path:
+            frame_provider.close_source(path)
+
+    ws.invalidate_videos()
+    scan_workspaces()
+    bump_updated_at(ws)
+    return _entry_response(ws.name)

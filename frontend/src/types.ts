@@ -6,8 +6,9 @@ export interface Fragment {
 
 export interface VideoPair {
   id: string;
-  original_name: string;
-  visualization_name: string;
+  source_name: string;
+  preview_name: string;
+  unassigned_name: string | null;
   total_frames: number;
   width: number;
   height: number;

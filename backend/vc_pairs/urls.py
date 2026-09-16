@@ -12,4 +12,8 @@ urlpatterns = [
     path("workspaces/<str:workspace_id>/frame/<int:index>/", views.workspace_frame, name="workspace-frame-slash"),
     path("workspaces/<str:workspace_id>/meta", views.workspace_meta, name="workspace-meta"),
     path("workspaces/<str:workspace_id>/meta/", views.workspace_meta, name="workspace-meta-slash"),
+    path("workspaces/<str:workspace_id>/video/<str:role>", views.workspace_video_role, name="workspace-video-role"),
+    path("workspaces/<str:workspace_id>/video/<str:role>/", views.workspace_video_role, name="workspace-video-role-slash"),
+    path("workspaces/<str:workspace_id>/swap", views.workspace_swap, name="workspace-swap"),
+    path("workspaces/<str:workspace_id>/swap/", views.workspace_swap, name="workspace-swap-slash"),
 ]

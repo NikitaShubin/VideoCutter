@@ -11,17 +11,14 @@ import csv
 import os
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import List, Optional
 
 from vc_pairs import frame_provider
+from videocutter.standalone import workspace as ws_fs
 from videocutter.standalone.workspace import VIDEO_EXTS
 
 # Корневая директория со всеми workspace-ами.
 WORKSPACE_ROOT = os.getenv("VC_WORKSPACE_ROOT", os.path.join(os.path.dirname(__file__), "workspaces"))
-
-# Расширения видеофайлов, которые мы распознаём (общие с автономной обвязкой).
-_VIDEO_EXTS = VIDEO_EXTS
 
 # Имя файла с фрагментами (аналог txt-файла в PVC).
 FRAGMENTS_FILE = "fragments.tsv"
@@ -37,45 +34,33 @@ class Workspace:
     # Заполняются лениво при first access.
     _original: Optional[str] = field(default=None, repr=False)
     _visualization: Optional[str] = field(default=None, repr=False)
+    _unassigned: Optional[List[str]] = field(default=None, repr=False)
     _meta: Optional[dict] = field(default=None, repr=False)
     _fragments: Optional[List[dict]] = field(default=None, repr=False)
     _position: Optional[int] = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def _discover_videos(self) -> None:
-        """Находит оригинальное и визуализационное видео в директории."""
+        """Находит роли видео в директории: source (original), preview, unassigned.
+
+        В отличие от прежнего суффикосного поиска (только ``_viz``), роли теперь
+        кодируются именами файлов: ``<base>_source``/``<base>_preview``; старые
+        flat-workspaces с ``_viz`` распознаются как legacy-превью.
+        """
         if self._original is not None:
             return
 
-        videos = sorted(
-            p for p in Path(self.path).iterdir()
-            if p.is_file() and p.suffix.lower() in _VIDEO_EXTS
-        )
+        found = ws_fs.classify_videos(WORKSPACE_ROOT, self.name)
+        self._original = found["source"] or ""
+        self._visualization = found["preview"] or ""
+        self._unassigned = found["unassigned"]
 
-        if not videos:
-            self._original = ""
-            self._visualization = ""
-            return
-
-        # Ищем видео с суффиксами _viz / _visualization / _vis.
-        viz_suffixes = ("_viz", "_visualization", "_vis")
-        original = None
-        visualization = None
-
-        for v in videos:
-            stem_lower = v.stem.lower()
-            if any(stem_lower.endswith(s) for s in viz_suffixes):
-                visualization = str(v)
-            elif original is None:
-                original = str(v)
-
-        # Если нашли только визуализацию — она и есть original.
-        if original is None and visualization is not None:
-            original = visualization
-            visualization = None
-
-        self._original = original or ""
-        self._visualization = visualization or ""
+    def invalidate_videos(self) -> None:
+        """Сбрасывает кэш ролей и метаданных (после замены/переименования)."""
+        self._original = None
+        self._visualization = None
+        self._unassigned = None
+        self._meta = None
 
     @property
     def original(self) -> str:
@@ -88,15 +73,25 @@ class Workspace:
         return self._visualization
 
     @property
+    def unassigned(self) -> List[str]:
+        """Нейтральные видеофайлы без роли (для назначения роли в UI)."""
+        self._discover_videos()
+        return self._unassigned or []
+
+    @property
     def has_visualization(self) -> bool:
         return bool(self.visualization)
 
     def metadata(self) -> dict:
-        """Метаданные видео (вычисляется на лету через PyAV)."""
+        """Метаданные видео-превью (того, что смотрит пользователь).
+
+        Номера кадров ведём по превью (как в PyVideoCutter: ``total_frames``
+        берётся из превью), а нарезаем — из source.
+        """
         if self._meta is not None:
             return self._meta
 
-        path = self.original
+        path = self.visualization or self.original
         if not path or not os.path.isfile(path):
             self._meta = {
                 "total_frames": 0, "width": 0, "height": 0, "fps": 0.0,
@@ -246,6 +241,36 @@ def _workspace_updated_at(ws: Workspace) -> float:
         return 0.0
 
 
+def bump_updated_at(ws: Workspace) -> None:
+    """Делает workspace «свежим» (верх списка) после операций с ролями."""
+    try:
+        os.utime(ws.fragments_path(), None)
+    except OSError:
+        try:
+            os.utime(ws.path, None)
+        except OSError:
+            pass
+
+
+def _pair_entry(ws: Workspace) -> dict:
+    """Элемент списка/деталей: роли, превью-метрики, фрагменты, позиция."""
+    meta = ws.metadata()
+    unassigned = ws.unassigned
+    return {
+        "id": ws.name,
+        "source_name": os.path.basename(ws.original) if ws.original else "",
+        "preview_name": os.path.basename(ws.visualization) if ws.visualization else "",
+        "unassigned_name": os.path.basename(unassigned[0]) if unassigned else None,
+        "total_frames": meta["total_frames"],
+        "width": meta["width"],
+        "height": meta["height"],
+        "fps": meta["fps"],
+        "fragments": ws.load_fragments(),
+        "position": ws.load_position(),
+        "updated_at": _workspace_updated_at(ws),
+    }
+
+
 def list_workspaces() -> List[dict]:
     """Возвращает список workspace-ов с фрагментами, позицией и временем правки.
 
@@ -253,22 +278,7 @@ def list_workspaces() -> List[dict]:
     и порядок «недавние сверху» опираются на эти же данные.
     """
     ws_map = scan_workspaces()
-    result = []
-    for name, ws in ws_map.items():
-        meta = ws.metadata()
-        frags = ws.load_fragments()
-        result.append({
-            "id": name,
-            "original_name": os.path.basename(ws.original) if ws.original else "",
-            "visualization_name": os.path.basename(ws.visualization) if ws.visualization else "",
-            "total_frames": meta["total_frames"],
-            "width": meta["width"],
-            "height": meta["height"],
-            "fps": meta["fps"],
-            "fragments": frags,
-            "position": ws.load_position(),
-            "updated_at": _workspace_updated_at(ws),
-        })
+    result = [_pair_entry(ws) for ws in ws_map.values()]
     result.sort(key=lambda w: w["updated_at"], reverse=True)
     return result
 
@@ -278,19 +288,4 @@ def get_workspace_detail(name: str) -> Optional[dict]:
     ws = get_workspace(name)
     if ws is None:
         return None
-
-    meta = ws.metadata()
-    frags = ws.load_fragments()
-
-    return {
-        "id": name,
-        "original_name": os.path.basename(ws.original) if ws.original else "",
-        "visualization_name": os.path.basename(ws.visualization) if ws.visualization else "",
-        "total_frames": meta["total_frames"],
-        "width": meta["width"],
-        "height": meta["height"],
-        "fps": meta["fps"],
-        "fragments": frags,
-        "position": ws.load_position(),
-        "updated_at": _workspace_updated_at(ws),
-    }
+    return _pair_entry(ws)

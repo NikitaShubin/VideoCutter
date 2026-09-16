@@ -82,6 +82,64 @@ body {
   font-weight: 600;
 }
 
+/* Панель видео-ролей в тулбаре (source/preview, swap, replace, assign). */
+.toolbar-videos {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.85em;
+  color: #9a9ab0;
+}
+
+.toolbar-videos .video-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #3a3a52;
+  border-radius: 4px;
+  padding: 2px 8px;
+  background: #232338;
+}
+
+.toolbar-videos .video-role b {
+  color: #c9c9dd;
+}
+
+.toolbar-videos .video-role.unassigned {
+  border-color: #8a6d3b;
+}
+
+.toolbar-videos .video-btn,
+.toolbar-videos .video-role button {
+  padding: 1px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #3a3a52;
+  color: #e0e0e0;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+.toolbar-videos .video-btn:hover,
+.toolbar-videos .video-role button:hover {
+  background: #4a4a66;
+}
+
+.toolbar-videos .video-btn:disabled,
+.toolbar-videos .video-role button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.toolbar-videos .video-btn {
+  display: inline-block;
+}
+
+.toolbar-videos .video-busy {
+  color: #9a9ab0;
+}
+
 .info {
   color: #9a9ab0;
   font-size: 0.85em;
