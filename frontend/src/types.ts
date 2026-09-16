@@ -33,3 +33,12 @@ export interface ExportStatus {
   files?: ExportItem[];
   error?: string;
 }
+
+// Атрибут accept для выбора файлов: общий список поддерживаемых расширений.
+// «video/*» сам по себе скрывает .avi/.mkv и т.п. в диалоге выбора файла.
+export const VIDEO_ACCEPT = [
+  ".mp4", ".m4v", ".mkv", ".avi", ".mov", ".webm",
+  ".mts", ".m2ts", ".ts", ".flv", ".wmv",
+  ".mpg", ".mpeg", ".3gp", ".3g2", ".ogv", ".ogm", ".asf", ".vob",
+  "video/*",
+].join(",");

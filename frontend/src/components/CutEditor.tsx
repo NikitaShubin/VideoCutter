@@ -22,7 +22,7 @@ import {
   timelineFrame,
 } from "../model/frameScheduler";
 import { paintStatusbar } from "../model/statusbar";
-import type { ExportItem, VideoPairDetail } from "../types";
+import { VIDEO_ACCEPT, type ExportItem, type VideoPairDetail } from "../types";
 
 interface Props {
   pairId: string;
@@ -711,7 +711,7 @@ export function CutEditor({ pairId, onBack }: Props) {
                 <input
                   type="file"
                   hidden
-                  accept="video/*"
+                  accept={VIDEO_ACCEPT}
                   onChange={(e) => uploadToRole("source")(e.target.files?.[0] ?? null)}
                 />
               </label>
@@ -734,7 +734,7 @@ export function CutEditor({ pairId, onBack }: Props) {
                 <input
                   type="file"
                   hidden
-                  accept="video/*"
+                  accept={VIDEO_ACCEPT}
                   onChange={(e) => uploadToRole("preview")(e.target.files?.[0] ?? null)}
                 />
               </label>

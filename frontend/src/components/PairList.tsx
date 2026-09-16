@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { deleteWorkspace, uploadWorkspace } from "../api";
-import type { VideoPair } from "../types";
+import { VIDEO_ACCEPT, type VideoPair } from "../types";
 import { StatusbarPreview } from "./StatusbarPreview";
 
 interface Props {
@@ -98,7 +98,7 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
             <span>Источник (из него вырезаются фрагменты)</span>
             <input
               type="file"
-              accept="video/*"
+              accept={VIDEO_ACCEPT}
               onChange={(e) => pickFile("source")(e.target.files?.[0] ?? null)}
             />
           </label>
@@ -106,7 +106,7 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
             <span>Превью (что показывается)</span>
             <input
               type="file"
-              accept="video/*"
+              accept={VIDEO_ACCEPT}
               onChange={(e) => pickFile("preview")(e.target.files?.[0] ?? null)}
             />
           </label>
