@@ -137,7 +137,62 @@ body {
 }
 
 .toolbar-videos .video-busy {
-  color: #9a9ab0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #ffd479;
+  font-size: 0.85em;
+}
+
+.toolbar-videos .video-busy-bar {
+  width: 56px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 212, 121, 0.18);
+  overflow: hidden;
+  position: relative;
+}
+
+.toolbar-videos .video-busy-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: 3px;
+  background: #ffd479;
+  animation: frame-spin 1s linear infinite alternate;
+  transform-origin: left;
+}
+
+.video-uploading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: rgba(255, 212, 121, 0.15);
+  overflow: hidden;
+  z-index: 5;
+}
+
+.video-uploading span {
+  display: none;
+}
+
+.video-uploading::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 40%;
+  background: #ffd479;
+  animation: upload-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes upload-slide {
+  from { left: -40%; }
+  to { left: 100%; }
 }
 
 .info {

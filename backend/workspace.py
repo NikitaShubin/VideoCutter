@@ -43,9 +43,9 @@ class Workspace:
     def _discover_videos(self) -> None:
         """Находит роли видео в директории: source (original), preview, unassigned.
 
-        В отличие от прежнего суффикосного поиска (только ``_viz``), роли теперь
-        кодируются именами файлов: ``<base>_source``/``<base>_preview``; старые
-        flat-workspaces с ``_viz`` распознаются как legacy-превью.
+        Роли кодируются именами файлов: унифицированные ``source.<ext>`` /
+        ``preview.<ext>``, а также суффиксные ``<base>_source``/``<base>_preview``;
+        старые flat-workspaces с ``_viz`` распознаются как legacy-превью.
         """
         if self._original is not None:
             return

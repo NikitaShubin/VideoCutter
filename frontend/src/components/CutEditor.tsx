@@ -43,6 +43,9 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [videoBusy, setVideoBusy] = useState(false);
+  // Версия кадров: поднимается после замены/назначения ролей, чтобы браузер не
+  // отдавал закэшированные JPEG по тому же URL и кадры реально обновились.
+  const [videoVer, setVideoVer] = useState(0);
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
@@ -196,11 +199,11 @@ export function CutEditor({ pairId, onBack }: Props) {
     (idx: number) => {
       if (!pair) return;
       const el = imageRef.current;
-      if (el) el.src = frameUrl(pair.id, idx);
+      if (el) el.src = frameUrl(pair.id, idx, "visualization", videoVer);
       schedRef.current?.show(idx);
       setShownFrame(idx);
     },
-    [pair],
+    [pair, videoVer],
   );
 
   // Единая точка загрузки/показа кадра. Вызывается реактивно (смена позиции
@@ -208,6 +211,7 @@ export function CutEditor({ pairId, onBack }: Props) {
   const pump = useCallback(() => {
     const sched = schedRef.current;
     if (!pair || !sched) return;
+    const ver = videoVer;
     const chase = chaseRef.current;
     const pos = position;
     const shown = shownFrame;
@@ -255,8 +259,8 @@ export function CutEditor({ pairId, onBack }: Props) {
       // иначе воспроизведение залипнет на битом кадре.
       if (!myChase && gen === sched.generation) setShownFrame(pos);
     };
-    img.src = frameUrl(pair.id, target);
-  }, [pair, position, shownFrame, showFrame]);
+    img.src = frameUrl(pair.id, target, "visualization", ver);
+  }, [pair, position, shownFrame, showFrame, videoVer]);
 
   const pumpRef = useRef<() => void>(() => {});
   pumpRef.current = pump;
@@ -371,6 +375,9 @@ export function CutEditor({ pairId, onBack }: Props) {
     setVideoBusy(true);
     try {
       await op();
+      // Смена видео: поднимаем версию кадров ДО перезагрузки пары, чтобы
+      // pump запросил новые кадры и браузер не отдал закэшированные JPEG.
+      setVideoVer((v) => v + 1);
       loadPairInto(await getPair(pairId));
       flash("Сохранено");
     } catch (e) {
@@ -758,7 +765,12 @@ export function CutEditor({ pairId, onBack }: Props) {
                 </button>
               </span>
             )}
-            {videoBusy && <span className="video-busy">…</span>}
+            {videoBusy && (
+              <span className="video-busy">
+                <i className="video-busy-bar" />
+                Загрузка видео…
+              </span>
+            )}
           </div>
           <span className="info">
             кадр {position + 1}/{pair.total_frames} · показано {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
@@ -803,6 +815,11 @@ export function CutEditor({ pairId, onBack }: Props) {
           }}
         />
         {frameLoading && <div className="frame-spinner" aria-hidden />}
+        {videoBusy && (
+          <div className="video-uploading">
+            <span>Загрузка видео…</span>
+          </div>
+        )}
         {(!isFullscreen || editingComment) && (
           editingComment ? (
             <div className="editor-comment">

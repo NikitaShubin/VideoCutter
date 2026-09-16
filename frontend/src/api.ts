@@ -135,8 +135,14 @@ export function deleteWorkspace(id: string): Promise<{ deleted: string }> {
   }).then((r) => json<{ deleted: string }>(r));
 }
 
-export function frameUrl(pairId: string, index: number, kind: "original" | "visualization" = "visualization"): string {
-  return `${BASE}/workspaces/${encodeURIComponent(pairId)}/frame/${index}/?video=${kind}`;
+export function frameUrl(
+  pairId: string,
+  index: number,
+  kind: "original" | "visualization" = "visualization",
+  ver?: number,
+): string {
+  const v = ver !== undefined ? `&v=${ver}` : "";
+  return `${BASE}/workspaces/${encodeURIComponent(pairId)}/frame/${index}/?video=${kind}${v}`;
 }
 
 export function replaceFragments(

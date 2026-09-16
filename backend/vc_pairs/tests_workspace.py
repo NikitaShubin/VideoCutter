@@ -110,15 +110,30 @@ class RoleApiTests(WorkspaceApiTestBase):
         })
         self.assertEqual(resp.status_code, HTTP_CREATED)
         body = self.client.get("/api/v1/workspaces/pair/").json()
-        self.assertEqual(body["source_name"], "result_source.mp4")
-        self.assertEqual(body["preview_name"], "result_preview.mp4")
+        self.assertEqual(body["source_name"], "source.mp4")
+        self.assertEqual(body["preview_name"], "preview.mp4")
         self.assertGreater(body["total_frames"], 0)
         ws_dir = os.path.join(self._tmpdir, "pair")
-        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "result_source.mp4")))
-        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "result_preview.mp4")))
+        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "source.mp4")))
+        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "preview.mp4")))
+
+    def test_upload_pair_unified_names_ignore_original(self):
+        """Унификация: имена файлов = роли, оригинальные имена не сохраняются."""
+        resp = self.client.post(self.ws_list_url, {
+            "source": self._video("6.avi"),
+            "preview": self._video("6_preview.mp4"),
+            "name": "unif",
+        })
+        self.assertEqual(resp.status_code, HTTP_CREATED)
+        ws_dir = os.path.join(self._tmpdir, "unif")
+        files = sorted(os.listdir(ws_dir))
+        self.assertEqual(files, ["preview.mp4", "source.avi"])
+        body = self.client.get("/api/v1/workspaces/unif/").json()
+        self.assertEqual(body["source_name"], "source.avi")
+        self.assertEqual(body["preview_name"], "preview.mp4")
 
     def test_upload_pair_identical_filenames_stored_separately(self):
-        """Два видео с одинаковыми именами не конфликтуют (роль в имени)."""
+        """Два видео с одинаковыми именами не конфликтуют (роль = имя файла)."""
         resp = self.client.post(self.ws_list_url, {
             "source": self._video("same.mp4"),
             "preview": self._video("same.mp4"),
@@ -127,8 +142,8 @@ class RoleApiTests(WorkspaceApiTestBase):
         self.assertEqual(resp.status_code, HTTP_CREATED)
         ws_dir = os.path.join(self._tmpdir, "samepair")
         files = sorted(os.listdir(ws_dir))
-        self.assertIn("same_source.mp4", files)
-        self.assertIn("same_preview.mp4", files)
+        self.assertIn("source.mp4", files)
+        self.assertIn("preview.mp4", files)
 
     def test_upload_accepts_non_mp4_extension(self):
         """Любое видео: расширение не ограничено mp4 (валидация по содержимому)."""
@@ -145,18 +160,15 @@ class RoleApiTests(WorkspaceApiTestBase):
             "preview": self._video("b.mp4"),
             "name": "sw",
         })
-        before = self.client.get("/api/v1/workspaces/sw/").json()
         resp = self.client.post("/api/v1/workspaces/sw/swap/")
         self.assertEqual(resp.status_code, 200)
         after = self.client.get("/api/v1/workspaces/sw/").json()
-        # Роли меняются: прежнее превью получает имя _source, прежний source — _preview.
-        self.assertEqual(after["source_name"], "b_source.mp4")
-        self.assertEqual(after["preview_name"], "a_preview.mp4")
-        for key in ("source", "preview"):
-            self.assertNotEqual(after[f"{key}_name"], before[f"{key}_name"])
+        # Имена ролей унифицированы: после swap роли «обмениваются» файлами.
+        self.assertEqual(after["source_name"], "source.mp4")
+        self.assertEqual(after["preview_name"], "preview.mp4")
         ws_dir = os.path.join(self._tmpdir, "sw")
-        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "b_source.mp4")))
-        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "a_preview.mp4")))
+        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "source.mp4")))
+        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "preview.mp4")))
 
     def test_swap_requires_two_videos(self):
         self.client.post(self.ws_list_url, {"file": self._video(), "name": "sw1"})
@@ -173,10 +185,10 @@ class RoleApiTests(WorkspaceApiTestBase):
         )
         self.assertEqual(resp.status_code, 200)
         body = self.client.get("/api/v1/workspaces/grow/").json()
-        self.assertEqual(body["source_name"], "origin_source.mp4")
-        self.assertEqual(body["preview_name"], "marker_preview.mp4")
+        self.assertEqual(body["source_name"], "source.mp4")
+        self.assertEqual(body["preview_name"], "preview.mp4")
         ws_dir = os.path.join(self._tmpdir, "grow")
-        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "origin_source.mp4")))
+        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "source.mp4")))
 
     def test_upload_role_replace_removes_old_file(self):
         self.client.post(self.ws_list_url, {
@@ -190,9 +202,17 @@ class RoleApiTests(WorkspaceApiTestBase):
         )
         self.assertEqual(resp.status_code, 200)
         body = self.client.get("/api/v1/workspaces/repl/").json()
-        self.assertEqual(body["preview_name"], "c_preview.mp4")
-        self.assertFalse(os.path.isfile(os.path.join(self._tmpdir, "repl", "b_preview.mp4")))
-        self.assertEqual(body["source_name"], "a_source.mp4")
+        self.assertEqual(body["preview_name"], "preview.mp4")
+        self.assertEqual(body["source_name"], "source.mp4")
+        ws_dir = os.path.join(self._tmpdir, "repl")
+        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "preview.mp4")))
+        with open(os.path.join(ws_dir, "preview.mp4"), "rb") as f:
+            self.assertEqual(f.read(), self._test_video_bytes())
+
+    def _test_video_bytes(self):
+        src = os.path.join(os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        with open(src, "rb") as f:
+            return f.read()
 
     def test_upload_role_invalid_video_preserves_role(self):
         self.client.post(self.ws_list_url, {
@@ -204,8 +224,8 @@ class RoleApiTests(WorkspaceApiTestBase):
         resp = self._upload_role("/api/v1/workspaces/keep/video/preview/", file=bad)
         self.assertEqual(resp.status_code, 400)
         body = self.client.get("/api/v1/workspaces/keep/").json()
-        self.assertEqual(body["preview_name"], "b_preview.mp4")
-        self.assertTrue(os.path.isfile(os.path.join(self._tmpdir, "keep", "b_preview.mp4")))
+        self.assertEqual(body["preview_name"], "preview.mp4")
+        self.assertTrue(os.path.isfile(os.path.join(self._tmpdir, "keep", "preview.mp4")))
 
     def test_upload_role_unknown_role(self):
         resp = self._upload_role("/api/v1/workspaces/x/video/bogus/", file=self._video())
@@ -231,9 +251,9 @@ class RoleApiTests(WorkspaceApiTestBase):
         resp = self.client.post("/api/v1/workspaces/asg/video/preview/", {"assign": "zzz.mp4"})
         self.assertEqual(resp.status_code, 200)
         body = self.client.get("/api/v1/workspaces/asg/").json()
-        self.assertEqual(body["preview_name"], "zzz_preview.mp4")
+        self.assertEqual(body["preview_name"], "preview.mp4")
         self.assertEqual(body["source_name"], "aaa.mp4")
-        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "zzz_preview.mp4")))
+        self.assertTrue(os.path.isfile(os.path.join(ws_dir, "preview.mp4")))
 
     def test_assign_conflicts_with_upload(self):
         self.client.post(self.ws_list_url, {"file": self._video(), "name": "asgc"})
@@ -250,9 +270,10 @@ class RoleApiTests(WorkspaceApiTestBase):
         resp = self.client.delete("/api/v1/workspaces/delr/video/preview/")
         self.assertEqual(resp.status_code, 200)
         body = self.client.get("/api/v1/workspaces/delr/").json()
-        self.assertFalse(os.path.isfile(os.path.join(self._tmpdir, "delr", "b_preview.mp4")))
+        self.assertFalse(os.path.isfile(os.path.join(self._tmpdir, "delr", "preview.mp4")))
         # После удаления превью оставшееся видео — единственный источник.
         self.assertEqual(body["source_name"], body["preview_name"])
+        self.assertEqual(body["source_name"], "source.mp4")
         # Нельзя удалить единственное видео.
         resp = self.client.delete("/api/v1/workspaces/delr/video/source/")
         self.assertEqual(resp.status_code, 400)

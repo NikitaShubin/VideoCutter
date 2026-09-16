@@ -6,12 +6,13 @@ Workspace автономного режима — это папка с виде�
 папок и ролей — задача обвязки. Эти функции не привязаны к Django или
 какому-либо контуру — их вызывает любой внешний слой.
 
-Роли видео (как в десктопном PyVideoCutter: ``preview`` — что показывает не
+Роли видео (как в десктопном PyVideoCutter: ``preview`` — что показывает
 пользователя, ``source`` — из чего вырезаются фрагменты) кодируются **в имени
-файла**: ``<base>_source.<ext>`` / ``<base>_preview.<ext>``. Так можно хранить
-два видео с одинаковыми оригинальными именами (они различаются суффиксом), а
-смена ролей — это переименование файлов. Одиночный файл без маркера роли —
-«нейтральный»: он играет обе роли сразу (source = preview).
+файла**. Новым файлам сервис выдаёт унифицированные ролевые имена:
+``source.<ext>`` / ``preview.<ext>`` (оригинальное имя уходит в имя workspace);
+старые суффиксные имена (``<base>_source``/``<base>_preview``) по-прежнему
+читаются сканером. Одиночный файл без маркера роли — «нейтральный»: он играет
+обе роли сразу (source = preview).
 """
 
 from __future__ import annotations
@@ -82,8 +83,14 @@ def _ext_ok(filename: str) -> bool:
 
 
 def _exact_role(filename: str) -> Optional[str]:
-    """Точный маркер роли в имени файла: 'source' | 'preview' | None."""
+    """Точная роль видео по имени файла: 'source' | 'preview' | None.
+
+    Распознаются унифицированные имена (``source.mp4``/``preview.mp4``) и
+    суффиксный вариант старого формата (``<base>_source``/``<base>_preview``).
+    """
     stem = os.path.splitext(filename)[0].lower()
+    if stem == "source" or stem == "preview":
+        return stem
     return _EXACT_ROLE_SUFFIXES.get(
         next((s for s in _EXACT_ROLE_SUFFIXES if stem.endswith(s)), ""))
 
@@ -99,22 +106,16 @@ def _is_legacy_viz(filename: str) -> bool:
 
 
 def role_filename(filename: str, role: str) -> str:
-    """Имя файла с маркером роли: убирает любой маркер и добавляет целевой.
+    """Имя файла роли: ``<role>.<ext>`` — унифицированные имена source/preview.
 
-    ``role_filename("video.mp4", "source")`` -> ``video_source.mp4``;
-    ``role_filename("video_source.mp4", "source")`` -> ``video_source.mp4``
-    (повторное назначение той же роли — no-op).
+    Идентичность файла определяет его роль, а не исходное имя: загруженные
+    ``6.avi`` и ``6_preview.mp4`` сохраняются как ``source.avi`` и
+    ``preview.mp4``. Суффиксный вариант старого формата на диске читается,
+    но новые файлы пишутся с ролевым именем.
     """
     if role not in ROLES:
         raise InvalidWorkspaceError(f"Неизвестная роль: {role!r}")
-    ext = os.path.splitext(filename)[1]
-    stem = os.path.splitext(filename)[0]
-    lower = stem.lower()
-    for marker in (*_EXACT_ROLE_SUFFIXES, *_LEGACY_PREVIEW_SUFFIXES):
-        if lower.endswith(marker):
-            stem = stem[: -len(marker)]
-            break
-    return stem + f"_{role}" + ext
+    return f"{role}{os.path.splitext(filename)[1]}"
 
 
 def classify_videos(root: str, name: str) -> dict:
