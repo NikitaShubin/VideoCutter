@@ -274,3 +274,51 @@ class ExportApiTests(WorkspaceApiTestBase):
         self.assertEqual(resp.status_code, HTTP_OK)
         body = resp.json()
         self.assertEqual(body["state"], "running")
+
+
+class SettingsApiTests(WorkspaceApiTestBase):
+    def setUp(self):
+        super().setUp()
+        self.settings_url = f"/api/v1/pairs/{self.ws_id}/settings"
+
+    def test_get_settings_default(self):
+        resp = self.client.get(self.settings_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        body = resp.json()
+        self.assertEqual(body["quality"], 78)
+        self.assertEqual(body["scale"], 0.75)
+
+    def test_put_settings_saves_and_restores(self):
+        resp = self.json_put(self.settings_url, {"quality": 90, "scale": 0.5})
+        self.assertEqual(resp.status_code, HTTP_OK)
+        body = resp.json()
+        self.assertEqual(body["quality"], 90)
+        self.assertAlmostEqual(body["scale"], 0.5, places=2)
+
+        # Проверяем через GET и detail — настройки восстанавливаются.
+        self.assertEqual(self.client.get(self.settings_url).json()["quality"], 90)
+        detail = self.client.get(self.ws_detail_url).json()
+        self.assertEqual(detail["quality"], 90)
+        self.assertAlmostEqual(detail["scale"], 0.5, places=2)
+
+    def test_put_settings_persists_in_tsv(self):
+        self.json_put(self.settings_url, {"quality": 50, "scale": 0.25})
+        with open(os.path.join(self.ws_dir, "fragments.tsv")) as f:
+            text = f.read()
+        self.assertIn("# settings\t50\t0.25", text)
+        # Фрагменты не пострадали.
+        frags = self.client.get(self.frags_url).json()
+        self.assertEqual(len(frags), 2)
+
+    def test_put_settings_out_of_range(self):
+        for bad in [{"quality": 5}, {"quality": 100}, {"scale": 0.01}, {"scale": 1.5}]:
+            resp = self.json_put(self.settings_url, bad)
+            self.assertEqual(resp.status_code, HTTP_BAD_REQUEST, bad)
+
+    def test_settings_rejects_missing_workspace(self):
+        resp = self.client.get("/api/v1/pairs/nonexistent/settings")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_settings_405_for_post(self):
+        resp = self.client.post(self.settings_url)
+        self.assertEqual(resp.status_code, 405)

@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  assignWorkspaceVideo,
   frameUrl,
   getExportStatus,
   getPair,
-  removeWorkspaceVideo,
   replaceFragments,
   savePosition,
-  setWorkspaceVideo,
+  setPairSettings,
   startExport,
-  swapVideos,
+  workspaceNonce,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
 import { HelpModal } from "./HelpModal";
@@ -22,7 +20,7 @@ import {
   timelineFrame,
 } from "../model/frameScheduler";
 import { paintStatusbar } from "../model/statusbar";
-import { VIDEO_ACCEPT, type ExportItem, type VideoPairDetail } from "../types";
+import { type ExportItem, type VideoPairDetail } from "../types";
 
 interface Props {
   pairId: string;
@@ -42,10 +40,9 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [message, setMessage] = useState("");
-  const [videoBusy, setVideoBusy] = useState(false);
-  // Версия кадров: поднимается после замены/назначения ролей, чтобы браузер не
-  // отдавал закэшированные JPEG по тому же URL и кадры реально обновились.
-  const [videoVer, setVideoVer] = useState(0);
+  // Настройки просмотра: масштаб (0.05..1.0) и качество JPEG (30..95).
+  const [scale, setScale] = useState(0.75);
+  const [quality, setQuality] = useState(78);
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
@@ -103,6 +100,8 @@ export function CutEditor({ pairId, onBack }: Props) {
   // Загрузка пары + фрагментов.
   const loadPairInto = useCallback((p: VideoPairDetail) => {
     setPair(p);
+    setScale(p.scale ?? 0.75);
+    setQuality(p.quality ?? 78);
     // Возвращаемся на кадр, где пользователь завершил редактирование
     // (сохранён в fragments.tsv); при отсутствии/выходе за диапазон — 0.
     const saved = p.total_frames > 0
@@ -195,15 +194,16 @@ export function CutEditor({ pairId, onBack }: Props) {
 
   // Показ кадра: ставим src, помечаем кадр как показанный (state — чтобы
   // эффекты и индикатор загрузки реагировали на появление кадра).
+  const ver = pair ? `${pair.video_ver}:${workspaceNonce(pairId)}` : undefined;
   const showFrame = useCallback(
     (idx: number) => {
       if (!pair) return;
       const el = imageRef.current;
-      if (el) el.src = frameUrl(pair.id, idx, "visualization", videoVer);
+      if (el) el.src = frameUrl(pair.id, idx, "visualization", ver, scale, quality);
       schedRef.current?.show(idx);
       setShownFrame(idx);
     },
-    [pair, videoVer],
+    [pair, ver, scale, quality],
   );
 
   // Единая точка загрузки/показа кадра. Вызывается реактивно (смена позиции
@@ -211,7 +211,6 @@ export function CutEditor({ pairId, onBack }: Props) {
   const pump = useCallback(() => {
     const sched = schedRef.current;
     if (!pair || !sched) return;
-    const ver = videoVer;
     const chase = chaseRef.current;
     const pos = position;
     const shown = shownFrame;
@@ -259,8 +258,8 @@ export function CutEditor({ pairId, onBack }: Props) {
       // иначе воспроизведение залипнет на битом кадре.
       if (!myChase && gen === sched.generation) setShownFrame(pos);
     };
-    img.src = frameUrl(pair.id, target, "visualization", ver);
-  }, [pair, position, shownFrame, showFrame, videoVer]);
+    img.src = frameUrl(pair.id, target, "visualization", ver, scale, quality);
+  }, [pair, position, shownFrame, showFrame, scale, quality]);
 
   const pumpRef = useRef<() => void>(() => {});
   pumpRef.current = pump;
@@ -268,6 +267,19 @@ export function CutEditor({ pairId, onBack }: Props) {
   useEffect(() => {
     pump();
   }, [pump]);
+
+  // Ползунки качества/масштаба: сохраняем на сервер с debounce и перечитываем
+  // текущий кадр под новые настройки (URL кадра меняется → браузер берёт свежий).
+  useEffect(() => {
+    if (!pair) return;
+    const id = window.setTimeout(() => {
+      setPairSettings(pairId, quality, scale).catch(() => {});
+      schedRef.current = new FrameScheduler(MAX_CACHE);
+      setShownFrame(-1);
+      pumpRef.current();
+    }, 400);
+    return () => window.clearTimeout(id);
+  }, [pair, pairId, quality, scale]);
 
   // --- Режимы навигации (утдерживание vs тапы vs прыжки) ---
   // Прыжок: сразу целевой кадр, буфер/стрим отменяются.
@@ -366,42 +378,6 @@ export function CutEditor({ pairId, onBack }: Props) {
   const flash = (m: string) => {
     setMessage(m);
     window.setTimeout(() => setMessage(""), 2000);
-  };
-
-  // ─── Управление видео: назначить роль, заменить файл, убрать, swap ───────
-  // После любой операции роли перезагружаем пару: счётчик кадров берётся из
-  // превью, поэтому пересоздаём планировщик (новые кадры с сервера).
-  const withReload = async (op: () => Promise<unknown>) => {
-    setVideoBusy(true);
-    try {
-      await op();
-      // Смена видео: поднимаем версию кадров ДО перезагрузки пары, чтобы
-      // pump запросил новые кадры и браузер не отдал закэшированные JPEG.
-      setVideoVer((v) => v + 1);
-      loadPairInto(await getPair(pairId));
-      flash("Сохранено");
-    } catch (e) {
-      flash(`Ошибка: ${(e as Error).message}`);
-    } finally {
-      setVideoBusy(false);
-    }
-  };
-
-  const uploadToRole = (role: "source" | "preview") => (f: File | null) => {
-    if (!f) return;
-    withReload(() => setWorkspaceVideo(pairId, role, f));
-  };
-
-  const assignToRole = (role: "source" | "preview", filename: string) => () => {
-    withReload(() => assignWorkspaceVideo(pairId, role, filename));
-  };
-
-  const dropRole = (role: "source" | "preview") => () => {
-    withReload(() => removeWorkspaceVideo(pairId, role));
-  };
-
-  const swapRoles = () => {
-    withReload(() => swapVideos(pairId));
   };
 
   const commentRef = useRef<HTMLTextAreaElement | null>(null);
@@ -690,88 +666,34 @@ export function CutEditor({ pairId, onBack }: Props) {
               <span> · Превью: {pair.preview_name}</span>
             )}
           </span>
-          <div className="toolbar-videos">
-            <span className="video-role">
-              <b>Источник</b> — {pair.source_name}
-              {pair.source_name !== pair.preview_name && (
-                <>
-                  <button
-                    className="video-btn"
-                    title="Поменять роли местами (⇅)"
-                    onClick={swapRoles}
-                    disabled={videoBusy}
-                  >
-                    ⇅
-                  </button>
-                  <button
-                    className="video-btn"
-                    title="Убрать источник"
-                    onClick={dropRole("source")}
-                    disabled={videoBusy}
-                  >
-                    Убрать
-                  </button>
-                </>
-              )}
-              <label className="video-btn">
-                Заменить…
-                <input
-                  type="file"
-                  hidden
-                  accept={VIDEO_ACCEPT}
-                  onChange={(e) => uploadToRole("source")(e.target.files?.[0] ?? null)}
-                />
-              </label>
-            </span>
-            <span className="video-role">
-              <b>Превью</b> —{" "}
-              {pair.preview_name === pair.source_name ? "то же видео" : pair.preview_name}
-              {pair.preview_name !== pair.source_name && (
-                <button
-                  className="video-btn"
-                  title="Убрать превью"
-                  onClick={dropRole("preview")}
-                  disabled={videoBusy}
-                >
-                  Убрать
-                </button>
-              )}
-              <label className="video-btn">
-                Заменить…
-                <input
-                  type="file"
-                  hidden
-                  accept={VIDEO_ACCEPT}
-                  onChange={(e) => uploadToRole("preview")(e.target.files?.[0] ?? null)}
-                />
-              </label>
-            </span>
-            {pair.unassigned_name && (
-              <span className="video-role unassigned">
-                <b>Не размечено</b> — {pair.unassigned_name}
-                <button
-                  className="video-btn"
-                  onClick={assignToRole("source", pair.unassigned_name)}
-                  disabled={videoBusy}
-                >
-                  → источник
-                </button>
-                <button
-                  className="video-btn"
-                  onClick={assignToRole("preview", pair.unassigned_name)}
-                  disabled={videoBusy}
-                >
-                  → превью
-                </button>
-              </span>
-            )}
-            {videoBusy && (
-              <span className="video-busy">
-                <i className="video-busy-bar" />
-                Загрузка видео…
-              </span>
-            )}
-          </div>
+          <span className="view-settings">
+            <label className="view-slider">
+              Масштаб
+              <input
+                type="range"
+                min={5}
+                max={100}
+                step={5}
+                value={Math.round(scale * 100)}
+                onChange={(e) => setScale(parseInt(e.target.value, 10) / 100)}
+                title="Масштаб кадров (меньше — быстрее)"
+              />
+              <b>{Math.round(scale * 100)}%</b>
+            </label>
+            <label className="view-slider">
+              Качество
+              <input
+                type="range"
+                min={30}
+                max={95}
+                step={1}
+                value={quality}
+                onChange={(e) => setQuality(parseInt(e.target.value, 10))}
+                title="Качество JPEG (меньше — быстрее)"
+              />
+              <b>{quality}</b>
+            </label>
+          </span>
           <span className="info">
             кадр {position + 1}/{pair.total_frames} · показано {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
           </span>
@@ -815,11 +737,6 @@ export function CutEditor({ pairId, onBack }: Props) {
           }}
         />
         {frameLoading && <div className="frame-spinner" aria-hidden />}
-        {videoBusy && (
-          <div className="video-uploading">
-            <span>Загрузка видео…</span>
-          </div>
-        )}
         {(!isFullscreen || editingComment) && (
           editingComment ? (
             <div className="editor-comment">

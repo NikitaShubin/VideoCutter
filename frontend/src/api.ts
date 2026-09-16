@@ -82,19 +82,40 @@ export function uploadWorkspace(
 
 // Добавляет/заменяет файл роли (источник/превью). При ``existing`` заодно
 // назначает прежний «нейтральный» файл роли existing (сценарий «был один файл»).
+// Прогресс — через XHR (upload.onprogress), процент реального тела.
 export function setWorkspaceVideo(
   id: string,
   role: "source" | "preview",
   file: File,
   existing?: "source" | "preview",
+  onProgress?: (fraction: number) => void,
 ): Promise<VideoPair> {
   const form = new FormData();
   form.append("file", file);
   if (existing) form.append("existing", existing);
-  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`, {
-    method: "POST",
-    body: form,
-  }).then((r) => json<VideoPair>(r));
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        /* ignore */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as VideoPair);
+      } else {
+        const err = body as { error?: string } | null;
+        reject(new Error(err?.error ?? `HTTP ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
+    xhr.send(form);
+  });
 }
 
 // Назначает роль уже загруженному «неразмеченному» видеофайлу (unassigned).
@@ -135,14 +156,62 @@ export function deleteWorkspace(id: string): Promise<{ deleted: string }> {
   }).then((r) => json<{ deleted: string }>(r));
 }
 
+// Переименовывает workspace (id задачи).
+export function renameWorkspace(id: string, name: string): Promise<VideoPair> {
+  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  }).then((r) => json<VideoPair>(r));
+}
+
+// Сохраняет настройки просмотра (ползунки качества/масштаба).
+export function setPairSettings(
+  pairId: string,
+  quality: number,
+  scale: number,
+): Promise<{ quality: number; scale: number }> {
+  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ quality, scale }),
+  }).then((r) => json<{ quality: number; scale: number }>(r));
+}
+
 export function frameUrl(
   pairId: string,
   index: number,
   kind: "original" | "visualization" = "visualization",
-  ver?: number,
+  ver?: string,
+  scale?: number,
+  quality?: number,
 ): string {
-  const v = ver !== undefined ? `&v=${ver}` : "";
-  return `${BASE}/workspaces/${encodeURIComponent(pairId)}/frame/${index}/?video=${kind}${v}`;
+  let url = `${BASE}/workspaces/${encodeURIComponent(pairId)}/frame/${index}/?video=${kind}`;
+  if (ver) url += `&v=${encodeURIComponent(ver)}`;
+  if (scale !== undefined && scale < 1.0) url += `&scale=${scale}`;
+  if (quality !== undefined && quality !== 78) url += `&quality=${quality}`;
+  return url;
+}
+
+// Персистентный nonce для инвалидации кэша при удалении задачи (localStorage).
+// Нужен, чтобы браузер не отдавал JPEG по старым URL даже после F5/перезагрузки.
+// Хранится отдельно для каждого workspace.
+export function workspaceNonce(id: string): number {
+  try {
+    return parseInt(localStorage.getItem(`vc_nonce:${id}`) || "0", 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function bumpWorkspaceNonce(id: string): number {
+  const next = workspaceNonce(id) + 1;
+  try {
+    localStorage.setItem(`vc_nonce:${id}`, String(next));
+  } catch {
+    /* ignore */
+  }
+  return next;
 }
 
 export function replaceFragments(

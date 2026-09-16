@@ -8,6 +8,8 @@ urlpatterns = [
     path("pairs/<str:pair_id>/fragments/", views.fragments, name="fragments-slash"),
     path("pairs/<str:pair_id>/position", views.pair_position, name="pair-position"),
     path("pairs/<str:pair_id>/position/", views.pair_position, name="pair-position-slash"),
+    path("pairs/<str:pair_id>/settings", views.pair_settings, name="pair-settings"),
+    path("pairs/<str:pair_id>/settings/", views.pair_settings, name="pair-settings-slash"),
     path("pairs/<str:pair_id>/export", views.fragment_export, name="fragment-export"),
     path("pairs/<str:pair_id>/export/status", views.fragment_export_status, name="fragment-export-status"),
     path(

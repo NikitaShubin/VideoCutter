@@ -12,6 +12,7 @@ from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods
 
 from videocutter.core.exporter import Exporter, FFmpegError
+from vc_pairs import frame_provider
 from workspace import get_workspace
 
 
@@ -182,6 +183,54 @@ def pair_position(request, pair_id: str):
 
     ws.save_position(position)
     return JsonResponse({"position": position})
+
+
+@require_http_methods(["GET", "PUT"])
+def pair_settings(request, pair_id: str):
+    """GET — настройки просмотра; PUT {"quality": 20..95, "scale": 0.05..1.0}.
+
+    Настройки view-качества (ползунки редактора) сохраняются в fragments.tsv
+    строкой ``# settings\t<quality>\t<scale>`` — как и позиция, они
+    восстанавливаются при каждом открытии задачи.
+    """
+    ws = get_workspace(pair_id)
+    if ws is None:
+        return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
+
+    if request.method == "GET":
+        quality, scale = ws.load_settings()
+        return JsonResponse({"quality": quality, "scale": scale})
+
+    try:
+        payload = json.loads(request.body or "null")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Некорректный JSON"}, status=400)
+
+    if not isinstance(payload, dict):
+        return JsonResponse(
+            {"error": "Ожидался объект {\"quality\": 20..95, \"scale\": 0.05..1.0}"},
+            status=400,
+        )
+
+    try:
+        quality = int(payload.get("quality", ws.load_settings()[0]))
+        scale = float(payload.get("scale", ws.load_settings()[1]))
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Неверные quality/scale"}, status=400)
+
+    if not (frame_provider.QUALITY_MIN <= quality <= frame_provider.QUALITY_MAX):
+        return JsonResponse(
+            {"error": f"quality вне диапазона [{frame_provider.QUALITY_MIN}, {frame_provider.QUALITY_MAX}]"},
+            status=400,
+        )
+    if not (frame_provider.SCALE_MIN <= scale <= frame_provider.SCALE_MAX):
+        return JsonResponse(
+            {"error": f"scale вне диапазона [{frame_provider.SCALE_MIN}, {frame_provider.SCALE_MAX}]"},
+            status=400,
+        )
+
+    ws.save_settings(quality, scale)
+    return JsonResponse({"quality": quality, "scale": scale})
 
 
 @require_http_methods(["POST"])

@@ -1,5 +1,14 @@
 import { useState } from "react";
-import { deleteWorkspace, uploadWorkspace } from "../api";
+import {
+  assignWorkspaceVideo,
+  bumpWorkspaceNonce,
+  deleteWorkspace,
+  removeWorkspaceVideo,
+  renameWorkspace,
+  setWorkspaceVideo,
+  swapVideos,
+  uploadWorkspace,
+} from "../api";
 import { VIDEO_ACCEPT, type VideoPair } from "../types";
 import { StatusbarPreview } from "./StatusbarPreview";
 
@@ -22,6 +31,12 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState("");
+
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
+  const [editProgress, setEditProgress] = useState<number | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editError, setEditError] = useState("");
 
   const pickFile = (which: "source" | "preview") => (f: File | null) => {
     if (which === "source") setSource(f);
@@ -74,11 +89,224 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
     if (!ok) return;
     try {
       await deleteWorkspace(p.id);
+      // Сбрасываем кэш (nonce в frameUrl), чтобы пересозданная под тем же
+      // именем задача не подсовывала старые кадры из HTTP-кэша браузера.
+      bumpWorkspaceNonce(p.id);
       onChanged();
     } catch (err) {
       window.alert(`Не удалось удалить: ${(err as Error).message}`);
     }
   };
+
+  // ─── Редактирование задачи (inline в списке) ─────────────────────────────
+
+  const openEdit = (p: VideoPair) => {
+    setEditingId(p.id);
+    setEditName(p.id);
+    setEditBusy(false);
+    setEditProgress(null);
+    setEditError("");
+  };
+
+  const withEditOp = async <T,>(op: () => Promise<T>): Promise<T | null> => {
+    setEditBusy(true);
+    setEditError("");
+    setEditProgress(null);
+    try {
+      return await op();
+    } catch (e) {
+      setEditError((e as Error).message);
+      return null;
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  const doRename = async (id: string) => {
+    const trimmed = editName.trim();
+    if (!trimmed) {
+      setEditError("Имя не может быть пустым");
+      return;
+    }
+    if (trimmed === id) return;
+    await withEditOp(async () => {
+      await renameWorkspace(id, trimmed);
+      onChanged();
+      setEditingId(trimmed);
+      setEditName(trimmed);
+    });
+  };
+
+  const doSwap = async (id: string) => {
+    await withEditOp(() => swapVideos(id));
+    onChanged();
+  };
+
+  const doRemoveRole = async (id: string, role: "source" | "preview") => {
+    await withEditOp(() => removeWorkspaceVideo(id, role));
+    onChanged();
+  };
+
+  const doUploadRole = (id: string, role: "source" | "preview", file: File) => {
+    setEditBusy(true);
+    setEditError("");
+    setEditProgress(0);
+    setWorkspaceVideo(id, role, file, undefined, setEditProgress)
+      .then(() => {
+        onChanged();
+        setEditProgress(null);
+      })
+      .catch((e: Error) => {
+        setEditError(e.message);
+        setEditProgress(null);
+      })
+      .finally(() => setEditBusy(false));
+  };
+
+  const doAssign = async (id: string, role: "source" | "preview", filename: string) => {
+    await withEditOp(() => assignWorkspaceVideo(id, role, filename));
+    onChanged();
+  };
+
+  // ─── Форма редактирования одной задачи ───────────────────────────────────
+
+  const renderEdit = (p: VideoPair) => (
+    <div className="pair-edit">
+      <div className="pair-edit-row">
+        <span className="pair-edit-label">Имя</span>
+        <input
+          type="text"
+          value={editName}
+          onChange={(e) => setEditName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") doRename(p.id); }}
+        />
+        <button
+          className="pair-edit-btn-text"
+          onClick={() => doRename(p.id)}
+          disabled={editBusy || editName.trim() === p.id}
+        >
+          Переименовать
+        </button>
+      </div>
+
+      <div className="role-field">
+        <b>Источник</b>
+        <span className="role-name">
+          {p.source_name === p.preview_name ? "(то же видео)" : p.source_name}
+        </span>
+        {p.source_name && (
+          <>
+            <label className="role-action">
+              Заменить…
+              <input
+                type="file"
+                hidden
+                accept={VIDEO_ACCEPT}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  if (f) doUploadRole(p.id, "source", f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            {p.source_name !== p.preview_name && (
+              <button
+                className="role-action"
+                onClick={() => doRemoveRole(p.id, "source")}
+                disabled={editBusy}
+              >
+                Убрать
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="role-field">
+        <b>Превью</b>
+        <span className="role-name">
+          {p.preview_name === p.source_name ? "(то же видео)" : p.preview_name}
+        </span>
+        {p.preview_name && (
+          <>
+            <label className="role-action">
+              Заменить…
+              <input
+                type="file"
+                hidden
+                accept={VIDEO_ACCEPT}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  if (f) doUploadRole(p.id, "preview", f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            {p.preview_name !== p.source_name && (
+              <button
+                className="role-action"
+                onClick={() => doRemoveRole(p.id, "preview")}
+                disabled={editBusy}
+              >
+                Убрать
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
+      {p.unassigned_name && (
+        <div className="role-field unassigned">
+          <b>Без роли</b>
+          <span className="role-name">{p.unassigned_name}</span>
+          <button
+            className="role-action"
+            onClick={() => doAssign(p.id, "source", p.unassigned_name!)}
+            disabled={editBusy}
+          >
+            → источник
+          </button>
+          <button
+            className="role-action"
+            onClick={() => doAssign(p.id, "preview", p.unassigned_name!)}
+            disabled={editBusy}
+          >
+            → превью
+          </button>
+        </div>
+      )}
+
+      {p.source_name !== p.preview_name && (
+        <div className="pair-edit-row" style={{ marginTop: 4 }}>
+          <button
+            className="role-action"
+            onClick={() => doSwap(p.id)}
+            disabled={editBusy}
+          >
+            ⇅ Поменять местами
+          </button>
+        </div>
+      )}
+
+      {editProgress !== null && (
+        <div className="pair-edit-progress">
+          <div className="pair-edit-progress-bar" style={{ width: `${Math.round(editProgress * 100)}%` }} />
+        </div>
+      )}
+      {editError && <div className="pair-edit-error">{editError}</div>}
+
+      <div className="pair-edit-row">
+        <button
+          className="pair-edit-btn-text"
+          onClick={() => { setEditingId(null); onChanged(); }}
+        >
+          Готово
+        </button>
+      </div>
+    </div>
+  );
+
+  // ─── Render ──────────────────────────────────────────────────────────────
 
   return (
     <div className="pair-list">
@@ -140,31 +368,43 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
       <ul>
         {pairs.length === 0 && <li className="empty">Пока нет workspace-ов.</li>}
         {pairs.map((p) => (
-          <li key={p.id}>
-            <button className="pair-open" onClick={() => onSelect(p.id)}>
-              <StatusbarPreview
-                className="pair-bg"
-                totalFrames={p.total_frames}
-                fragments={p.fragments}
-                position={p.position}
-              />
-              <span className="pair-label">
-                {p.source_name}
-                {p.preview_name && p.preview_name !== p.source_name
-                  ? ` → ${p.preview_name}`
-                  : ""}
-              </span>
-              <span className="pair-meta">
-                {p.total_frames} кадров · {p.width}×{p.height}
-              </span>
-            </button>
-            <button
-              className="pair-delete"
-              title="Удалить workspace"
-              onClick={() => remove(p)}
-            >
-              🗑
-            </button>
+          <li key={p.id} className={editingId === p.id ? "editing" : undefined}>
+            <div className="pair-row">
+              <button className="pair-open" onClick={() => onSelect(p.id)}>
+                <StatusbarPreview
+                  className="pair-bg"
+                  totalFrames={p.total_frames}
+                  fragments={p.fragments}
+                  position={p.position}
+                />
+                <span className="pair-label">
+                  {p.source_name}
+                  {p.preview_name && p.preview_name !== p.source_name
+                    ? ` → ${p.preview_name}`
+                    : ""}
+                </span>
+                <span className="pair-meta">
+                  {p.total_frames} кадров · {p.width}×{p.height}
+                </span>
+              </button>
+              <div className="pair-actions">
+                <button
+                  className="pair-edit-btn"
+                  title="Изменить"
+                  onClick={() => openEdit(p)}
+                >
+                  ✎
+                </button>
+                <button
+                  className="pair-delete"
+                  title="Удалить workspace"
+                  onClick={() => remove(p)}
+                >
+                  🗑
+                </button>
+              </div>
+            </div>
+            {editingId === p.id && renderEdit(p)}
           </li>
         ))}
       </ul>

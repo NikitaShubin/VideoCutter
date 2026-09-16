@@ -8,6 +8,7 @@
 HTTP-слой и работа с процессным реестром workspace-ов (кэш Django-процесса).
 """
 
+import json
 import os
 
 from django.http import HttpResponse, JsonResponse
@@ -37,14 +38,16 @@ def workspace_list(request):
     return _workspace_upload(request)
 
 
-@require_http_methods(["GET", "DELETE"])
+@require_http_methods(["GET", "PATCH", "DELETE"])
 def workspace_detail(request, workspace_id: str):
-    """GET — detail workspace; DELETE — безвозвратно удалить workspace."""
+    """GET — detail workspace; PATCH — переименовать; DELETE — безвозвратно удалить."""
     if request.method == "GET":
         data = get_workspace_detail(workspace_id)
         if data is None:
             return _ws_404(workspace_id)
         return JsonResponse(data)
+    if request.method == "PATCH":
+        return _workspace_rename(request, workspace_id)
     return _workspace_delete(workspace_id)
 
 
@@ -52,8 +55,9 @@ def _workspace_upload(request) -> JsonResponse:
     """Создаёт workspace из multipart-полей ``source``/``preview`` (или ``file``).
 
     Поля ``source``/``preview`` — файлы видео (роль задаётся полем); хотя бы
-    одно обязательно. Один файл сохраняется «нейтрально» (без маркера роли),
-    пара — с маркерами ролей в имени. Опц. ``name``.
+    одно обязательно. Файлы сохраняются с ролевыми именами ``source.<ext>`` /
+    ``preview.<ext>`` (расширение сохраняется), оригинальное имя уходит в имя
+    workspace. Опц. ``name``.
     """
     src_file = request.FILES.get("source") or request.FILES.get("file")
     pv_file = request.FILES.get("preview")
@@ -106,6 +110,38 @@ def _workspace_upload(request) -> JsonResponse:
     return JsonResponse(entry or {"id": name}, status=201)
 
 
+def _workspace_rename(request, name: str) -> JsonResponse:
+    """Переименовывает workspace (PATCH {"name": "новое"})."""
+    try:
+        payload = json.loads(request.body or "null")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Некорректный JSON"}, status=400)
+
+    new_name = payload.get("name") if isinstance(payload, dict) else None
+    try:
+        renamed = ws_fs.rename_workspace(ws_module.WORKSPACE_ROOT, name, new_name)
+    except ws_fs.WorkspaceExistsError as e:
+        return JsonResponse({"error": str(e)}, status=409)
+    except ws_fs.InvalidWorkspaceError as e:
+        is_not_found = "не найден" in str(e)
+        return JsonResponse({"error": str(e)}, status=404 if is_not_found else 400)
+
+    if renamed != name:
+        # Освобождаем провайдеры кадров (перезаймётся по новому имени файлов —
+        # здесь пути не меняются, только имя каталога, поэтому кэш кадров жив).
+        from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+
+        with EXPORTS_LOCK:
+            if name in EXPORTS:
+                EXPORTS[renamed] = EXPORTS.pop(name)
+        scan_workspaces()
+    else:
+        scan_workspaces()
+
+    data = get_workspace_detail(renamed)
+    return JsonResponse(data if data is not None else {"id": renamed})
+
+
 def _workspace_delete(name: str) -> JsonResponse:
     """Удаляет workspace и чистит процессные кэши (кадры, экспорт)."""
     ws = get_workspace(name)
@@ -133,7 +169,11 @@ def _workspace_delete(name: str) -> JsonResponse:
 
 @require_http_methods(["GET"])
 def workspace_frame(request, workspace_id: str, index: int):
-    """Возвращает JPEG кадра по индексу (0-based)."""
+    """Возвращает JPEG кадра по индексу (0-based).
+
+    Опциональные перс-параметры: ``quality`` (20..95) и ``scale`` (0.05..1.0) —
+    масштаб и качество JPEG «на лету», для быстрого просмотра больших видео.
+    """
     ws = get_workspace(workspace_id)
     if ws is None:
         return _ws_404(workspace_id)
@@ -143,7 +183,19 @@ def workspace_frame(request, workspace_id: str, index: int):
     if not path:
         return JsonResponse({"error": "Видео не найдено в workspace"}, status=404)
 
-    jpeg, mime = frame_provider.get_frame_jpeg(path, int(index))
+    try:
+        quality = frame_provider.QUALITY_MAX
+        if request.GET.get("quality"):
+            quality = min(frame_provider.QUALITY_MAX,
+                          max(frame_provider.QUALITY_MIN, int(request.GET["quality"])))
+        scale = 1.0
+        if request.GET.get("scale"):
+            scale = min(frame_provider.SCALE_MAX,
+                        max(frame_provider.SCALE_MIN, float(request.GET["scale"])))
+    except ValueError:
+        return JsonResponse({"error": "Некорректные параметры quality/scale"}, status=400)
+
+    jpeg, mime = frame_provider.get_frame_jpeg(path, int(index), quality=quality, scale=scale)
     if jpeg is None:
         meta = ws.metadata()
         return JsonResponse(
@@ -151,8 +203,9 @@ def workspace_frame(request, workspace_id: str, index: int):
             status=404,
         )
     response = HttpResponse(jpeg, content_type=mime)
-    # Кадры неизменны в рамках сессии: браузер кэширует сам и снимает
-    # нагрузку с бэкенда при перемотке назад (клиентский кэш — 60 кадров).
+    # Кадры неизменны в рамках сессии и параметров просмотра: браузер кэширует
+    # сам и снимает нагрузку с бэкенда при перемотке назад (клиентский кэш — 60
+    # кадров). URL кадра включает video_ver, поэтому замена файла меняет ключ.
     response["Cache-Control"] = "private, max-age=3600"
     return response
 

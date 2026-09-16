@@ -23,6 +23,14 @@ WORKSPACE_ROOT = os.getenv("VC_WORKSPACE_ROOT", os.path.join(os.path.dirname(__f
 # Имя файла с фрагментами (аналог txt-файла в PVC).
 FRAGMENTS_FILE = "fragments.tsv"
 
+# Настройки просмотра по умолчанию (для задач без строки `# settings` в tsv).
+DEFAULT_QUALITY = 78
+DEFAULT_SCALE = 0.75
+
+# Границы настроек, принимаемых от клиента.
+QUALITY_MIN, QUALITY_MAX = 20, 95
+SCALE_MIN, SCALE_MAX = 0.05, 1.0
+
 
 @dataclass
 class Workspace:
@@ -38,6 +46,7 @@ class Workspace:
     _meta: Optional[dict] = field(default=None, repr=False)
     _fragments: Optional[List[dict]] = field(default=None, repr=False)
     _position: Optional[int] = field(default=None, repr=False)
+    _settings: Optional[tuple] = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def _discover_videos(self) -> None:
@@ -117,6 +126,7 @@ class Workspace:
         tsv = self.fragments_path()
         frags: List[dict] = []
         position = 0
+        quality, scale = DEFAULT_QUALITY, DEFAULT_SCALE
 
         if os.path.isfile(tsv):
             with open(tsv, newline="", encoding="utf-8") as f:
@@ -124,11 +134,21 @@ class Workspace:
                 for line in f:
                     if line.startswith("#"):
                         key, _, value = line[1:].partition("\t")
-                        if key.strip() == "position":
+                        key = key.strip()
+                        if key == "position":
                             try:
                                 position = int(value.strip())
                             except ValueError:
                                 pass
+                        elif key == "settings":
+                            parts = value.split("\t")
+                            if len(parts) >= 2:
+                                try:
+                                    q, s = int(parts[0]), float(parts[1])
+                                    quality = min(QUALITY_MAX, max(QUALITY_MIN, q))
+                                    scale = min(SCALE_MAX, max(SCALE_MIN, s))
+                                except ValueError:
+                                    pass
                         continue
                     data_lines.append(line)
 
@@ -145,6 +165,7 @@ class Workspace:
         frags.sort(key=lambda x: (x["start"], x["end"]))
         self._fragments = frags
         self._position = position
+        self._settings = (quality, scale)
         return frags, position
 
     def load_fragments(self) -> List[dict]:
@@ -157,12 +178,37 @@ class Workspace:
         with self._lock:
             return self._read()[1]
 
-    def _write(self, fragments: List[dict], position: int) -> None:
-        """Пишет fragments.tsv: строку `# position` + таблицу фрагментов."""
+    def load_settings(self) -> tuple[int, float]:
+        """Настройки просмотра (quality, scale), сохранённые в tsv."""
+        with self._lock:
+            self._read()
+            return self._settings or (DEFAULT_QUALITY, DEFAULT_SCALE)
+
+    def save_settings(self, quality: int, scale: float) -> None:
+        """Сохраняет настройки просмотра в tsv (не трогая фрагменты/позицию)."""
+        q = min(QUALITY_MAX, max(QUALITY_MIN, int(quality)))
+        s = min(SCALE_MAX, max(SCALE_MIN, float(scale)))
+        with self._lock:
+            frags = self._fragments if self._fragments is not None else self._read()[0]
+            pos = self._position if self._position is not None else self._read()[1]
+            self._settings = (q, s)
+            self._write(frags, pos, q, s)
+
+    def _write(self, fragments: List[dict], position: int,
+               quality: Optional[int] = None, scale: Optional[float] = None) -> None:
+        """Пишет fragments.tsv: строки `# position` + `# settings` + таблицу.
+
+        Если настройки не переданы — сохраняются текущие (из кэша или файла),
+        чтобы при сохранении фрагментов строка `# settings` не терялась.
+        """
+        if quality is None or scale is None:
+            self._read()  # заполняет self._settings из файла/кэша
+            quality, scale = self._settings or (DEFAULT_QUALITY, DEFAULT_SCALE)
         tsv = self.fragments_path()
         os.makedirs(os.path.dirname(tsv) or ".", exist_ok=True)
         with open(tsv, "w", newline="", encoding="utf-8") as f:
             f.write(f"# position\t{int(position)}\n")
+            f.write(f"# settings\t{int(quality)}\t{float(scale):g}\n")
             writer = csv.DictWriter(f, fieldnames=["start", "end", "comment"], delimiter="\t")
             writer.writeheader()
             for frag in fragments:
@@ -173,6 +219,7 @@ class Workspace:
                 })
         self._fragments = None  # Инвалидируем кэш.
         self._position = None
+        self._settings = None
 
     def save_fragments(self, fragments: List[dict], position: Optional[int] = None) -> None:
         """Сохраняет фрагменты; позицию берёт из аргумента или из кэша."""
@@ -187,9 +234,10 @@ class Workspace:
             self._write(frags, position)
 
     def invalidate_cache(self) -> None:
-        """Сбрасывает кэш фрагментов и позиции (при внешних изменениях)."""
+        """Сбрасывает кэш фрагментов, позиции и настроек (при внешних изменениях)."""
         self._fragments = None
         self._position = None
+        self._settings = None
 
 
 # ─── Глобальный реестр workspace-ов (ленивое сканирование) ──────────────────
@@ -252,10 +300,28 @@ def bump_updated_at(ws: Workspace) -> None:
             pass
 
 
+def _video_ver(ws: Workspace) -> str:
+    """Токен версии видеофайлов: меняется при замене/пересоздании файлов.
+
+    Собирается из (имя, размер, mtime_ns) source/preview — браузер кэширует
+    кадры по URL, поэтому URL обязан меняться, когда файлы на диске изменились
+    (пересоздание задачи под тем же именем, замена роли и т.д.).
+    """
+    parts = []
+    for path in sorted(p for p in (ws.original, ws.visualization) if p):
+        try:
+            st = os.stat(path)
+            parts.append(f"{os.path.basename(path)}:{st.st_size}:{st.st_mtime_ns}")
+        except OSError:
+            parts.append(os.path.basename(path))
+    return "|".join(parts) or "none"
+
+
 def _pair_entry(ws: Workspace) -> dict:
     """Элемент списка/деталей: роли, превью-метрики, фрагменты, позиция."""
     meta = ws.metadata()
     unassigned = ws.unassigned
+    quality, scale = ws.load_settings()
     return {
         "id": ws.name,
         "source_name": os.path.basename(ws.original) if ws.original else "",
@@ -267,6 +333,9 @@ def _pair_entry(ws: Workspace) -> dict:
         "fps": meta["fps"],
         "fragments": ws.load_fragments(),
         "position": ws.load_position(),
+        "video_ver": _video_ver(ws),
+        "quality": quality,
+        "scale": scale,
         "updated_at": _workspace_updated_at(ws),
     }
 

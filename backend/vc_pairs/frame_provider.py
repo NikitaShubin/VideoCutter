@@ -43,10 +43,16 @@ _DEFAULT_CORES = os.cpu_count() or 1
 # Одновременных декодов GOP. Для 1080p-кадра транзиентно ~6 МБ BGR + накопленный
 # JPEG группы, поэтому пул ограничиваем сверху независимо от числа ядер.
 DECODE_CORES = int(os.environ.get("VC_DECODE_CORES") or min(8, _DEFAULT_CORES))
-PREFETCH_AHEAD = int(os.environ.get("VC_PREFETCH_AHEAD") or 2)
+PREFETCH_AHEAD = int(os.environ.get("VC_PREFETCH_AHEAD") or 3)
 CACHE_MB = int(os.environ.get("VC_GOP_CACHE_MB") or 512)
 CACHE_GOPS = int(os.environ.get("VC_GOP_CACHE_GOPS") or 16)
-JPEG_QUALITY = int(os.environ.get("VC_JPEG_QUALITY") or 92)
+JPEG_QUALITY = int(os.environ.get("VC_JPEG_QUALITY") or 78)
+# Масштаб кадров по умолчанию (1.0 = оригинал); фронтенд обычно передаёт свой.
+FRAME_SCALE = float(os.environ.get("VC_FRAME_SCALE") or 1.0)
+
+# Допустимые диапазоны per-request параметров (качество JPEG и масштаб).
+QUALITY_MIN, QUALITY_MAX = 20, 95
+SCALE_MIN, SCALE_MAX = 0.05, 1.0
 
 _DECODE_POOL = ThreadPoolExecutor(max_workers=DECODE_CORES)
 # Страховка по памяти: потоков декода не больше, чем DECODE_CORES, т.к. вся
@@ -154,16 +160,25 @@ class _GopTask:
 
 
 class _Provider:
-    """Провайдер одного видеофайла: индекс + кэш GOP + префетч."""
+    """Провайдер одного видеофайла: индекс + кэш GOP + префетч.
+
+    Кадры кэшируются как готовый JPEG по ключу ``(gop, quality, scale)``:
+    разные настройки просмотра (ползунки качества/масштаба) — разные кэши.
+    """
 
     def __init__(self, path: str) -> None:
         self.path = path
         self._index: Optional[_Index] = None
         self._ilock = threading.Lock()
-        self._cache: "OrderedDict[int, Dict[int, bytes]]" = OrderedDict()
+        self._cache: "OrderedDict[tuple, Dict[int, bytes]]" = OrderedDict()
         self._bytes = 0
-        self._tasks: Dict[int, _GopTask] = {}
-        self._scheduled: set[int] = set()
+        self._tasks: Dict[tuple, _GopTask] = {}
+        self._scheduled: set[tuple] = set()
+
+    @staticmethod
+    def _key(g: int, quality: int, scale: float) -> tuple:
+        """Ключ кэша GOP: номер группы + параметры просмотра (масштаб округляем)."""
+        return (g, int(quality), round(float(scale), 2))
 
     # --- индекс ---
     def _ensure_index(self) -> _Index:
@@ -174,19 +189,19 @@ class _Provider:
         return self._index
 
     # --- кэш ---
-    def _cache_hit(self, g: int, index: int) -> Optional[bytes]:
+    def _cache_hit(self, key: tuple, index: int) -> Optional[bytes]:
         with self._ilock:
-            d = self._cache.get(g)
+            d = self._cache.get(key)
             if d is None:
                 return None
-            self._cache.move_to_end(g)
+            self._cache.move_to_end(key)
             return d.get(index)
 
-    def _cache_put(self, g: int, frames: Dict[int, bytes]) -> None:
+    def _cache_put(self, key: tuple, frames: Dict[int, bytes]) -> None:
         with self._ilock:
-            if g in self._cache:
+            if key in self._cache:
                 return
-            self._cache[g] = frames
+            self._cache[key] = frames
             self._bytes += sum(len(b) for b in frames.values())
         self._evict()
 
@@ -196,7 +211,18 @@ class _Provider:
                 self._cache.popitem(last=False)
 
     # --- декод GOP ---
-    def _decode_gop(self, g: int, task: _GopTask) -> None:
+    @staticmethod
+    def _encode(frame, quality: int, scale: float) -> Optional[bytes]:
+        bgr = frame.to_ndarray(format="bgr24")
+        if scale < (1.0 - 1e-6):
+            h, w = bgr.shape[:2]
+            nh, nw = max(1, round(h * scale)), max(1, round(w * scale))
+            if (nh, nw) != (h, w):
+                bgr = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        return buf.tobytes() if ok else None
+
+    def _decode_gop(self, g: int, quality: int, scale: float, task: _GopTask) -> None:
         idx = self._ensure_index()
         start = idx.bounds[g]
         end = min(idx.bounds[g + 1], idx.total)
@@ -217,96 +243,99 @@ class _Provider:
                         gi = start + i
                         if gi >= end:
                             break
-                        ok, buf = cv2.imencode(
-                            ".jpg", fr.to_ndarray(format="bgr24"),
-                            [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-                        if ok:
-                            task.put(gi, buf.tobytes())
+                        jpeg = self._encode(fr, quality, scale)
+                        if jpeg is not None:
+                            task.put(gi, jpeg)
                 finally:
                     cont.close()
             task.mark_done()
         except BaseException as e:  # noqa: BLE001 — завершение задачи для ждунов
             task.fail(e)
 
-    def _run_pooled(self, g: int, task: _GopTask) -> None:
-        self._decode_gop(g, task)
-        self._finish_task(g, task)
+    def _run_pooled(self, key: tuple, task: _GopTask) -> None:
+        g, q, s = key
+        self._decode_gop(g, q, s, task)
+        self._finish_task(key, task)
 
-    def _finish_task(self, g: int, task: _GopTask) -> None:
+    def _finish_task(self, key: tuple, task: _GopTask) -> None:
         with self._ilock:
-            self._tasks.pop(g, None)
-            self._scheduled.discard(g)
+            self._tasks.pop(key, None)
+            self._scheduled.discard(key)
         if not task.error and task.frames:
-            self._cache_put(g, task.frames)
-        self._prefetch(g)
+            self._cache_put(key, task.frames)
+        self._prefetch(key)
 
-    def _prefetch(self, g: int) -> None:
+    def _prefetch(self, key: tuple) -> None:
+        g, q, s = key
         idx = self._ensure_index()
         for d in range(1, PREFETCH_AHEAD + 1):
             ng = g + d
             if ng >= len(idx.bounds) - 1:
                 break
+            nkey = self._key(ng, q, s)
             with self._ilock:
-                if ng in self._cache or ng in self._tasks or ng in self._scheduled:
+                if nkey in self._cache or nkey in self._tasks or nkey in self._scheduled:
                     continue
-                self._scheduled.add(ng)
+                self._scheduled.add(nkey)
                 task = _GopTask()
-                self._tasks[ng] = task
+                self._tasks[nkey] = task
             try:
-                _DECODE_POOL.submit(self._run_pooled, ng, task)
+                _DECODE_POOL.submit(self._run_pooled, nkey, task)
             except Exception:
                 # Пул остановлен (завершение приложения) — убираем как несостоявшийся.
                 with self._ilock:
-                    self._tasks.pop(ng, None)
-                    self._scheduled.discard(ng)
+                    self._tasks.pop(nkey, None)
+                    self._scheduled.discard(nkey)
 
     # --- чтение кадра ---
-    def get_frame(self, index: int, quality: int = JPEG_QUALITY) -> Optional[bytes]:
+    def get_frame(self, index: int, quality: int = JPEG_QUALITY,
+                  scale: float = FRAME_SCALE) -> Optional[bytes]:
         idx = self._ensure_index()
         if not 0 <= index < idx.total:
             return None
 
         g = idx.gop_of(index)
         if g is not None:
-            j = self._cache_hit(g, index)
+            key = self._key(g, quality, scale)
+            j = self._cache_hit(key, index)
             if j is not None:
                 # Группа в кэше — прогреваем следующие заранее, чтобы перемотка
                 # дальше не упиралась в холодную границу.
-                self._prefetch(g)
+                self._prefetch(key)
                 return j
-            task = self._task_for(g)
+            task = self._task_for(key)
             if task is not None:
                 j = task.wait(index)
                 if j is not None:
                     return j
-        return self._read_one(index, quality)
+        return self._read_one(index, quality, scale)
 
-    def _task_for(self, g: int) -> Optional[_GopTask]:
+    def _task_for(self, key: tuple) -> Optional[_GopTask]:
         """Создать (и запустить в пуле) задачу GOP, если её ещё нет."""
         with self._ilock:
-            task = self._tasks.get(g)
+            task = self._tasks.get(key)
             if task is None:
                 task = _GopTask()
-                self._tasks[g] = task
+                self._tasks[key] = task
                 created = True
             else:
                 created = False
         if created:
             try:
-                _DECODE_POOL.submit(self._run_pooled, g, task)
+                _DECODE_POOL.submit(self._run_pooled, key, task)
             except Exception:
                 # Пул остановлен (завершение приложения) — как несостоявшийся.
                 with self._ilock:
-                    self._tasks.pop(g, None)
-                    self._scheduled.discard(g)
+                    self._tasks.pop(key, None)
+                    self._scheduled.discard(key)
                 return None
             # Следующие группы прогреваем сразу — параллельно текущему декоду,
             # тогда переход через границу не застанет холодную группу.
-            self._prefetch(g)
+            self._prefetch(key)
         return task
 
     # --- одиночный seek (до первого ключевого кадра и прочие огрехи) ---
-    def _read_one(self, index: int, quality: int) -> Optional[bytes]:
+    def _read_one(self, index: int, quality: int, scale: float) -> Optional[bytes]:
         idx = self._ensure_index()
         if not 0 <= index < idx.total:
             return None
@@ -323,10 +352,8 @@ class _Provider:
                 for fr in cont.decode(stream):
                     fs = (fr.pts or 0) * float(fr.time_base or tb)
                     if fs >= target_sec:
-                        ok, buf = cv2.imencode(
-                            ".jpg", fr.to_ndarray(format="bgr24"),
-                            [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-                        return buf.tobytes() if ok else None
+                        jpeg = self._encode(fr, quality, scale)
+                        return jpeg
             finally:
                 cont.close()
         except (av.FFmpegError, ValueError):
@@ -357,9 +384,14 @@ def _get_provider(path: str) -> _Provider:
         return p
 
 
-def get_frame_jpeg(path: str, index: int, *, quality: int = JPEG_QUALITY):
-    """Возвращает (jpeg_bytes, mime) для кадра по индексу или (None, None)."""
-    jpeg = _get_provider(path).get_frame(index, quality)
+def get_frame_jpeg(path: str, index: int, *, quality: int = JPEG_QUALITY,
+                   scale: float = FRAME_SCALE):
+    """Возвращает (jpeg_bytes, mime) для кадра по индексу или (None, None).
+
+    ``quality`` — качество JPEG; ``scale`` — масштаб кадра (0.05..1.0):
+    даунскейл применяется до энкода, кадр уходит клиенту уже уменьшенным.
+    """
+    jpeg = _get_provider(path).get_frame(index, quality, scale)
     return (jpeg, "image/jpeg") if jpeg else (None, None)
 
 

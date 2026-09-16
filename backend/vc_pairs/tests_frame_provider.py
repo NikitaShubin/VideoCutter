@@ -47,7 +47,7 @@ def _wait_cache(prov, g, timeout=15.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with prov._ilock:
-            if g in prov._cache:
+            if any(key[0] == g for key in prov._cache):
                 return True
         time.sleep(0.02)
     return False
@@ -171,3 +171,33 @@ class FrameProviderTest(SimpleTestCase):
         self.assertEqual(meta["width"], 96)
         self.assertEqual(meta["height"], 96)
         self.assertGreater(meta["fps"], 10)
+
+    def test_scale_produces_smaller_jpeg(self):
+        """Кадр с scale=0.5 должен быть существенно меньше (даунскейл → меньше JPEG)."""
+        import cv2
+        import numpy as np
+        j_full, _ = fp.get_frame_jpeg(self.path, 2)
+        j_half, _ = fp.get_frame_jpeg(self.path, 2, scale=0.5)
+        self.assertIsNotNone(j_full)
+        self.assertIsNotNone(j_half)
+        # Даунскейл缩小 размер JPEG, но JPEG-кодировщик
+        # может по-разному кодировать; проверяем что размер < 70% от оригинала.
+        self.assertLess(len(j_half), len(j_full) * 0.7,
+                        f"scale=0.5 JPEG ({len(j_half)}) не намного меньше полного ({len(j_full)})")
+        img_full = cv2.imdecode(np.frombuffer(j_full, np.uint8), cv2.IMREAD_COLOR)
+        img_half = cv2.imdecode(np.frombuffer(j_half, np.uint8), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(img_full)
+        self.assertIsNotNone(img_half)
+        h_full, w_full = img_full.shape[:2]
+        h_half, w_half = img_half.shape[:2]
+        self.assertLess(h_half, h_full)
+        self.assertLess(w_half, w_full)
+
+    def test_quality_affects_jpeg_size(self):
+        """JPEG-кадр с quality=30 должен быть существенно меньше, чем с quality=90."""
+        j_lo, _ = fp.get_frame_jpeg(self.path, 2, quality=30)
+        j_hi, _ = fp.get_frame_jpeg(self.path, 2, quality=90)
+        self.assertIsNotNone(j_lo)
+        self.assertIsNotNone(j_hi)
+        self.assertLess(len(j_lo), len(j_hi),
+                        f"q30 JPEG ({len(j_lo)}) не меньше, чем q90 ({len(j_hi)})")

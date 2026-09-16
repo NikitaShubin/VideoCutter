@@ -173,6 +173,20 @@ class VideoRolesFSTests(SimpleTestCase):
         with self.assertRaises(ws_fs.InvalidWorkspaceError):
             ws_fs.assign_role_file(self.root, "ws", "bogus", "a.mp4")
 
+    # ── create_workspace_pair: одиночная загрузка ───────────────────────────
+
+    def test_create_single_source_gets_role_name(self):
+        dest = ws_fs.create_workspace_pair(self.root, "one", source=(open(__file__, "rb"), "6.avi"))
+        self.assertEqual(sorted(os.listdir(dest)), ["source.avi"])
+
+    def test_create_single_preview_gets_role_name_keeps_ext(self):
+        dest = ws_fs.create_workspace_pair(self.root, "two", preview=(open(__file__, "rb"), "cam.webm"))
+        self.assertEqual(sorted(os.listdir(dest)), ["preview.webm"])
+
+    def test_create_single_pair_with_m2ts(self):
+        dest = ws_fs.create_workspace_pair(self.root, "three", source=(open(__file__, "rb"), "rec.m2ts"))
+        self.assertEqual(sorted(os.listdir(dest)), ["source.m2ts"])
+
     # ── расширения видео ────────────────────────────────────────────────────
 
     def test_video_exts_cover_common_formats(self):

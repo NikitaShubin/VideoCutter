@@ -196,9 +196,11 @@ def create_workspace_pair(
     """Создаёт workspace с парой видео (source/preview).
 
     ``source``/``preview`` — кортежи ``(файлоподобный поток, имя файла)``.
-    Оба необязательны, но хотя бы одно должно быть задано. Один файл
-    сохраняется «нейтрально» (без маркера роли); пара — с маркерами ролей,
-    поэтому одинаковые имена файлов не конфликтуют.
+    Оба необязательны, но хотя бы одно должно быть задано. Файлы всегда
+    получают ролевые имена ``source.<ext>``/``preview.<ext>`` (расширение
+    сохраняется): один файл сохраняется как ``source.<ext>`` или
+    ``preview.<ext>`` в зависимости от того, какое поле передано, пара — оба
+    файла с ролевыми именами (одинаковые оригинальные имена не конфликтуют).
 
     При ошибке записи созданная папка удаляется (без частичных workspace-ов).
     Возвращает путь к созданной папке.
@@ -215,12 +217,10 @@ def create_workspace_pair(
 
     os.makedirs(dest_dir)
     try:
-        if source is not None and preview is not None:
+        if source is not None:
             _store_role(dest_dir, "source", *source)
+        if preview is not None:
             _store_role(dest_dir, "preview", *preview)
-        else:
-            stream, filename = source if source is not None else preview
-            _write_stream(stream, os.path.join(dest_dir, os.path.basename(filename)))
     except Exception:
         shutil.rmtree(dest_dir, ignore_errors=True)
         raise
@@ -370,6 +370,25 @@ def swap_role_files(root: str, name: str) -> Tuple[str, str]:
     os.replace(s, new_preview)
     os.replace(tmp, new_source)
     return new_source, new_preview
+
+
+def rename_workspace(root: str, name: str, new_name: str) -> str:
+    """Переименовывает папку workspace (id задачи) и возвращает новое имя.
+
+    Проверяет, что новое имя корректно и не занято другим workspace; пустые
+    имена равны текущему (переименование не требуется).
+    """
+    safe = sanitize_workspace_name(new_name)
+    src = workspace_path(root, name)
+    if not os.path.isdir(src):
+        raise InvalidWorkspaceError(f"Workspace '{name}' не найден")
+    if safe == name:
+        return safe
+    dst = workspace_path(root, safe)
+    if os.path.exists(dst):
+        raise WorkspaceExistsError(f"Workspace '{safe}' уже существует")
+    os.replace(src, dst)
+    return safe
 
 
 def delete_workspace(root: str, name: str) -> None:
