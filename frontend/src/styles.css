@@ -583,6 +583,23 @@ body {
 .export-list h3 {
   margin-top: 0;
   font-size: 0.95em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-list-close {
+  margin-left: auto;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  color: #d8d8e8;
+  font-size: 1em;
+  cursor: pointer;
+}
+
+.export-list-close:hover {
+  color: #fff;
 }
 
 .export-list a {

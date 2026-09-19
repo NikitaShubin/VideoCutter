@@ -779,7 +779,11 @@ export function CutEditor({ pairId, onBack }: Props) {
           <span className="info">
             кадр {position + 1}/{pair.total_frames} · показано {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
           </span>
-          <span className="info">скорость: {speed}· {direction === -1 ? "[назад]" : "[вперёд]"}</span>
+          <span
+            className="info"
+            title={direction === -1 ? "направление: назад (R — сменить)" : "направление: вперёд (R — сменить)"}
+            aria-label={direction === -1 ? "направление воспроизведения: назад" : "направление воспроизведения: вперёд"}
+          >скорость: {speed}· {direction === -1 ? "◀" : "▶"}</span>
           {pair.pair_warning && (
             <span className="info warn" title={pair.pair_warning}>
               ⚠ {pair.pair_warning}
@@ -883,7 +887,15 @@ export function CutEditor({ pairId, onBack }: Props) {
 
       {!isFullscreen && exportItems && (
         <div className="export-list">
-          <h3>Фрагменты экспортированы (оригиналы):</h3>
+          <h3>
+            Фрагменты экспортированы (оригиналы):
+            <button
+              className="export-list-close"
+              onClick={() => setExportItems(null)}
+              title="Скрыть список (появится снова после следующего экспорта)"
+              aria-label="Скрыть список экспортированных фрагментов"
+            >✕</button>
+          </h3>
           <ul>
             {exportItems.map((f) => (
               <li key={f.url}>
