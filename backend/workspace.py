@@ -100,15 +100,23 @@ class Workspace:
         if self._meta is not None:
             return self._meta
 
-        path = self.visualization or self.original
-        if not path or not os.path.isfile(path):
-            self._meta = {
-                "total_frames": 0, "width": 0, "height": 0, "fps": 0.0,
-            }
-            return self._meta
-
-        self._meta = frame_provider.get_metadata(path)
+        self._meta = self.video_metadata("preview")
         return self._meta
+
+    def video_metadata(self, role: str) -> dict:
+        """Метаданные конкретной роли: ``source`` — исходник, ``preview`` —
+        превью (если его нет — исходник). Видео без кадров даёт нули."""
+        empty = {
+            "total_frames": 0, "packet_frames": 0, "skipped_frames": 0,
+            "width": 0, "height": 0, "fps": 0.0,
+        }
+        if role == "source":
+            path = self.original
+        else:
+            path = self.visualization or self.original
+        if not path or not os.path.isfile(path):
+            return empty
+        return frame_provider.get_metadata(path)
 
     def fragments_path(self) -> str:
         return os.path.join(self.path, FRAGMENTS_FILE)
@@ -317,9 +325,39 @@ def _video_ver(ws: Workspace) -> str:
     return "|".join(parts) or "none"
 
 
+def _pair_warning(source: dict, preview: dict, both: bool) -> str:
+    """Текст предупреждения о проблемах пары source/preview (или "").
+
+    Пара не блокируется: рассинхрон числа кадров или пропущенные битые
+    кадры показываются пользователю, решение — за ним.
+    """
+    parts: List[str] = []
+    if source.get("skipped_frames"):
+        parts.append(
+            f"в источнике пропущено {source['skipped_frames']} битых кадров"
+        )
+    if preview.get("skipped_frames"):
+        parts.append(
+            f"в превью пропущено {preview['skipped_frames']} битых кадров"
+        )
+    if both and source["total_frames"] != preview["total_frames"]:
+        parts.append(
+            f"число видимых кадров не совпадает: "
+            f"источник {source['total_frames']}, превью {preview['total_frames']}"
+        )
+    return "; ".join(parts)
+
+
 def _pair_entry(ws: Workspace) -> dict:
-    """Элемент списка/деталей: роли, превью-метрики, фрагменты, позиция."""
-    meta = ws.metadata()
+    """Элемент списка/деталей: роли, превью-метрики, фрагменты, позиция.
+
+    Помимо метрик превью (таймлайн) отдаём метрики источника и признак
+    согласованности пары — чтобы UI показывал, если source и preview
+    разошлись по числу видимых кадров или содержат битые кадры.
+    """
+    preview = ws.metadata()  # превью (или исходник, если пары нет)
+    source = ws.video_metadata("source")
+    both = bool(ws.original and ws.visualization and ws.original != ws.visualization)
     unassigned = ws.unassigned
     quality, scale = ws.load_settings()
     return {
@@ -327,10 +365,16 @@ def _pair_entry(ws: Workspace) -> dict:
         "source_name": os.path.basename(ws.original) if ws.original else "",
         "preview_name": os.path.basename(ws.visualization) if ws.visualization else "",
         "unassigned_name": os.path.basename(unassigned[0]) if unassigned else None,
-        "total_frames": meta["total_frames"],
-        "width": meta["width"],
-        "height": meta["height"],
-        "fps": meta["fps"],
+        "total_frames": preview["total_frames"],
+        "width": preview["width"],
+        "height": preview["height"],
+        "fps": preview["fps"],
+        "source_frames": source["total_frames"],
+        "preview_frames": preview["total_frames"],
+        "source_skipped": source.get("skipped_frames", 0),
+        "preview_skipped": preview.get("skipped_frames", 0),
+        "visible_match": (not both) or source["total_frames"] == preview["total_frames"],
+        "pair_warning": _pair_warning(source, preview, both),
         "fragments": ws.load_fragments(),
         "position": ws.load_position(),
         "video_ver": _video_ver(ws),

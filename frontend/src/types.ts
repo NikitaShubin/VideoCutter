@@ -13,6 +13,12 @@ export interface VideoPair {
   width: number;
   height: number;
   fps: number;
+  source_frames: number;
+  preview_frames: number;
+  source_skipped: number;
+  preview_skipped: number;
+  visible_match: boolean;
+  pair_warning: string;
   fragments: Fragment[];
   position: number;
   updated_at: number;
@@ -30,10 +36,12 @@ export interface ExportItem {
 }
 
 export interface ExportStatus {
-  state: "idle" | "running" | "done" | "error";
+  state: "idle" | "running" | "cancelling" | "done" | "cancelled" | "error";
   index?: number;
   total?: number;
   files?: ExportItem[];
+  /** Сигнатура экспортированных границ [[start,end],...] — для пропуска повтора. */
+  sig?: string;
   error?: string;
 }
 

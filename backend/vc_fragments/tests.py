@@ -12,12 +12,15 @@ import json
 import os
 import shutil
 import tempfile
+import threading
+import time
+from unittest import mock
 
 from django.conf import settings
 from django.test import SimpleTestCase
 
 from workspace import WORKSPACE_ROOT, _workspaces
-from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+from vc_fragments.views import EXPORTS, EXPORTS_LOCK, EXPORT_CANCEL
 
 HTTP_OK = 200
 HTTP_BAD_REQUEST = 400
@@ -60,6 +63,7 @@ class WorkspaceApiTestBase(SimpleTestCase):
         # Сброс глобального состояния экспорта между тестами.
         with EXPORTS_LOCK:
             EXPORTS.clear()
+            EXPORT_CANCEL.clear()
 
         # Списки URL.
         self.ws_list_url = "/api/v1/workspaces/"
@@ -274,6 +278,81 @@ class ExportApiTests(WorkspaceApiTestBase):
         self.assertEqual(resp.status_code, HTTP_OK)
         body = resp.json()
         self.assertEqual(body["state"], "running")
+
+    def test_cancel_idle_rejected(self):
+        resp = self.client.post(self.export_url + "/cancel")
+        self.assertEqual(resp.status_code, HTTP_CONFLICT)
+
+    def test_cancel_missing_workspace(self):
+        resp = self.client.post("/api/v1/pairs/nonexistent/export/cancel")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_cancel_running_cleans_up(self):
+        """Отмена между фрагментами: состояние cancelled, частичные файлы зачищены."""
+        import vc_fragments.views as export_views
+
+        proceed = threading.Event()
+
+        class FakeExporter:
+            def __init__(self, *a, **k):
+                pass
+
+            def extract_fragments(self, fragments, progress=None):
+                while True:
+                    if progress:
+                        progress(1, len(fragments), fragments[0])
+                    if proceed.wait(timeout=0.02):
+                        # Флаг отмены ставится раньше release: повторный
+                        # progress гарантированно бросает _ExportCancelled.
+                        if progress:
+                            progress(1, len(fragments), fragments[0])
+                        return []
+
+        # Прежний файл в exports/ отмена трогать не должна (чистим только
+        # созданное этим запуском).
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        keep = os.path.join(out_dir, "keep.txt")
+        with open(keep, "w") as f:
+            f.write("old")
+
+        with mock.patch.object(export_views, "Exporter", FakeExporter):
+            resp = self.client.post(self.export_url)
+            self.assertEqual(resp.status_code, HTTP_OK)
+
+            # Ждём, пока фон дойдёт до первого progress (running c index).
+            deadline = time.time() + 15
+            while True:
+                st = self.client.get(self.export_status_url).json()
+                if st.get("index", 0) >= 1:
+                    break
+                if time.time() > deadline:
+                    self.fail("export did not reach progress")
+                time.sleep(0.02)
+
+            # Параллельный запуск запрещён.
+            resp2 = self.client.post(self.export_url)
+            self.assertEqual(resp2.status_code, HTTP_CONFLICT)
+
+            cancel = self.client.post(self.export_url + "/cancel")
+            self.assertEqual(cancel.status_code, HTTP_OK)
+            proceed.set()
+
+            deadline = time.time() + 15
+            while True:
+                st = self.client.get(self.export_status_url).json()
+                if st["state"] == "cancelled":
+                    break
+                self.assertNotEqual(st["state"], "error", st)
+                if time.time() > deadline:
+                    self.fail(f"export not cancelled: {st}")
+                time.sleep(0.02)
+
+        # Повторная отмена — 409; прежний файл цел; новых файлов нет.
+        again = self.client.post(self.export_url + "/cancel")
+        self.assertEqual(again.status_code, HTTP_CONFLICT)
+        self.assertTrue(os.path.isfile(keep))
+        self.assertEqual(sorted(os.listdir(out_dir)), ["keep.txt"])
 
 
 class SettingsApiTests(WorkspaceApiTestBase):

@@ -19,9 +19,16 @@ from workspace import get_workspace
 # Прогресс экспортов в памяти процесса: workspace_id -> {"state": ...}.
 EXPORTS: dict[str, dict] = {}
 EXPORTS_LOCK = threading.Lock()
+# Запросы на отмену: cancel ставится кнопкой/клавишей во время running;
+# фоновый поток проверяет флаг перед каждым фрагментом и прерывается.
+EXPORT_CANCEL: set[str] = set()
 
 
-def _export_finished_ok(ws_id: str, created: list[str]) -> None:
+class _ExportCancelled(Exception):
+    """Флаг отмены: экспорт остановлен пользователем между фрагментами."""
+
+
+def _export_finished_ok(ws_id: str, created: list[str], sig: str) -> None:
     urls = []
     for i, path in enumerate(created, 1):
         filename = os.path.basename(path)
@@ -31,12 +38,24 @@ def _export_finished_ok(ws_id: str, created: list[str]) -> None:
             "url": f"/api/v1/pairs/{ws_id}/export/{filename}",
         })
     with EXPORTS_LOCK:
-        EXPORTS[ws_id] = {"state": "done", "files": urls}
+        EXPORTS[ws_id] = {"state": "done", "files": urls, "sig": sig}
 
 
 def _export_failed(ws_id: str, message: str) -> None:
     with EXPORTS_LOCK:
         EXPORTS[ws_id] = {"state": "error", "error": message}
+
+
+def _export_cancelled(ws_id: str, created_now: list[str]) -> None:
+    """Отмена пользователем: зачищаем частичные файлы этого запуска."""
+    for path in created_now:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    with EXPORTS_LOCK:
+        EXPORTS[ws_id] = {"state": "cancelled"}
+        EXPORT_CANCEL.discard(ws_id)
 
 
 def _run_export(ws_id: str) -> None:
@@ -54,6 +73,7 @@ def _run_export(ws_id: str) -> None:
 
         out_dir = os.path.join(ws.path, "exports")
         os.makedirs(out_dir, exist_ok=True)
+        before = set(os.listdir(out_dir))
 
         exporter = Exporter(ws.original, out_dir)
         fragments = [(f["start"], f["end"]) for f in frags]
@@ -61,6 +81,8 @@ def _run_export(ws_id: str) -> None:
 
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
             with EXPORTS_LOCK:
+                if ws_id in EXPORT_CANCEL:
+                    raise _ExportCancelled()
                 EXPORTS[ws_id] = {
                     "state": "running",
                     "index": fragment_ind,
@@ -68,11 +90,24 @@ def _run_export(ws_id: str) -> None:
                 }
 
         created = exporter.extract_fragments(fragments, progress=progress)
-        _export_finished_ok(ws_id, created)
+        sig = json.dumps([[s, e] for s, e in fragments], separators=(",", ":"))
+        _export_finished_ok(ws_id, created, sig)
+    except _ExportCancelled:
+        # Файлы, появившиеся за этот запуск (готовые фрагменты валидны,
+        # но пользователь просил зачистку) — удаляем по снапшоту каталога.
+        try:
+            after = set(os.listdir(out_dir))
+        except OSError:
+            after = set()
+        created_now = [os.path.join(out_dir, name) for name in after - before]
+        _export_cancelled(ws_id, created_now)
     except FFmpegError as e:
         _export_failed(ws_id, str(e))
     except Exception as e:
         _export_failed(ws_id, str(e))
+    finally:
+        with EXPORTS_LOCK:
+            EXPORT_CANCEL.discard(ws_id)
 
 
 @require_http_methods(["GET", "PUT"])
@@ -257,6 +292,28 @@ def fragment_export(request, pair_id: str):
     return JsonResponse({"state": "running", "index": 0, "total": len(frags)})
 
 
+@require_http_methods(["POST"])
+def fragment_export_cancel(request, pair_id: str):
+    """Просит фоновый экспорт остановиться (срабатывает между фрагментами).
+
+    Частичные файлы этого запуска зачищаются, состояние — "cancelled".
+    Отмена не бегущего экспорта — 409.
+    """
+    ws = get_workspace(pair_id)
+    if ws is None:
+        return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
+
+    with EXPORTS_LOCK:
+        current = EXPORTS.get(pair_id)
+        if not current or current["state"] != "running":
+            return JsonResponse(
+                {"error": "Экспорт не выполняется для этого workspace"},
+                status=409,
+            )
+        EXPORT_CANCEL.add(pair_id)
+    return JsonResponse({"state": "cancelling"})
+
+
 @require_GET
 def fragment_export_status(request, pair_id: str):
     """Текущий статус экспорта."""
@@ -265,9 +322,14 @@ def fragment_export_status(request, pair_id: str):
     if not state:
         return JsonResponse({"state": "idle"})
     if "files" in state:
-        return JsonResponse({"state": "done", "files": state["files"]})
+        body = {"state": "done", "files": state["files"]}
+        if state.get("sig"):
+            body["sig"] = state["sig"]
+        return JsonResponse(body)
     if state["state"] == "error":
         return JsonResponse({"state": "error", "error": state.get("error", "Ошибка экспорта")})
+    if state["state"] in ("cancelled", "cancelling"):
+        return JsonResponse({"state": state["state"]})
     return JsonResponse({
         "state": "running",
         "index": state.get("index", 0),

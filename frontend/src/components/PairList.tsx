@@ -386,6 +386,11 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
                 <span className="pair-meta">
                   {p.total_frames} кадров · {p.width}×{p.height}
                 </span>
+                {p.pair_warning && (
+                  <span className="pair-warn" title={p.pair_warning}>
+                    ⚠ {p.pair_warning}
+                  </span>
+                )}
               </button>
               <div className="pair-actions">
                 <button

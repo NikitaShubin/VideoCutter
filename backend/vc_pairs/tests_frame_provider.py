@@ -7,6 +7,7 @@
 и проверяет индекс, кэш групп, префетч и побитовую корректность кадров.
 """
 
+import array
 import hashlib
 import os
 import shutil
@@ -42,12 +43,12 @@ def _prop(path: str) -> fp._Provider:
     return fp._get_provider(path)
 
 
-def _wait_cache(prov, g, timeout=15.0) -> bool:
-    """Ждать, пока GOP попадёт в кэш (для префетча/завершения декода)."""
+def _wait_cache(prov, key, timeout=15.0) -> bool:
+    """Ждать, пока GOP (ключ кэша) попадёт в кэш (для префетча/завершения декода)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with prov._ilock:
-            if any(key[0] == g for key in prov._cache):
+            if key in prov._cache:
                 return True
         time.sleep(0.02)
     return False
@@ -76,6 +77,21 @@ class GopIndexTest(SimpleTestCase):
         self.assertEqual(idx.gop_of(39), 0)
         self.assertEqual(idx.gop_of(40), 1)
         self.assertEqual(idx.gop_of(99), 1)
+
+    def test_make_bounds_visible_space(self):
+        """Границы GOP строятся в индексах видимых кадров."""
+        vis = array.array("q", [100_000, 200_000, 300_000, 400_000])
+        kf = array.array("q", [100_000, 300_000])
+        self.assertEqual(fp._make_bounds(vis, kf), [0, 2, 4])
+
+    def test_make_bounds_missing_keyframe_points_to_next(self):
+        """Битый ключевой пакет: граница — первый уцелевший кадр группы."""
+        vis = array.array("q", [200_000, 300_000, 400_000])
+        kf = array.array("q", [100_000, 300_000])  # 100_000 в vis отсутствует
+        self.assertEqual(fp._make_bounds(vis, kf), [0, 1, 3])
+
+    def test_make_bounds_empty(self):
+        self.assertEqual(fp._make_bounds(array.array("q"), array.array("q")), [0])
 
 
 class FrameProviderTest(SimpleTestCase):
@@ -122,9 +138,10 @@ class FrameProviderTest(SimpleTestCase):
 
     def test_cache_hit_is_fast(self):
         prov = _prop(self.path)
+        key0 = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
         # Несколько обращений к разным кадрам gop0.
         fp.get_frame_jpeg(self.path, 2)
-        self.assertTrue(_wait_cache(prov, 0), "gop0 не попал в кэш")
+        self.assertTrue(_wait_cache(prov, key0), "gop0 не попал в кэш")
         # Вытесненные/недостроенные кадры gop0 читаются из кэша практически мгновенно.
         t0 = time.perf_counter()
         for i in (1, 5, 20, 24):
@@ -134,11 +151,39 @@ class FrameProviderTest(SimpleTestCase):
 
     def test_prefetch_warms_next_gop(self):
         prov = _prop(self.path)
+        key1 = prov._key(1, fp.JPEG_QUALITY, fp.FRAME_SCALE)
         fp.get_frame_jpeg(self.path, 1)  # касание gop0 запускает префетч
         self.assertTrue(
-            _wait_cache(prov, 1),
+            _wait_cache(prov, key1),
             "префетч не прогрел gop1 после обращения к gop0",
         )
+
+    def test_prefetch_warms_prev_gop_walking_backward(self):
+        prov = _prop(self.path)
+        key3 = prov._key(3, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        key2 = prov._key(2, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        fp.get_frame_jpeg(self.path, 90)  # спрос gop3
+        self.assertTrue(_wait_cache(prov, key3), "gop3 не задекодилась")
+        # Спуск 90 -> 89 -> 88: третий кадр подтверждает направление -1,
+        # префетч должен прогреть gop2 (а не gop4, которой нет).
+        fp.get_frame_jpeg(self.path, 89)
+        fp.get_frame_jpeg(self.path, 88)
+        self.assertTrue(
+            _wait_cache(prov, key2),
+            "обратный префетч не прогрел gop2 при спуске 90->89->88",
+        )
+
+    def test_walk_direction_resets_on_jump(self):
+        prov = _prop(self.path)
+        self.assertEqual(prov._walk_direction(10), 0)  # первый запрос
+        self.assertEqual(prov._walk_direction(11), 0)  # второй — ещё 0
+        self.assertEqual(prov._walk_direction(12), 1)  # подтверждён +1
+        self.assertEqual(prov._walk_direction(12), 0)  # повтор кадра
+        self.assertEqual(prov._walk_direction_peek(), 1)  # повтор держит +1
+        self.assertEqual(prov._walk_direction(3), 0)  # прыжок назад — сброс
+        self.assertEqual(prov._walk_direction_peek(), 0)
+        self.assertEqual(prov._walk_direction(2), -1)  # подтверждён -1
+        self.assertEqual(prov._walk_direction_peek(), -1)
 
     def test_frames_match_reference(self):
         """Побитовое совпадение GOP-движка с последовательным декодом."""
@@ -171,6 +216,18 @@ class FrameProviderTest(SimpleTestCase):
         self.assertEqual(meta["width"], 96)
         self.assertEqual(meta["height"], 96)
         self.assertGreater(meta["fps"], 10)
+        # Чистый клип: пакетов столько же, сколько видимых кадров, пропусков нет.
+        self.assertEqual(meta["packet_frames"], CLIP_FRAMES)
+        self.assertEqual(meta["skipped_frames"], 0)
+
+    def test_visible_pts_matches_total_and_monotonic(self):
+        """Адресация кадров идёт по display-порядку видимых PTS без дыр."""
+        idx = _prop(self.path)._ensure_index()
+        self.assertEqual(len(idx.visible_pts), idx.total)
+        self.assertEqual(idx.packet_total, idx.total)
+        self.assertEqual(idx.skipped, 0)
+        for i in range(1, idx.total):
+            self.assertLessEqual(idx.visible_pts[i - 1], idx.visible_pts[i])
 
     def test_scale_produces_smaller_jpeg(self):
         """Кадр с scale=0.5 должен быть существенно меньше (даунскейл → меньше JPEG)."""
@@ -201,3 +258,69 @@ class FrameProviderTest(SimpleTestCase):
         self.assertIsNotNone(j_hi)
         self.assertLess(len(j_lo), len(j_hi),
                         f"q30 JPEG ({len(j_lo)}) не меньше, чем q90 ({len(j_hi)})")
+
+    # ─── JPEG-кэш: ключ (GOP, quality, scale), декод один раз на пару ──────
+
+    def test_switch_quality_scale_uses_separate_cache(self):
+        """Смена quality/scale создаёт отдельный кэш, декодируя группу повторно —
+        зато фиксированные настройки (типичный просмотр) кэшируются компактно."""
+        import unittest.mock as mock
+
+        decode_count = 0
+        orig = fp._Provider._decode_gop
+
+        def counting_decode(self_, g, task):
+            nonlocal decode_count
+            decode_count += 1
+            return orig(self_, g, task)
+
+        fp.close_source(self.path)
+        prov = _prop(self.path)
+
+        # Первый вызов — декодирует GOP 0 под (78, 1.0).
+        with mock.patch.object(fp._Provider, "_decode_gop", counting_decode):
+            j1, _ = fp.get_frame_jpeg(self.path, 2, quality=78, scale=1.0)
+            self.assertTrue(_wait_cache(prov, prov._key(0, 78, 1.0)))
+            c1 = decode_count
+
+        # Тот же (quality, scale) — из кэша, без повторного декода.
+        with mock.patch.object(fp._Provider, "_decode_gop", counting_decode):
+            j2, _ = fp.get_frame_jpeg(self.path, 2, quality=78, scale=1.0)
+        self.assertEqual(decode_count, c1, "повторный декод при том же (q, s)!")
+        self.assertIsNotNone(j1)
+        self.assertIsNotNone(j2)
+
+        # Другие (quality, scale) — отдельный кэш (декод один раз на новую пару).
+        with mock.patch.object(fp._Provider, "_decode_gop", counting_decode):
+            j3, _ = fp.get_frame_jpeg(self.path, 2, quality=30, scale=0.5)
+        self.assertGreater(decode_count, c1)
+        self.assertIsNotNone(j3)
+
+    def test_cache_reuses_existing_gop_for_same_settings(self):
+        """При фиксированных настройках повторный запрос не передикодирует."""
+        import unittest.mock as mock
+
+        decode_count = 0
+        orig = fp._Provider._decode_gop
+
+        def counting_decode(self_, g, task):
+            nonlocal decode_count
+            decode_count += 1
+            return orig(self_, g, task)
+
+        fp.close_source(self.path)
+        prov = _prop(self.path)
+
+        with mock.patch.object(fp._Provider, "_decode_gop", counting_decode):
+            fp.get_frame_jpeg(self.path, 2, quality=78, scale=1.0)
+            self.assertTrue(_wait_cache(prov, prov._key(0, 78, 1.0)))
+            c1 = decode_count
+
+        # Несколько обращений в ту же группу — без новых декодов.
+        with mock.patch.object(fp._Provider, "_decode_gop", counting_decode):
+            for i in (0, 5, 10, 20, 24):
+                self.assertIsNotNone(
+                    fp.get_frame_jpeg(self.path, i, quality=78, scale=1.0)[0])
+
+        self.assertEqual(decode_count, c1,
+                         "повторный декод при обращении в ту же группу")

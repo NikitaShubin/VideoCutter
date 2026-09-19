@@ -26,7 +26,7 @@ class Exporter:
         source_video_file: str,
         out_dir: str,
         *,
-        remove_duplicates: bool = True,
+        remove_duplicates: bool = False,
         crf: int = 15,
         preset: str = "slow",
         tune: str = "animation",
@@ -44,15 +44,22 @@ class Exporter:
         self.tune = tune
 
     def build_command(self, start: int, end: int, target_file: str) -> List[str]:
-        """Собирает команду ffmpeg для вырезания кадров [start, end] (вкл.)."""
-        dedup = "mpdecimate," if self.remove_duplicates else ""
+        """Собирает команду ffmpeg для вырезания кадров [start, end] (вкл.).
+
+        Индексы — в пространстве видимых (декодируемых) кадров источника:
+        ``select`` нумерует кадры, дошедшие до фильтра, а битые access unit
+        кадра не дают и номер не занимают — поэтому такие кадры пропускаются
+        сами, без дублей соседей и пустых вставок. ``mpdecimate`` по умолчанию
+        выключен: он выкидывает кадры и сдвигает нумерацию, ломая соответствие
+        индексов с превью.
+        """
         # Аргумент передаётся списком (subprocess), поэтому кавычки не нужны.
         # select=between(n,start,end+1) — end+1 включается включительно в диапазон.
         select = f"select=between(n\\,{start}\\,{end + 1})"
-        vf = (
-            f"{dedup}setpts=N/FRAME_RATE/TB,{select},"
-            "setpts=PTS-STARTPTS"
-        )
+        if self.remove_duplicates:
+            vf = f"mpdecimate,setpts=N/FRAME_RATE/TB,{select},setpts=PTS-STARTPTS"
+        else:
+            vf = f"{select},setpts=N/FRAME_RATE/TB"
         return [
             "ffmpeg",
             "-i",

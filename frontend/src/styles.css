@@ -87,6 +87,10 @@ body {
   font-size: 0.85em;
 }
 
+.info.warn {
+  color: #ffcf7a;
+}
+
 /* Ползунки качества/масштаба в тулбаре редактора. */
 .view-settings {
   display: flex;
@@ -334,6 +338,16 @@ body {
   padding: 1px 8px;
   font-size: 0.85em;
   color: #d8d8e8;
+}
+
+.pair-list .pair-open .pair-warn {
+  position: relative;
+  z-index: 2;
+  display: block;
+  margin: 0 12px 8px;
+  padding: 1px 8px;
+  font-size: 0.8em;
+  color: #ffcf7a;
 }
 
 /* Квадратные кнопки действий задачи: «изменить» и «удалить» рядом. */

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  cancelExport,
   frameUrl,
   getExportStatus,
   getPair,
@@ -20,7 +21,7 @@ import {
   timelineFrame,
 } from "../model/frameScheduler";
 import { paintStatusbar } from "../model/statusbar";
-import { type ExportItem, type VideoPairDetail } from "../types";
+import { type ExportItem, type ExportStatus, type VideoPairDetail } from "../types";
 
 interface Props {
   pairId: string;
@@ -48,6 +49,14 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [helpOpen, setHelpOpen] = useState(false);
   const helpOpenRef = useRef(false);
   helpOpenRef.current = helpOpen;
+
+  // Состояние экспорта дублируем в ref: keydown-замыкание несвежее
+  // (exporting нет в deps эффекта), а повторный запуск/отмена идут через E.
+  const exportingRef = useRef(false);
+  const pollTimerRef = useRef<number | null>(null);
+  // Сигнатура последнего удачного экспорта [[start,end],...] — повтор без
+  // изменений пропускается.
+  const lastExportSigRef = useRef<string | null>(null);
 
   const modelRef = useRef<FragmentModel | null>(null);
   if (!modelRef.current) modelRef.current = new FragmentModel(0);
@@ -544,7 +553,9 @@ export function CutEditor({ pairId, onBack }: Props) {
       } else if (is("KeyI")) {
         startCommentEdit();
       } else if (ctrl && is("KeyZ")) {
-        p.undo();
+        // Ctrl+Shift+Z — стандартный redo, иначе undo.
+        if (e.shiftKey) p.redo();
+        else p.undo();
         rerender();
         drawStatusbar();
         saveToDb(p.getFragments());
@@ -601,49 +612,120 @@ export function CutEditor({ pairId, onBack }: Props) {
     return () => window.removeEventListener("pagehide", flush);
   }, [pairId, position]);
 
-  const handleExport = async () => {
-    setExporting(true);
-    setExportProgress(0);
-    const pollTimer = window.setInterval(async () => {
+  const setExportingUi = (on: boolean) => {
+    exportingRef.current = on;
+    setExporting(on);
+  };
+
+  const stopPolling = () => {
+    if (pollTimerRef.current !== null) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  const finishExportUi = () => {
+    stopPolling();
+    setExportingUi(false);
+    setExportProgress(null);
+  };
+
+  // Сигнатура границ [[start,end],...] — комментарии на выхлоп не влияют
+  // (сервер режет только по границам), формат 1-в-1 с серверным.
+  const fragmentsSig = () =>
+    JSON.stringify((modelRef.current?.getFragments() ?? []).map((f) => [f.start, f.end]));
+
+  const startPolling = () => {
+    stopPolling();
+    pollTimerRef.current = window.setInterval(async () => {
+      let st: ExportStatus;
       try {
-        const st = await getExportStatus(pairId);
-        if (st.state === "running") {
-          const total = st.total ?? 1;
-          setExportProgress((st.index ?? 0) / Math.max(1, total));
-        } else {
-          window.clearInterval(pollTimer);
-          setExporting(false);
-          setExportProgress(null);
-          if (st.state === "done") {
-            setExportItems(st.files ?? []);
-            flash(`Экспортировано фрагментов: ${st.files?.length ?? 0}`);
-          } else if (st.state === "error") {
-            flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
-          }
-        }
+        st = await getExportStatus(pairId);
       } catch (e) {
-        window.clearInterval(pollTimer);
-        setExporting(false);
-        setExportProgress(null);
+        finishExportUi();
         flash(`Ошибка опроса экспорта: ${(e as Error).message}`);
+        return;
+      }
+      if (st.state === "running" || st.state === "cancelling") {
+        const total = st.total ?? 1;
+        setExportProgress((st.index ?? 0) / Math.max(1, total));
+      } else if (st.state === "done") {
+        finishExportUi();
+        setExportItems(st.files ?? []);
+        lastExportSigRef.current = st.sig ?? fragmentsSig();
+        flash(`Экспортировано фрагментов: ${st.files?.length ?? 0}`);
+      } else if (st.state === "cancelled") {
+        finishExportUi();
+        flash("Экспорт отменён");
+      } else if (st.state === "error") {
+        finishExportUi();
+        flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
+      } else {
+        // idle: сервер забыл статус (рестарт) — дальше ждать нечего.
+        finishExportUi();
+        flash("Экспорт прерван (нет статуса на сервере)");
       }
     }, 500);
+  };
+
+  const handleExport = async () => {
+    // Повтор во время экспорта — отмена, а не второй запуск (кнопка и E
+    // работают как переключатель).
+    if (exportingRef.current) {
+      try {
+        await cancelExport(pairId);
+      } catch (e) {
+        flash(`Не удалось отменить экспорт: ${(e as Error).message}`);
+      }
+      return;
+    }
+    const sig = fragmentsSig();
+    if (lastExportSigRef.current !== null && lastExportSigRef.current === sig) {
+      flash("Экспорт актуален, изменений нет");
+      return;
+    }
+    setExportingUi(true);
+    setExportProgress(0);
+    startPolling();
     try {
       const st = await startExport(pairId);
       if (st.state !== "running") {
-        window.clearInterval(pollTimer);
-        setExporting(false);
-        setExportProgress(null);
+        finishExportUi();
         if (st.state === "error") flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
         else flash("Экспорт не запущен");
       }
     } catch (e) {
-      window.clearInterval(pollTimer);
-      setExporting(false);
-      setExportProgress(null);
+      finishExportUi();
       flash(`Ошибка экспорта: ${(e as Error).message}`);
     }
   };
+
+  // Подхват состояния экспорта при входе: Esc во время экспорта сервер не
+  // останавливает, прогресс/отмена продолжают работать после возврата.
+  useEffect(() => {
+    let alive = true;
+    getExportStatus(pairId)
+      .then((st) => {
+        if (!alive) return;
+        if (st.state === "running" || st.state === "cancelling") {
+          setExportingUi(true);
+          const total = st.total ?? 1;
+          setExportProgress((st.index ?? 0) / Math.max(1, total));
+          startPolling();
+        } else if (st.state === "done") {
+          setExportItems(st.files ?? []);
+          lastExportSigRef.current = st.sig ?? null;
+        } else if (st.state === "error") {
+          flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      stopPolling();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairId]);
 
   if (!pair) {
     return <div className="loading">Загрузка видео-пары…</div>;
@@ -698,10 +780,15 @@ export function CutEditor({ pairId, onBack }: Props) {
             кадр {position + 1}/{pair.total_frames} · показано {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
           </span>
           <span className="info">скорость: {speed}· {direction === -1 ? "[назад]" : "[вперёд]"}</span>
+          {pair.pair_warning && (
+            <span className="info warn" title={pair.pair_warning}>
+              ⚠ {pair.pair_warning}
+            </span>
+          )}
           <button
             className="toolbar-export"
             onClick={() => handleExport()}
-            disabled={exporting}
+            title={exporting ? "Отменить экспорт (E)" : "Экспорт (E)"}
           >
             {exportProgress !== null && (
               <span
@@ -711,7 +798,7 @@ export function CutEditor({ pairId, onBack }: Props) {
             )}
             <span className="toolbar-export-label">
               {exportProgress !== null
-                ? `${Math.round(exportProgress * 100)}%`
+                ? `${Math.round(exportProgress * 100)}% · Отмена`
                 : "Экспорт (E)"}
             </span>
           </button>

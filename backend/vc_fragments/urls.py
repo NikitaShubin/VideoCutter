@@ -12,6 +12,8 @@ urlpatterns = [
     path("pairs/<str:pair_id>/settings/", views.pair_settings, name="pair-settings-slash"),
     path("pairs/<str:pair_id>/export", views.fragment_export, name="fragment-export"),
     path("pairs/<str:pair_id>/export/status", views.fragment_export_status, name="fragment-export-status"),
+    # Отмена — до download-маршрута: иначе "cancel" съест <path:path>.
+    path("pairs/<str:pair_id>/export/cancel", views.fragment_export_cancel, name="fragment-export-cancel"),
     path(
         "pairs/<str:pair_id>/export/<path:path>",
         views.fragment_export_download,

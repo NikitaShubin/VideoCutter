@@ -111,10 +111,10 @@ export function HelpModal({ open, onClose }: Props) {
             <tbody>
               <tr><th>Клавиши</th><th>Действие</th></tr>
               <tr><td>{k("↑ / ] или [ / ↓")}</td><td>начало / конец фрагмента (ключевой кадр / граница)</td></tr>
-              <tr><td><span className="kbd">K</span> <span className="kbd">Ins</span> <span className="kbd">F12</span></td><td>вставить пару границ вокруг текущей позиции</td></tr>
+              <tr><td><span className="kbd">K</span> <span className="kbd">Ins</span></td><td>вставить пару границ вокруг текущей позиции</td></tr>
               <tr><td>{k("D / Del")}</td><td>удалить фрагмент под позицией</td></tr>
               <tr><td><span className="kbd">I</span></td><td>комментарий к сегменту (Enter — сохранить, Esc — отмена)</td></tr>
-              <tr><td>{k("Ctrl+Z / Z")}</td><td>undo / redo</td></tr>
+              <tr><td>{k("Ctrl+Z / Ctrl+Shift+Z / Z")}</td><td>undo / redo / redo</td></tr>
             </tbody>
           </table>
         </div>
@@ -138,7 +138,7 @@ export function HelpModal({ open, onClose }: Props) {
           <table className="help-table">
             <tbody>
               <tr><th>Клавиша</th><th>Действие</th></tr>
-              <tr><td><span className="kbd">E</span></td><td>экспорт фрагментов (оригиналы) — кнопка «Экспорт» в панели</td></tr>
+              <tr><td><span className="kbd">E</span></td><td>экспорт фрагментов (оригиналы) — кнопка «Экспорт» в панели; повтор во время экспорта — отмена</td></tr>
             </tbody>
           </table>
         </div>

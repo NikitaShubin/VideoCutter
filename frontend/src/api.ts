@@ -250,3 +250,9 @@ export function getExportStatus(pairId: string): Promise<ExportStatus> {
     json<ExportStatus>(r),
   );
 }
+
+export function cancelExport(pairId: string): Promise<ExportStatus> {
+  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export/cancel`, { method: "POST" }).then((r) =>
+    json<ExportStatus>(r),
+  );
+}
