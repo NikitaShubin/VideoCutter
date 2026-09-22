@@ -354,6 +354,73 @@ class ExportApiTests(WorkspaceApiTestBase):
         self.assertTrue(os.path.isfile(keep))
         self.assertEqual(sorted(os.listdir(out_dir)), ["keep.txt"])
 
+    def test_status_restored_from_disk_after_restart(self):
+        """Пустой EXPORTS (рестарт) не гонит экспорт заново: done из sidecar."""
+        import vc_fragments.views as export_views
+
+        class FakeExporter:
+            def __init__(self, src, out_dir, **k):
+                self.out_dir = out_dir
+
+            def extract_fragments(self, fragments, progress=None):
+                created = []
+                for i, (s, e) in enumerate(fragments, 1):
+                    if progress:
+                        progress(i, len(fragments), (s, e))
+                    path = os.path.join(self.out_dir, f"frag_{i}.mp4")
+                    with open(path, "wb") as f:
+                        f.write(b"fake")
+                    created.append(path)
+                return created
+
+        with mock.patch.object(export_views, "Exporter", FakeExporter):
+            resp = self.client.post(self.export_url)
+            self.assertEqual(resp.status_code, HTTP_OK)
+            deadline = time.time() + 30
+            while True:
+                st = self.client.get(self.export_status_url).json()
+                if st["state"] == "done":
+                    break
+                self.assertNotEqual(st["state"], "error", st)
+                if time.time() > deadline:
+                    self.fail(f"export not done: {st}")
+                time.sleep(0.05)
+            self.assertTrue(st["files"])
+            sig = st["sig"]
+
+        # Симулируем рестарт: память пуста, файлы и sidecar на месте.
+        with EXPORTS_LOCK:
+            EXPORTS.clear()
+            EXPORT_CANCEL.clear()
+        st2 = self.client.get(self.export_status_url).json()
+        self.assertEqual(st2["state"], "done")
+        self.assertEqual(st2["sig"], sig)
+        self.assertEqual(len(st2["files"]), 2)
+
+    def test_exporter_nice_prefix(self):
+        """Exporter подставляет nice-префикс только при заданном nice."""
+        from videocutter.core.exporter import Exporter
+
+        plain = Exporter("a.mp4", "/tmp").build_command(0, 3, "/tmp/x.mp4")
+        self.assertEqual(plain[0], "ffmpeg")
+        niced = Exporter("a.mp4", "/tmp", nice=19).build_command(0, 3, "/tmp/x.mp4")
+        self.assertEqual(niced[:3], ["nice", "-n", "19"])
+        self.assertEqual(niced[3:], plain)
+
+    def test_zero_byte_file_is_not_done(self):
+        """Нулевой файл в sidecar — не готовый экспорт (idle, не done)."""
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "frag_1.mp4"), "wb") as f:
+            f.write(b"fake")
+        open(os.path.join(out_dir, "frag_2.mp4"), "wb").close()
+        with open(os.path.join(out_dir, ".export-state.json"), "w") as f:
+            json.dump(
+                {"sig": "[[0,3],[5,9]]", "files": ["frag_1.mp4", "frag_2.mp4"]}, f
+            )
+        st = self.client.get(self.export_status_url).json()
+        self.assertEqual(st["state"], "idle")
+
 
 class SettingsApiTests(WorkspaceApiTestBase):
     def setUp(self):

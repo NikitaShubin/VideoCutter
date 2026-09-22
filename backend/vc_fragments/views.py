@@ -16,6 +16,14 @@ from vc_pairs import frame_provider
 from workspace import get_workspace
 
 
+# Приоритет процессов экспорта: низкий (только свободные CPU), интерактив
+# (листинг/индексация/кадры) — обычный. Переопределяется env.
+try:
+    EXPORT_NICE = max(0, min(19, int(os.environ.get("VC_EXPORT_NICE", "19"))))
+except (TypeError, ValueError):
+    EXPORT_NICE = 19
+
+
 # Прогресс экспортов в памяти процесса: workspace_id -> {"state": ...}.
 EXPORTS: dict[str, dict] = {}
 EXPORTS_LOCK = threading.Lock()
@@ -26,6 +34,18 @@ EXPORT_CANCEL: set[str] = set()
 
 class _ExportCancelled(Exception):
     """Флаг отмены: экспорт остановлен пользователем между фрагментами."""
+
+
+# Sidecar готового экспорта (рядом с файлами): переживает рестарт процесса.
+# Без него повторное открытие задачи после рестарта видело бы idle и гнало
+# экспорт заново, хотя файлы на месте.
+_SIDECAR = ".export-state.json"
+
+
+def _fragments_sig(frags) -> str:
+    """Сигнатура границ [[start,end],...] — формат 1-в-1 с клиентом."""
+    return json.dumps([[f["start"], f["end"]] for f in frags],
+                      separators=(",", ":"))
 
 
 def _export_finished_ok(ws_id: str, created: list[str], sig: str) -> None:
@@ -39,6 +59,18 @@ def _export_finished_ok(ws_id: str, created: list[str], sig: str) -> None:
         })
     with EXPORTS_LOCK:
         EXPORTS[ws_id] = {"state": "done", "files": urls, "sig": sig}
+    # Sidecar для восстановления статуса после рестарта (имена файлов без
+    # ws_id — переименование задачи его не инвалидирует).
+    if created:
+        try:
+            with open(os.path.join(os.path.dirname(created[0]), _SIDECAR),
+                      "w", encoding="utf-8") as f:
+                json.dump({
+                    "sig": sig,
+                    "files": [os.path.basename(p) for p in created],
+                }, f)
+        except OSError:
+            pass
 
 
 def _export_failed(ws_id: str, message: str) -> None:
@@ -75,10 +107,9 @@ def _run_export(ws_id: str) -> None:
         os.makedirs(out_dir, exist_ok=True)
         before = set(os.listdir(out_dir))
 
-        exporter = Exporter(ws.original, out_dir)
+        exporter = Exporter(ws.original, out_dir, nice=EXPORT_NICE)
         fragments = [(f["start"], f["end"]) for f in frags]
         total = len(fragments)
-
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
             with EXPORTS_LOCK:
                 if ws_id in EXPORT_CANCEL:
@@ -90,7 +121,7 @@ def _run_export(ws_id: str) -> None:
                 }
 
         created = exporter.extract_fragments(fragments, progress=progress)
-        sig = json.dumps([[s, e] for s, e in fragments], separators=(",", ":"))
+        sig = _fragments_sig(frags)
         _export_finished_ok(ws_id, created, sig)
     except _ExportCancelled:
         # Файлы, появившиеся за этот запуск (готовые фрагменты валидны,
@@ -320,6 +351,10 @@ def fragment_export_status(request, pair_id: str):
     with EXPORTS_LOCK:
         state = EXPORTS.get(pair_id)
     if not state:
+        # Памяти нет (рестарт?) — сверяемся с диском: готовые файлы + тот же
+        # набор фрагментов = done без повторного прогона.
+        state = _status_from_disk(pair_id)
+    if not state:
         return JsonResponse({"state": "idle"})
     if "files" in state:
         body = {"state": "done", "files": state["files"]}
@@ -335,6 +370,43 @@ def fragment_export_status(request, pair_id: str):
         "index": state.get("index", 0),
         "total": state.get("total", 1),
     })
+
+
+def _status_from_disk(pair_id: str):
+    """Статус done из sidecar (после рестарта) или None.
+
+    Возвращает done, только если sidecar-сигнатура совпадает с текущими
+    границами фрагментов и все файлы на месте.
+    """
+    ws = get_workspace(pair_id)
+    if ws is None:
+        return None
+    out_dir = os.path.join(ws.path, "exports")
+    try:
+        with open(os.path.join(out_dir, _SIDECAR), encoding="utf-8") as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return None
+    frags = ws.load_fragments()
+    if not frags or saved.get("sig") != _fragments_sig(frags):
+        return None
+    urls = []
+    for i, filename in enumerate(saved.get("files") or [], 1):
+        full = os.path.join(out_dir, os.path.basename(filename))
+        try:
+            # Нулевой размер — недописанный файл убитого экспорта, не готовый.
+            if not os.path.isfile(full) or os.path.getsize(full) == 0:
+                return None
+        except OSError:
+            return None
+        urls.append({
+            "index": i,
+            "filename": os.path.basename(filename),
+            "url": f"/api/v1/pairs/{pair_id}/export/{os.path.basename(filename)}",
+        })
+    if not urls:
+        return None
+    return {"state": "done", "files": urls, "sig": saved["sig"]}
 
 
 @require_GET

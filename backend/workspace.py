@@ -11,8 +11,9 @@ import csv
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from vc_pairs import frame_provider
 from videocutter.standalone import workspace as ws_fs
@@ -257,6 +258,34 @@ _workspaces: dict[str, Workspace] = {}
 _workspaces_lock = threading.Lock()
 
 
+# Недозалитые workspace-ы (идёт streaming тела запроса): имя -> отметка
+# времени. Сканнер прячет свежие; зависшие (>30 мин, напр. после падения
+# процесса) показывает как есть — их видно и можно удалить. Следов на
+# диске не остаётся (чисто память обвязки).
+_creating: Dict[str, float] = {}
+_creating_lock = threading.Lock()
+_STALE_CREATING_S = 30 * 60
+
+
+def note_creating(name: str) -> None:
+    """Пометить задачу как недозалитую (начало streaming)."""
+    with _creating_lock:
+        _creating[name] = time.time()
+
+
+def clear_creating(name: str) -> None:
+    """Снять пометку (поток записан, дальше — видимый indexing)."""
+    with _creating_lock:
+        _creating.pop(name, None)
+
+
+def _is_creating(name: str) -> bool:
+    """Задача в процессе заливки: прячем из списка."""
+    with _creating_lock:
+        ts = _creating.get(name)
+    return ts is not None and (time.time() - ts) < _STALE_CREATING_S
+
+
 def scan_workspaces(root: str | None = None) -> dict[str, Workspace]:
     """Сканирует root и возвращает {name: Workspace} для всех поддиректорий."""
     root = root or WORKSPACE_ROOT
@@ -267,7 +296,8 @@ def scan_workspaces(root: str | None = None) -> dict[str, Workspace]:
 
     for entry in sorted(os.listdir(root)):
         full = os.path.join(root, entry)
-        if os.path.isdir(full) and not entry.startswith("."):
+        if os.path.isdir(full) and not entry.startswith(".") \
+                and not _is_creating(entry):
             result[entry] = Workspace(name=entry, path=full)
 
     with _workspaces_lock:

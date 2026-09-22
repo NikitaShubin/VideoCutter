@@ -90,6 +90,7 @@ def _workspace_upload(request) -> JsonResponse:
     if get_workspace(name) is not None:
         return JsonResponse({"error": f"Workspace '{name}' уже существует"}, status=409)
 
+    ws_module.note_creating(name)
     try:
         ws_fs.create_workspace_pair(
             ws_module.WORKSPACE_ROOT,
@@ -101,6 +102,9 @@ def _workspace_upload(request) -> JsonResponse:
         return JsonResponse({"error": str(e)}, status=409)
     except ws_fs.InvalidWorkspaceError as e:
         return JsonResponse({"error": str(e)}, status=400)
+    finally:
+        # Поток записан (или нет): дальше — видимый indexing либо откат.
+        ws_module.clear_creating(name)
 
     # Валидация: каждый файл должен читаться как видео, иначе откат создания.
     ws = get_workspace(name)

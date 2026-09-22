@@ -16,6 +16,8 @@ services:
       # которых ждут (waiters), бросает только сиротский префетч.
       VC_PREFETCH_AHEAD: "5"
       VC_PREFETCH_IDLE_S: "2.0"
+      # Приоритет экспорта: низкий (только свободные CPU).
+      VC_EXPORT_NICE: "19"
       DJANGO_ALLOWED_HOSTS: "*"
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}

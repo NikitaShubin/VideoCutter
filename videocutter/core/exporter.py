@@ -30,6 +30,7 @@ class Exporter:
         crf: int = 15,
         preset: str = "slow",
         tune: str = "animation",
+        nice: Optional[int] = None,
     ) -> None:
         self.source_video_file = source_video_file
         self.out_dir = out_dir
@@ -42,6 +43,7 @@ class Exporter:
         self.crf = crf
         self.preset = preset
         self.tune = tune
+        self.nice = nice
 
     def build_command(self, start: int, end: int, target_file: str) -> List[str]:
         """Собирает команду ffmpeg для вырезания кадров [start, end] (вкл.).
@@ -52,6 +54,9 @@ class Exporter:
         сами, без дублей соседей и пустых вставок. ``mpdecimate`` по умолчанию
         выключен: он выкидывает кадры и сдвигает нумерацию, ломая соответствие
         индексов с превью.
+
+        При заданном ``nice`` команда запускается с пониженным приоритетом
+        (экспорт берёт только свободные CPU, интерактиву уступает).
         """
         # Аргумент передаётся списком (subprocess), поэтому кавычки не нужны.
         # select=between(n,start,end+1) — end+1 включается включительно в диапазон.
@@ -60,7 +65,7 @@ class Exporter:
             vf = f"mpdecimate,setpts=N/FRAME_RATE/TB,{select},setpts=PTS-STARTPTS"
         else:
             vf = f"{select},setpts=N/FRAME_RATE/TB"
-        return [
+        cmd = [
             "ffmpeg",
             "-i",
             self.source_video_file,
@@ -80,6 +85,9 @@ class Exporter:
             self.tune,
             target_file,
         ]
+        if self.nice is not None:
+            cmd = ["nice", "-n", str(int(self.nice))] + cmd
+        return cmd
 
     def extract_fragments(
         self,

@@ -417,6 +417,28 @@ class ListRobustnessTests(WorkspaceApiTestBase):
         items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
         return items[ws_id]
 
+    def test_creating_set_hides_workspace(self):
+        """note_creating прячет недозалитую задачу; clear/stale — показывают."""
+        import workspace as ws_module
+
+        hidden = os.path.join(self._tmpdir, "hidden-ws")
+        os.makedirs(hidden, exist_ok=True)
+        shutil.copy2(self.video, os.path.join(hidden, "video.mp4"))
+        ws_module.note_creating("hidden-ws")
+        try:
+            ids = [w["id"] for w in self.client.get(self.ws_list_url).json()]
+            self.assertNotIn("hidden-ws", ids)
+            ws_module.clear_creating("hidden-ws")
+            ids2 = [w["id"] for w in self.client.get(self.ws_list_url).json()]
+            self.assertIn("hidden-ws", ids2)
+            # Протухшая отметка — зависшая заливка видна (можно удалить).
+            with ws_module._creating_lock:
+                ws_module._creating["hidden-ws"] = time.time() - 3600
+            ids3 = [w["id"] for w in self.client.get(self.ws_list_url).json()]
+            self.assertIn("hidden-ws", ids3)
+        finally:
+            ws_module.clear_creating("hidden-ws")
+
     def test_broken_workspace_isolated(self):
         """Битая задача — записью broken, остальные — целы, список — 200."""
         broken_dir = os.path.join(self._tmpdir, "broken-ws")
