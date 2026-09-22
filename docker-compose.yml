@@ -11,6 +11,11 @@ services:
     restart: always
     environment:
       VC_WORKSPACE_ROOT: /data/workspaces
+      # Тюнинг префетча кадров (замерено матрицей 2026-09-22):
+      # AHEAD=5 — быстрый разгон; IDLE=2.0 безопасен: аборт щадит задачи,
+      # которых ждут (waiters), бросает только сиротский префетч.
+      VC_PREFETCH_AHEAD: "5"
+      VC_PREFETCH_IDLE_S: "2.0"
       DJANGO_ALLOWED_HOSTS: "*"
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}

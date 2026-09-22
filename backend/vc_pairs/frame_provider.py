@@ -40,9 +40,11 @@ import array
 import bisect
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import threading
+import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
@@ -56,6 +58,10 @@ _DEFAULT_CORES = os.cpu_count() or 1
 # JPEG группы, поэтому пул ограничиваем сверху независимо от числа ядер.
 DECODE_CORES = int(os.environ.get("VC_DECODE_CORES") or min(8, _DEFAULT_CORES))
 PREFETCH_AHEAD = int(os.environ.get("VC_PREFETCH_AHEAD") or 3)
+# Пауза спроса (с): цепочный префетч продолжается, только пока кадры реально
+# запрашивают (get_frame не старше N секунд). Иначе после паузы пул декодировал
+# бы файл до конца — «все ядра и не останавливается».
+PREFETCH_IDLE_S = float(os.environ.get("VC_PREFETCH_IDLE_S") or 5.0)
 CACHE_MB = int(os.environ.get("VC_GOP_CACHE_MB") or 512)
 CACHE_GOPS = int(os.environ.get("VC_GOP_CACHE_GOPS") or 16)
 JPEG_QUALITY = int(os.environ.get("VC_JPEG_QUALITY") or 78)
@@ -91,6 +97,15 @@ class _ByteBudget:
     def cached_bytes(self) -> int:
         with self._cond:
             return self._cached
+
+    def pressured(self, frac: float = 0.8) -> bool:
+        """Давление памяти: (кэш + транзит) выше доли лимита.
+
+        Советующий флаг для admission-контроля префетча: спекулятивные
+        декоды не должны вытеснять demand-GOP (LRU-thrash на больших GOP).
+        """
+        with self._cond:
+            return (self._cached + self._transient) > self._limit * frac
 
     def reserve(self, nbytes: int) -> None:
         """Зафиксировать резерв под декод GOP.  Не блокирует — задача
@@ -328,6 +343,8 @@ class _GopTask:
         self._lock = threading.Lock()
         self.error: Optional[BaseException] = None
         self.done = False
+        self.abandoned = False  # декод брошен: спрос умер, кэшируем частичное
+        self.waiters = 0  # заблокированных ждунов (защита живого спроса)
         self.reserved = 0  # байты, зарезервированные в _ByteBudget под этот кэш
         self.quality = quality
         self.scale = scale
@@ -353,16 +370,27 @@ class _GopTask:
 
     def wait(self, frame: int) -> Optional[bytes]:
         """Ждать JPEG-кадр (или завершение декода без него)."""
-        while True:
+        with self._lock:
+            self.waiters += 1
+        try:
+            while True:
+                with self._lock:
+                    j = self.frames.get(frame)
+                    err = self.error
+                    done = self.done
+                if j is not None:
+                    return j
+                if err is not None or done:
+                    return None
+                self._event_for(frame).wait(0.15)
+        finally:
             with self._lock:
-                j = self.frames.get(frame)
-                err = self.error
-                done = self.done
-            if j is not None:
-                return j
-            if err is not None or done:
-                return None
-            self._event_for(frame).wait(0.15)
+                self.waiters -= 1
+
+    def orphaned(self) -> bool:
+        """Задачу никто не ждёт (кандидат на аборт при мёртвом спросе)."""
+        with self._lock:
+            return self.waiters == 0
 
     def _event_for(self, frame: int) -> threading.Event:
         with self._lock:
@@ -398,6 +426,7 @@ class _Provider:
         self._last_idx: Optional[int] = None
         self._last_step: int = 0
         self._walk_dir: int = 0  # последнее подтверждённое направление
+        self._last_demand = 0.0  # monotonic-время последнего get_frame
 
     @staticmethod
     def _key(g: int, quality: int, scale: float) -> tuple:
@@ -485,7 +514,15 @@ class _Provider:
                     done = False
                     # Per-packet декод: битый access unit группы лишь
                     # пропускается, остальные кадры группы не теряются.
+                    # Аборт: спрос умер (пауза) И задачу никто не ждёт —
+                    # бросаем декод, кэшируем частичное; ждуны недодекодированных
+                    # кадров получат None. Живой спрос (waiters > 0) не трогаем:
+                    # окну attach'а всегда хватает свежего demand-метки входа.
                     for pkt in cont.demux(stream):
+                        if task.orphaned() and self._provider_idle():
+                            task.abandoned = True
+                            done = True
+                            break
                         if done:
                             break
                         try:
@@ -501,7 +538,7 @@ class _Provider:
                         except av.InvalidDataError:
                             continue
                     # Хвост декодера: последние B-кадры группы.
-                    if not done:
+                    if not done and self._demand_alive():
                         try:
                             for fr in stream.decode(None):
                                 fs = (fr.pts or 0) * float(fr.time_base or tb)
@@ -560,20 +597,30 @@ class _Provider:
         with self._ilock:
             self._tasks.pop(key, None)
             self._scheduled.discard(key)
+        if task.error is not None:
+            logger.warning("gop task failed %s: %r", key, task.error)
         if not task.error and task.frames:
             self._cache_put(key, task.frames, task.reserved)
         elif task.reserved:
             # Освобождаем и неизрасходованную часть резерва (JPEG < BGR).
             _BUDGET.release(task.reserved)
         g, q, s = key
-        # Цепочный префетч идёт за подтвержденным обходом (peek без
-        # мутации: обратный обход не должен прогревать группы впереди).
-        self._prefetch(g, q, s, self._walk_direction_peek())
+        # Цепочный префетч — пока провайдер не простаивает (есть ждуны или
+        # свежий спрос). После паузы ждуны рассасываются, гейт встаёт.
+        if not self._provider_idle():
+            self._prefetch(g, q, s, self._walk_direction_peek())
 
     def _prefetch(self, g: int, quality: int, scale: float,
-                  direction: int = 1) -> None:
+                   direction: int = 1) -> None:
         """Прогреть соседние GOP в фоне: вперёд (direction >= 0, по
-        умолчанию — как раньше) или назад (direction < 0)."""
+        умолчанию — как раньше) или назад (direction < 0).
+
+        Admission-контроль: при давлении памяти спекулятивные декоды не
+        стартуют (иначе вытесняют demand-GOP и каждый кадр декодируется
+        заново — коллапс вместо ускорения).
+        """
+        if _BUDGET.pressured():
+            return
         idx = self._ensure_index()
         step = -1 if direction < 0 else 1
         for d in range(1, PREFETCH_AHEAD + 1):
@@ -596,11 +643,40 @@ class _Provider:
                     self._scheduled.discard(nkey)
 
     # --- чтение кадра ---
+    def _note_demand(self) -> None:
+        self._last_demand = time.monotonic()
+
+    def _demand_alive(self) -> bool:
+        return (time.monotonic() - self._last_demand) <= PREFETCH_IDLE_S
+
+    def _provider_idle(self) -> bool:
+        """Никто ничего не ждёт (ни на одной задаче) и свежих обращений нет.
+
+        Именно это — сигнал «можно бросать/не продолжать»: счётчик времени
+        входов сам по себе врёт при секвенциальном клиенте (следующий вход
+        только после ответа, а ответ медленный без префетча — deadlock
+        голодания). Ждуны — честный признак живого спроса.
+        """
+        with self._ilock:
+            if any(t.waiters > 0 for t in self._tasks.values()):
+                return False
+        return not self._demand_alive()
+
+    def _index_if_ready(self) -> Optional[_Index]:
+        """Индекс, если уже собран (без блокировки на сборке)."""
+        with self._ilock:
+            return self._index
+
     def get_frame(self, index: int, quality: int = JPEG_QUALITY,
-                  scale: float = FRAME_SCALE) -> Optional[bytes]:
+                  scale: float = FRAME_SCALE) -> tuple:
+        """Возвращает (jpeg|None, info): info = {source, abandoned}.
+
+        ``source``: cache | task | single | range | abandoned.
+        """
+        self._note_demand()
         idx = self._ensure_index()
         if not 0 <= index < idx.total:
-            return None
+            return None, {"source": "range", "abandoned": False}
 
         g = idx.gop_of(index)
         direction = self._walk_direction(index)
@@ -611,13 +687,16 @@ class _Provider:
                 # Группа в кэше — прогреваем соседей по ходу обхода заранее,
                 # чтобы перемотка дальше не упиралась в холодную границу.
                 self._prefetch(g, quality, scale, direction)
-                return j
+                return j, {"source": "cache", "abandoned": False}
             task = self._task_for(g, quality, scale, direction)
             if task is not None:
                 j = task.wait(index)
                 if j is not None:
-                    return j
-        return self._read_one(index, quality, scale)
+                    return j, {"source": "task", "abandoned": False}
+                if task.abandoned:
+                    return None, {"source": "abandoned", "abandoned": True}
+        single = self._read_one(index, quality, scale)
+        return single, {"source": "single", "abandoned": False}
 
     def _task_for(self, g: int, quality: int, scale: float,
                   direction: int = 1) -> Optional[_GopTask]:
@@ -677,15 +756,7 @@ class _Provider:
         return None
 
     def metadata(self) -> dict:
-        idx = self._ensure_index()
-        return {
-            "width": idx.width,
-            "height": idx.height,
-            "total_frames": idx.total,
-            "packet_frames": idx.packet_total,
-            "skipped_frames": idx.skipped,
-            "fps": idx.fps,
-        }
+        return _index_meta(self._ensure_index())
 
 
 # --- регистр провайдеров ---
@@ -703,18 +774,117 @@ def _get_provider(path: str) -> _Provider:
 
 
 def get_frame_jpeg(path: str, index: int, *, quality: int = JPEG_QUALITY,
-                   scale: float = FRAME_SCALE):
+                   scale: float = FRAME_SCALE, want_info: bool = False):
     """Возвращает (jpeg_bytes, mime) для кадра по индексу или (None, None).
 
     ``quality`` — качество JPEG; ``scale`` — масштаб кадра (0.05..1.0):
     даунскейл применяется до энкода, кадр уходит клиенту уже уменьшенным.
+    ``want_info=True`` — третьим элементом вернуть info {source, abandoned}.
     """
-    jpeg = _get_provider(path).get_frame(index, quality, scale)
+    jpeg, info = _get_provider(path).get_frame(index, quality, scale)
+    if want_info:
+        return (jpeg, "image/jpeg", info) if jpeg else (None, None, info)
     return (jpeg, "image/jpeg") if jpeg else (None, None)
+
+
+def warm_gop(path: str, index: int = 0, quality: int = JPEG_QUALITY,
+             scale: float = FRAME_SCALE) -> None:
+    """Прогреть GOP кадра в фоне (к открытию редактора): без ожидания.
+
+    Без готового индекса — пропуск (индекс строится фоном отдельно).
+    Никогда не бросает исключения (fire-and-forget).
+    """
+    try:
+        prov = _get_provider(path)
+        idx = prov._index_if_ready()
+        if idx is None or not 0 <= index < idx.total:
+            return
+        g = idx.gop_of(index)
+        if g is None:
+            return
+        prov._task_for(g, quality, scale, prov._walk_direction_peek())
+    except Exception:  # noqa: BLE001 — прогрев best-effort
+        pass
 
 
 def get_metadata(path: str) -> dict:
     return _get_provider(path).metadata()
+
+
+logger = logging.getLogger(__name__)
+
+# Фоновая сборка индексов: путь -> поток уже запущен. При ошибке сборки
+# путь убирается из множества (повтор разрешён), а текст ошибки запоминается
+# (список показывает такую задачу как битую, а не вечно индексирующуюся).
+# Битый файл падает быстро (на av.open), поэтому шторма потоков нет.
+_BG_INDEX_LOCK = threading.Lock()
+_BG_INDEX_STARTED: "set[str]" = set()
+_BG_INDEX_FAILED: "Dict[str, str]" = {}
+
+
+def _index_meta(idx: _Index) -> dict:
+    return {
+        "width": idx.width,
+        "height": idx.height,
+        "total_frames": idx.total,
+        "packet_frames": idx.packet_total,
+        "skipped_frames": idx.skipped,
+        "fps": idx.fps,
+    }
+
+
+def ensure_index_background(path: str) -> None:
+    """Построить индекс файла в фоне (один раз на путь; демон-поток)."""
+    key = os.path.abspath(path)
+    with _BG_INDEX_LOCK:
+        if key in _BG_INDEX_STARTED:
+            return
+        _BG_INDEX_STARTED.add(key)
+    threading.Thread(target=_bg_index_build, args=(key,), daemon=True).start()
+
+
+def _bg_index_build(key: str) -> None:
+    try:
+        _get_provider(key)._ensure_index()
+        with _BG_INDEX_LOCK:
+            _BG_INDEX_FAILED.pop(key, None)
+    except Exception as e:  # noqa: BLE001 — битый файл: запомнить ошибку
+        logger.warning("background index failed: %s (%r)", key, e)
+        with _BG_INDEX_LOCK:
+            _BG_INDEX_STARTED.discard(key)
+            _BG_INDEX_FAILED[key] = f"{type(e).__name__}: {e}"[:300]
+
+
+def index_error(path: str) -> Optional[str]:
+    """Текст ошибки фоновой сборки индекса (None — нет ошибки)."""
+    return _BG_INDEX_FAILED.get(os.path.abspath(path))
+
+
+def try_get_metadata(path: str) -> Optional[dict]:
+    """Метаданные без долгого ожидания: быстрый путь (in-memory или
+    дисковый кэш) либо None + запуск фоновой сборки.
+
+    Полный проход demux+decode (минуты на сотнях мегабайт) никогда не
+    выполняется в этом вызове — для него есть фон.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    with _INDEX_CACHE_LOCK:
+        idx = _INDEX_CACHE.get(key)
+        if idx is not None:
+            _INDEX_CACHE.move_to_end(key)
+            return _index_meta(idx)
+    # Дисковый кэш валиден? Тогда сборка — это быстрый парс JSON.
+    if _cache_load(path, st.st_size, st.st_mtime_ns) is not None:
+        try:
+            return _index_meta(_build_index(path))
+        except Exception:  # noqa: BLE001 — ниже уйдёт в фон
+            pass
+    ensure_index_background(path)
+    return None
 
 
 def close_source(path: str) -> None:

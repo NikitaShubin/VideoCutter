@@ -10,6 +10,7 @@ HTTP-слой и работа с процессным реестром workspace
 
 import json
 import os
+import time
 
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -45,6 +46,12 @@ def workspace_detail(request, workspace_id: str):
         data = get_workspace_detail(workspace_id)
         if data is None:
             return _ws_404(workspace_id)
+        # Прогрев первой GOP к открытию редактора (фон, без ожидания).
+        ws = get_workspace(workspace_id)
+        if ws is not None:
+            warm_path = ws.visualization or ws.original
+            if warm_path:
+                frame_provider.warm_gop(warm_path)
         return JsonResponse(data)
     if request.method == "PATCH":
         return _workspace_rename(request, workspace_id)
@@ -195,7 +202,9 @@ def workspace_frame(request, workspace_id: str, index: int):
     except ValueError:
         return JsonResponse({"error": "Некорректные параметры quality/scale"}, status=400)
 
-    jpeg, mime = frame_provider.get_frame_jpeg(path, int(index), quality=quality, scale=scale)
+    t0 = time.monotonic()
+    jpeg, mime, info = frame_provider.get_frame_jpeg(
+        path, int(index), quality=quality, scale=scale, want_info=True)
     if jpeg is None:
         meta = ws.metadata()
         return JsonResponse(
@@ -203,6 +212,11 @@ def workspace_frame(request, workspace_id: str, index: int):
             status=404,
         )
     response = HttpResponse(jpeg, content_type=mime)
+    # Наблюдаемость: источник кадра и время отдачи (диагностика stall'ов).
+    response["X-Cache"] = info.get("source", "?")
+    response["X-Decode-Ms"] = str(int((time.monotonic() - t0) * 1000))
+    if info.get("abandoned"):
+        response["X-Abandoned"] = "1"
     # Кадры неизменны в рамках сессии и параметров просмотра: браузер кэширует
     # сам и снимает нагрузку с бэкенда при перемотке назад (клиентский кэш — 60
     # кадров). URL кадра включает video_ver, поэтому замена файла меняет ключ.

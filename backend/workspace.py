@@ -8,6 +8,7 @@ Workspace — это папка на диске с видеофайлами и f
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import threading
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ from typing import List, Optional
 from vc_pairs import frame_provider
 from videocutter.standalone import workspace as ws_fs
 from videocutter.standalone.workspace import VIDEO_EXTS
+
+logger = logging.getLogger(__name__)
 
 # Корневая директория со всеми workspace-ами.
 WORKSPACE_ROOT = os.getenv("VC_WORKSPACE_ROOT", os.path.join(os.path.dirname(__file__), "workspaces"))
@@ -348,15 +351,61 @@ def _pair_warning(source: dict, preview: dict, both: bool) -> str:
     return "; ".join(parts)
 
 
-def _pair_entry(ws: Workspace) -> dict:
+def _empty_meta() -> dict:
+    """Нулевые метрики (нет видео / индекс ещё строится)."""
+    return {
+        "total_frames": 0, "packet_frames": 0, "skipped_frames": 0,
+        "width": 0, "height": 0, "fps": 0.0,
+    }
+
+
+def _fast_role_meta(ws: Workspace, role: str):
+    """(meta, ready): метаданные роли без долгого ожидания индекса.
+
+    Полный проход demux+decode здесь не выполняется: если быстрого пути
+    (in-memory/дисковый кэш) нет — запускается фоновая сборка, а запись
+    помечается ``indexing``.
+    """
+    if role == "source":
+        path = ws.original
+    else:
+        path = ws.visualization or ws.original
+    if not path or not os.path.isfile(path):
+        return _empty_meta(), True
+    meta = frame_provider.try_get_metadata(path)
+    if meta is None:
+        err = frame_provider.index_error(path)
+        if err is not None:
+            raise ValueError(f"индекс не построен: {err}")
+        return _empty_meta(), False
+    return meta, True
+
+
+def _safe(fn, default):
+    try:
+        return fn()
+    except Exception:
+        return default
+
+
+def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
     """Элемент списка/деталей: роли, превью-метрики, фрагменты, позиция.
 
     Помимо метрик превью (таймлайн) отдаём метрики источника и признак
     согласованности пары — чтобы UI показывал, если source и preview
     разошлись по числу видимых кадров или содержат битые кадры.
+
+    ``fast=True`` — режим списка: без долгого ожидания индекса (записи
+    с незавершённой индексацией помечаются ``indexing``).
     """
-    preview = ws.metadata()  # превью (или исходник, если пары нет)
-    source = ws.video_metadata("source")
+    if fast:
+        preview, preview_ready = _fast_role_meta(ws, "preview")
+        source, source_ready = _fast_role_meta(ws, "source")
+        indexing = not (preview_ready and source_ready)
+    else:
+        preview = ws.metadata()  # превью (или исходник, если пары нет)
+        source = ws.video_metadata("source")
+        indexing = False
     both = bool(ws.original and ws.visualization and ws.original != ws.visualization)
     unassigned = ws.unassigned
     quality, scale = ws.load_settings()
@@ -381,17 +430,62 @@ def _pair_entry(ws: Workspace) -> dict:
         "quality": quality,
         "scale": scale,
         "updated_at": _workspace_updated_at(ws),
+        "indexing": indexing,
+        "broken": False,
+        "error": "",
     }
 
 
-def list_workspaces() -> List[dict]:
+def _broken_entry(ws: Workspace, err: Exception) -> dict:
+    """Запись-заглушка для битой задачи: список переживает её наличие."""
+    original = _safe(lambda: os.path.basename(ws.original) if ws.original else "", "")
+    visualization = _safe(
+        lambda: os.path.basename(ws.visualization) if ws.visualization else "", "")
+    unassigned = _safe(ws.unassigned, [])
+    return {
+        "id": ws.name,
+        "source_name": original,
+        "preview_name": visualization,
+        "unassigned_name": os.path.basename(unassigned[0]) if unassigned else None,
+        "total_frames": 0,
+        "width": 0,
+        "height": 0,
+        "fps": 0.0,
+        "source_frames": 0,
+        "preview_frames": 0,
+        "source_skipped": 0,
+        "preview_skipped": 0,
+        "visible_match": True,
+        "pair_warning": "",
+        "fragments": _safe(ws.load_fragments, []),
+        "position": _safe(ws.load_position, 0),
+        "video_ver": _safe(lambda: _video_ver(ws), ""),
+        "quality": DEFAULT_QUALITY,
+        "scale": DEFAULT_SCALE,
+        "updated_at": _workspace_updated_at(ws),
+        "indexing": False,
+        "broken": True,
+        "error": f"{type(err).__name__}: {err}"[:300],
+    }
+
+
+def list_workspaces(fast: bool = True) -> List[dict]:
     """Возвращает список workspace-ов с фрагментами, позицией и временем правки.
 
     Сортировка — по `updated_at` (свежее вверху): превью статус-бара в списке
     и порядок «недавние сверху» опираются на эти же данные.
+
+    ``fast=True`` (по умолчанию) — без долгого ожидания индекса; одна битая
+    задача не роняет весь список (возвращается записью с ``broken``).
     """
     ws_map = scan_workspaces()
-    result = [_pair_entry(ws) for ws in ws_map.values()]
+    result = []
+    for ws in ws_map.values():
+        try:
+            result.append(_pair_entry(ws, fast=fast))
+        except Exception as e:  # noqa: BLE001 — изоляция битых записей
+            logger.warning("workspace %s skipped: %r", ws.name, e)
+            result.append(_broken_entry(ws, e))
     result.sort(key=lambda w: w["updated_at"], reverse=True)
     return result
 

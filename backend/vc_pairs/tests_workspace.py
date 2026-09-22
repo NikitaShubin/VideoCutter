@@ -8,6 +8,8 @@
 """
 
 import os
+import shutil
+import time
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 
@@ -385,3 +387,60 @@ class RenameApiTests(WorkspaceApiTestBase):
         frags = self.client.get("/api/v1/pairs/preserved/fragments/").json()
         self.assertEqual(len(frags), 2)
         self.assertGreater(self.client.get("/api/v1/workspaces/preserved/").json()["total_frames"], 0)
+
+
+class ListRobustnessTests(WorkspaceApiTestBase):
+    """Список переживает битые задачи и долгую индексацию (F2/F3)."""
+
+    def _item(self, ws_id):
+        items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
+        return items[ws_id]
+
+    def test_broken_workspace_isolated(self):
+        """Битая задача — записью broken, остальные — целы, список — 200."""
+        broken_dir = os.path.join(self._tmpdir, "broken-ws")
+        os.makedirs(broken_dir, exist_ok=True)
+        with open(os.path.join(broken_dir, "source.mp4"), "wb") as f:
+            f.write(b"not a video")
+
+        deadline = time.time() + 15
+        bad = None
+        while True:
+            resp = self.client.get(self.ws_list_url)
+            self.assertEqual(resp.status_code, 200)
+            items = {w["id"]: w for w in resp.json()}
+            # Хорошая задача не пострадала.
+            self.assertIn(self.ws_id, items)
+            self.assertFalse(items[self.ws_id]["broken"])
+            bad = items.get("broken-ws")
+            self.assertIsNotNone(bad)
+            if bad["broken"]:
+                break
+            # Первый проход: индекс ещё строится в фоне.
+            self.assertTrue(bad["indexing"])
+            if time.time() > deadline:
+                self.fail("broken workspace never reported as broken")
+            time.sleep(0.05)
+        self.assertTrue(bad["error"])
+
+    def test_indexing_then_ready(self):
+        """Новая задача: сначала indexing, затем готовые метрики (фон)."""
+        fresh = os.path.join(self._tmpdir, "fresh-ws")
+        os.makedirs(fresh, exist_ok=True)
+        src = os.path.join(os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        shutil.copy2(src, os.path.join(fresh, "source.mp4"))
+
+        first = self._item("fresh-ws")
+        self.assertTrue(first["indexing"])
+        self.assertFalse(first["broken"])
+
+        deadline = time.time() + 30
+        while True:
+            item = self._item("fresh-ws")
+            if not item["indexing"]:
+                break
+            if time.time() > deadline:
+                self.fail("background index never finished")
+            time.sleep(0.1)
+        self.assertFalse(item["broken"])
+        self.assertGreater(item["total_frames"], 0)
