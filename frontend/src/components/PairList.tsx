@@ -374,7 +374,11 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
           )}
           {error && <div className="upload-error">{error}</div>}
           <button type="submit" disabled={busy || (!source && !preview)}>
-            {progress !== null && busy ? `Загрузка ${Math.round(progress * 100)}%` : "Загрузить"}
+            {progress !== null && busy
+              ? progress >= 1
+                ? "Проверка видео…"
+                : `Загрузка ${Math.round(progress * 100)}%`
+              : "Загрузить"}
           </button>
         </form>
       )}
@@ -419,7 +423,9 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
                   {p.preview_name && p.preview_name !== p.source_name
                     ? ` → ${p.preview_name}`
                     : ""}
-                  {` · ${p.total_frames} кадров · ${p.width}×${p.height}`}
+                  {p.indexing
+                    ? " · ⏳ Индексируется…"
+                    : ` · ${p.total_frames} кадров · ${p.width}×${p.height}`}
                 </span>
                 {p.pair_warning && (
                   <span className="pair-warn" title={p.pair_warning}>
