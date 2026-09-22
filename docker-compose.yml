@@ -16,6 +16,10 @@ services:
       # которых ждут (waiters), бросает только сиротский префетч.
       VC_PREFETCH_AHEAD: "5"
       VC_PREFETCH_IDLE_S: "2.0"
+      # Железо (воркеры декода/префетча, размер GOP-кэша) — автотюн на старте
+      # от ncpu/RAM (cgroup, иначе хост): эффективные значения — в логе
+      # бэкенда и GET /api/v1/cache -> tuning. Явный VC_* бьёт автотюн:
+      # VC_DECODE_CORES / VC_PREFETCH_WORKERS / VC_GOP_CACHE_MB / VC_GOP_CACHE_GOPS.
       # Приоритет экспорта: низкий (только свободные CPU).
       VC_EXPORT_NICE: "19"
       DJANGO_ALLOWED_HOSTS: "*"

@@ -16,4 +16,6 @@ urlpatterns = [
     path("workspaces/<str:workspace_id>/video/<str:role>/", views.workspace_video_role, name="workspace-video-role-slash"),
     path("workspaces/<str:workspace_id>/swap", views.workspace_swap, name="workspace-swap"),
     path("workspaces/<str:workspace_id>/swap/", views.workspace_swap, name="workspace-swap-slash"),
+    path("cache", views.cache_config, name="cache-config"),
+    path("cache/", views.cache_config, name="cache-config-slash"),
 ]

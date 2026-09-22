@@ -9,6 +9,7 @@
 
 import array
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -324,3 +325,184 @@ class FrameProviderTest(SimpleTestCase):
 
         self.assertEqual(decode_count, c1,
                          "повторный декод при обращении в ту же группу")
+
+
+class CacheCapsTest(SimpleTestCase):
+    """Runtime-лимиты GOP-кэша: чтение, смена, валидация, вытеснение."""
+
+    def setUp(self):
+        self._saved = fp.cache_caps()
+        self.addCleanup(fp.set_cache_caps, **self._saved)
+
+    def test_caps_roundtrip(self):
+        caps = fp.set_cache_caps(gops=4, mb=64)
+        self.assertEqual(caps, {"gops": 4, "mb": 64})
+        self.assertEqual(fp.cache_caps(), {"gops": 4, "mb": 64})
+        usage = fp.cache_usage()
+        self.assertEqual(usage["gops_cap"], 4)
+        self.assertEqual(usage["mb_cap"], 64)
+
+    def test_caps_partial_update(self):
+        fp.set_cache_caps(gops=7)
+        self.assertEqual(fp.cache_caps()["gops"], 7)
+
+    def test_caps_validation(self):
+        for kwargs in ({"gops": 0}, {"gops": 99999},
+                       {"mb": 8}, {"mb": 99999}, {}):
+            with self.assertRaises(ValueError, msg=str(kwargs)):
+                fp.set_cache_caps(**kwargs)
+
+    def test_shrink_evicts_cache(self):
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg не найден")
+        tmpdir = tempfile.TemporaryDirectory(prefix="vccaps_")
+        self.addCleanup(tmpdir.cleanup)
+        path = os.path.join(tmpdir.name, "clip.mp4")
+        _make_clip(path)
+        self.addCleanup(fp.close_source, path)
+        fp.set_cache_caps(gops=16, mb=512)
+        prov = _prop(path)
+        for i in (1, 30, 60, 90):  # четыре разные GOP
+            fp.get_frame_jpeg(path, i)
+        keys = [prov._key(g, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+                for g in range(4)]
+        for k in keys:
+            self.assertTrue(_wait_cache(prov, k), f"{k} не попала в кэш")
+        fp.set_cache_caps(gops=1)
+        with prov._ilock:
+            n = len(prov._cache)
+        self.assertLessEqual(n, 1, f"сжатие до gops=1 не вытеснило: {n}")
+
+    def test_prefetch_pool_separate(self):
+        # Спекуляция — свой пул: иначе пачка префетча подпирает demand-декод
+        # в FIFO общего пула (секунды заморозки на холодных границах).
+        self.assertIsNot(fp._PREFETCH_POOL, fp._DECODE_POOL)
+
+    def test_fanout_depth_rule(self):
+        # Ход вперёд — тишина (вход в GOP с начала отдаёт demand-путь),
+        # прыжок/неизвестно/назад — полный веер.
+        self.assertEqual(fp._Provider._fanout_depth(1), 0)
+        self.assertEqual(fp._Provider._fanout_depth(0), fp.PREFETCH_AHEAD)
+        self.assertEqual(fp._Provider._fanout_depth(-1), fp.PREFETCH_AHEAD)
+
+    def test_forward_walk_skips_prefetch(self):
+        """Подтверждённый ход вперёд не разбрасывает спекулятивные декоды."""
+        import unittest.mock as mock
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg не найден")
+        tmpdir = tempfile.TemporaryDirectory(prefix="vcwalk_")
+        self.addCleanup(tmpdir.cleanup)
+        path = os.path.join(tmpdir.name, "clip.mp4")
+        _make_clip(path)
+        self.addCleanup(fp.close_source, path)
+        prov = _prop(path)
+        fp.get_frame_jpeg(path, 1)
+        key0 = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        self.assertTrue(_wait_cache(prov, key0))
+
+        def quiesce():
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                with prov._ilock:
+                    if not prov._tasks:
+                        return True
+                time.sleep(0.05)
+            return False
+
+        self.assertTrue(quiesce(), "фоновые задачи не завершились")
+        # Два шага вперёд (второй подтверждает ход), сброс счётчика,
+        # затем ход по прогретой группе: пул префетча должен молчать.
+        # Фоновых завершений в окне нет (quiesce) — цепочкам не на что
+        # сработать, кэш-хиты задач не создают (ждунов нет).
+        with mock.patch.object(fp._PREFETCH_POOL, "submit") as sub:
+            fp.get_frame_jpeg(path, 2)
+            fp.get_frame_jpeg(path, 3)
+            self.assertTrue(quiesce(), "веер прыжка не завершился")
+            sub.reset_mock()
+            for i in (4, 5, 6):
+                fp.get_frame_jpeg(path, i)
+            time.sleep(0.3)
+            self.assertEqual(sub.call_count, 0,
+                             "ход вперёд должен молчать в пуле префетча")
+
+    def test_auto_tune_grid(self):
+        # (ncpu, ram_mb) -> (decode, prefetch, cache_mb, cache_gops).
+        cases = [
+            ((16, 15197), (14, 4, 1266, 39)),
+            ((8, 8192), (6, 2, 682, 21)),
+            ((4, 4096), (2, 1, 341, 10)),
+            ((2, 2048), (2, 1, 256, 8)),
+            ((64, 131072), (62, 20, 4096, 128)),
+        ]
+        for (ncpu, ram), (d, p, mb, gops) in cases:
+            with self.subTest(ncpu=ncpu, ram_mb=ram):
+                t = fp._auto_tune(ncpu, ram)
+                self.assertEqual(
+                    (t["decode_cores"], t["prefetch_workers"],
+                     t["cache_mb"], t["cache_gops"]), (d, p, mb, gops))
+
+    def test_env_or_auto_override(self):
+        import unittest.mock as mock
+        with mock.patch.dict(os.environ, {"VC_GOP_CACHE_MB": "777"}):
+            self.assertEqual(fp._env_or_auto("VC_GOP_CACHE_MB", 512), 777)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VC_GOP_CACHE_MB", None)
+            self.assertEqual(fp._env_or_auto("VC_GOP_CACHE_MB", 512), 512)
+
+    def test_host_resources_sane(self):
+        ncpu, ram = fp._host_resources()
+        self.assertGreaterEqual(ncpu, 1)
+        self.assertGreaterEqual(ram, 256)
+
+    def test_cache_endpoint(self):
+        resp = self.client.get("/api/v1/cache")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIn("caps", body)
+        self.assertIn("usage", body)
+        self.assertIn("tuning", body)
+        self.assertIn("ncpu", body["tuning"])
+        resp = self.client.post(
+            "/api/v1/cache", data=json.dumps({"gops": 9}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["caps"]["gops"], 9)
+        resp = self.client.post(
+            "/api/v1/cache", data=json.dumps({"gops": 0}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+
+class SpeculationGenTest(SimpleTestCase):
+    """Поколение спекуляции: прыжок сбрасывает queued-префетч прошлого места."""
+
+    def test_stale_speculative_dropped(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.speculative = True
+        task.gen = 0
+        prov._gen = 5
+        key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        prov._tasks[key] = task
+        with mock.patch.object(fp._Provider, "_decode_gop") as dec, \
+                mock.patch.object(fp._Provider, "_prefetch"):
+            prov._run_pooled(key, task)
+        dec.assert_not_called()
+        self.assertTrue(task.done)
+        with prov._ilock:
+            self.assertNotIn(key, prov._tasks)
+
+    def test_demand_adopts_speculative(self):
+        # Спрос на GOP с живой спекулятивной задачей усыновляет её:
+        # gen-сброс ждуна не касается.
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.speculative = True
+        task.gen = 3
+        key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        prov._tasks[key] = task
+        prov._gen = 7
+        got = prov._task_for(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        self.assertIs(got, task)
+        self.assertFalse(task.speculative)

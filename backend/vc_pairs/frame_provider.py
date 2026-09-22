@@ -52,18 +52,97 @@ from typing import Dict, List, Optional
 import av
 import cv2
 
-# --- Конфигурация (зависит от числа ядер/памяти, переопределяется env) ---
-_DEFAULT_CORES = os.cpu_count() or 1
+# --- Конфигурация: автотюн под железо, явный env всегда побеждает ---
+def _host_resources() -> tuple:
+    """(ncpu, ram_mb): квота cgroup v2/v1, иначе хост; фолбэк (4, 4096).
+
+    Только stdlib, никогда не бросает исключения — на сбоях детекта
+    возвращаются безопасные значения, а не падение импорта.
+    """
+    ncpu = os.cpu_count() or 4
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+            if quota != "max":
+                ncpu = max(1, int(int(quota) / int(period)))
+    except (OSError, ValueError):
+        try:
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
+                quota = int(f.read().strip())
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+                period = int(f.read().strip())
+            if quota > 0:
+                ncpu = max(1, quota // period)
+        except (OSError, ValueError):
+            pass
+    ram_mb = 4096
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f:
+            v = f.read().strip()
+            if v != "max" and int(v) < (1 << 60):
+                ram_mb = max(256, int(v) // (1 << 20))
+            else:
+                raise ValueError("no cgroup memory limit")
+    except (OSError, ValueError):
+        try:
+            with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+                v = int(f.read().strip())
+            if v < (1 << 60):
+                ram_mb = max(256, v // (1 << 20))
+            else:
+                raise ValueError("no cgroup memory limit")
+        except (OSError, ValueError):
+            try:
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if line.startswith("MemTotal:"):
+                            ram_mb = max(256, int(line.split()[1]) // 1024)
+                            break
+            except (OSError, ValueError, IndexError):
+                pass
+    return ncpu, ram_mb
+
+
+def _auto_tune(ncpu: int, ram_mb: int) -> dict:
+    """Стартовые лимиты под железо (чистая функция — тестируется без железа).
+
+    Два ядра всегда остаются системе/экспорту/UI; кэш — ~1/12 RAM
+    в клампе 256 МБ..4 ГБ; счётный предохранитель растёт вместе с байтами.
+    """
+    decode = max(2, int(ncpu) - 2)
+    prefetch = max(1, decode // 3)
+    cache_mb = min(4096, max(256, int(ram_mb) // 12))
+    cache_gops = max(8, cache_mb // 32)
+    return {"decode_cores": decode, "prefetch_workers": prefetch,
+            "cache_mb": cache_mb, "cache_gops": cache_gops}
+
+
+_NCPU, _RAM_MB = _host_resources()
+_AUTO = _auto_tune(_NCPU, _RAM_MB)
+_TUNE_SOURCE: dict = {}
+
+
+def _env_or_auto(var: str, auto_val: int) -> int:
+    """Явный env бьёт автотюн; источник запоминаем для /api/v1/cache."""
+    raw = os.environ.get(var)
+    if raw is None or raw == "":
+        _TUNE_SOURCE[var] = "auto"
+        return auto_val
+    _TUNE_SOURCE[var] = "env"
+    return int(raw)
+
+
 # Одновременных декодов GOP. Для 1080p-кадра транзиентно ~6 МБ BGR + накопленный
-# JPEG группы, поэтому пул ограничиваем сверху независимо от числа ядер.
-DECODE_CORES = int(os.environ.get("VC_DECODE_CORES") or min(8, _DEFAULT_CORES))
+# JPEG группы; BGR реально держится один кадр (put кодирует сразу), вес —
+# JPEG-словарь (~40 МБ на GOP-259), поэтому ширина безопасна в пределах RAM.
+DECODE_CORES = _env_or_auto("VC_DECODE_CORES", _AUTO["decode_cores"])
 PREFETCH_AHEAD = int(os.environ.get("VC_PREFETCH_AHEAD") or 3)
 # Пауза спроса (с): цепочный префетч продолжается, только пока кадры реально
 # запрашивают (get_frame не старше N секунд). Иначе после паузы пул декодировал
 # бы файл до конца — «все ядра и не останавливается».
 PREFETCH_IDLE_S = float(os.environ.get("VC_PREFETCH_IDLE_S") or 5.0)
-CACHE_MB = int(os.environ.get("VC_GOP_CACHE_MB") or 512)
-CACHE_GOPS = int(os.environ.get("VC_GOP_CACHE_GOPS") or 16)
+CACHE_MB = _env_or_auto("VC_GOP_CACHE_MB", _AUTO["cache_mb"])
+CACHE_GOPS = _env_or_auto("VC_GOP_CACHE_GOPS", _AUTO["cache_gops"])
 JPEG_QUALITY = int(os.environ.get("VC_JPEG_QUALITY") or 78)
 # Масштаб кадров по умолчанию (1.0 = оригинал); фронтенд обычно передаёт свой.
 FRAME_SCALE = float(os.environ.get("VC_FRAME_SCALE") or 1.0)
@@ -73,9 +152,19 @@ QUALITY_MIN, QUALITY_MAX = 20, 95
 SCALE_MIN, SCALE_MAX = 0.05, 1.0
 
 _DECODE_POOL = ThreadPoolExecutor(max_workers=DECODE_CORES)
+# Отдельный пул префетча: у общего пула FIFO-очередь, и пачка спекулятивных
+# декодов подпирала бы demand-декод текущего GOP (на GOP-259 это секунды
+# заморозки на каждой холодной границе). Спрос — в общем пуле, спекуляция —
+# в своём (автотюн: ~1/3 декод-воркеров): прогрев идёт, спросу не мешает.
+PREFETCH_WORKERS = _env_or_auto("VC_PREFETCH_WORKERS", _AUTO["prefetch_workers"])
+_PREFETCH_POOL = ThreadPoolExecutor(max_workers=max(1, PREFETCH_WORKERS))
 # Страховка по памяти: потоков декода не больше, чем DECODE_CORES, т.к. вся
 # работа идёт через пул; транзиент на 1080p-группу ~6 МБ BGR + JPEG группы.
 _HEAVY = threading.BoundedSemaphore(DECODE_CORES)
+logging.getLogger(__name__).info(
+    "autotune ncpu=%d ram_mb=%d decode=%d prefetch=%d cache=%dMB/%dgops "
+    "source=%s", _NCPU, _RAM_MB, DECODE_CORES, PREFETCH_WORKERS,
+    CACHE_MB, CACHE_GOPS, dict(_TUNE_SOURCE))
 
 
 class _ByteBudget:
@@ -106,6 +195,15 @@ class _ByteBudget:
         """
         with self._cond:
             return (self._cached + self._transient) > self._limit * frac
+
+    def set_limit(self, nbytes: int) -> None:
+        """Новый байтовый лимит (runtime-перенастройка кэша).
+
+        Уже приземлённый кэш под новый лимит подгоняет вызывающий
+        (``_evict_to_limit``); транзитные декоды дорабатывают как есть.
+        """
+        with self._cond:
+            self._limit = max(int(nbytes), 1)
 
     def reserve(self, nbytes: int) -> None:
         """Зафиксировать резерв под декод GOP.  Не блокирует — задача
@@ -346,6 +444,8 @@ class _GopTask:
         self.reserved = 0  # байты, зарезервированные в _ByteBudget под этот кэш
         self.quality = quality
         self.scale = scale
+        self.speculative = False  # префетч: может быть сброшен прыжком
+        self.gen = 0  # поколение позиции, при котором задача создана
 
     def put(self, frame: int, bgr: "numpy.ndarray") -> None:
         jpeg = _Provider._encode(bgr, self.quality, self.scale)
@@ -424,6 +524,8 @@ class _Provider:
         self._last_idx: Optional[int] = None
         self._last_step: int = 0
         self._walk_dir: int = 0  # последнее подтверждённое направление
+        self._gen = 0  # поколение позиции: каждый разрыв обхода (прыжок,
+        # смена знака) инвалидирует queued-спекуляцию прошлого места
         self._last_demand = 0.0  # monotonic-время последнего get_frame
 
     @staticmethod
@@ -521,6 +623,15 @@ class _Provider:
                             task.abandoned = True
                             done = True
                             break
+                        # Протухшая спекуляция (прыжок случился прямо во время
+                        # декода): бросаем, CPU — новому месту. Усыновлённые
+                        # спросом задачи (speculative=False) не трогаем.
+                        # Чтение _gen без лока — benign race: опоздание аборта
+                        # на доли пакета, корректность не задета.
+                        if task.speculative and task.gen != self._gen:
+                            task.abandoned = True
+                            done = True
+                            break
                         if done:
                             break
                         try:
@@ -556,6 +667,16 @@ class _Provider:
 
     def _run_pooled(self, key: tuple, task: _GopTask) -> None:
         g, _, _ = key
+        # Устаревшая спекуляция (прыжок случился, пока задача стояла
+        # в очереди пула): декод не стартуем, сразу завершаем. Demand-задачи
+        # (speculative=False) и спекуляция текущего поколения идут как обычно.
+        with self._ilock:
+            stale = task.speculative and task.gen != self._gen
+        if stale:
+            task.abandoned = True
+            task.mark_done()
+            self._finish_task(key, task)
+            return
         self._decode_gop(g, task)
         self._finish_task(key, task)
 
@@ -566,7 +687,8 @@ class _Provider:
         воспроизведение: кадры запрашиваются строго по порядку). Первый
         запрос, повтор кадра и смена знака/с прыжком дают 0 — поведение
         префетча как раньше (вперёд). Только производительность, на
-        корректность отдачи не влияет.
+        корректность отдачи не влияет. Разрыв обхода (прыжок/смена знака)
+        двигает поколение: queued-спекуляция прошлого места сбрасывается.
         """
         with self._ilock:
             step = 0 if self._last_idx is None else index - self._last_idx
@@ -580,6 +702,9 @@ class _Provider:
                     # Прыжок/смена знака/первый шаг — подтверждённого
                     # направления больше нет.
                     self._walk_dir = 0
+                    if self._last_idx is not None:
+                        # Разрыв: было куда идти, пошли в другое место.
+                        self._gen += 1
             if step != 0:
                 self._last_step = step
             self._last_idx = index
@@ -590,6 +715,21 @@ class _Provider:
         (для цепочного префетча из пула)."""
         with self._ilock:
             return self._walk_dir
+
+    @staticmethod
+    def _fanout_depth(direction: int) -> int:
+        """Глубина веера непосредственных соседей по направлению обхода.
+
+        Подтверждённый ход ВПЕРЁД (direction > 0) не греем вовсе: вход
+        в следующий GOP всегда с его начала (head≈0), demand-путь отдаёт
+        первый кадр за ~десятки мс — а каждый спекулятивный декод отбирает
+        CPU у demand-стрима (замер: 13–17 к/с вместо ~95). Прыжок/неизвестно
+        (0) и ход НАЗАД (< 0, вход с конца GOP = полный форвард-декод)
+        греют полным веером PREFETCH_AHEAD.
+        """
+        if direction > 0:
+            return 0
+        return PREFETCH_AHEAD
 
     def _finish_task(self, key: tuple, task: _GopTask) -> None:
         with self._ilock:
@@ -603,25 +743,37 @@ class _Provider:
             # Освобождаем и неизрасходованную часть резерва (JPEG < BGR).
             _BUDGET.release(task.reserved)
         g, q, s = key
-        # Цепочный префетч — пока провайдер не простаивает (есть ждуны или
-        # свежий спрос). После паузы ждуны рассасываются, гейт встаёт.
-        if not self._provider_idle():
-            self._prefetch(g, q, s, self._walk_direction_peek())
+        # Цепочный префетч — только в простое без ждунов (решение внутри
+        # _prefetch): паузный глубокий прогрев. При живом спросе цепочки —
+        # это стампид, CPU-starвящий demand-GOP.
+        self._prefetch(g, q, s, self._walk_direction_peek(), chained=True)
 
     def _prefetch(self, g: int, quality: int, scale: float,
-                   direction: int = 1) -> None:
+                   direction: int = 1, chained: bool = False,
+                   depth: Optional[int] = None) -> None:
         """Прогреть соседние GOP в фоне: вперёд (direction >= 0, по
         умолчанию — как раньше) или назад (direction < 0).
 
-        Admission-контроль: при давлении памяти спекулятивные декоды не
-        стартуют (иначе вытесняют demand-GOP и каждый кадр декодируется
-        заново — коллапс вместо ускорения).
+        Admission-контроль: давление памяти останавливает только ЦЕПОЧНЫЙ
+        префетч (chained=True, рекурсивное забегание далеко вперёд —
+        иначе вытесняет demand-GOP и каждый кадр декодируется заново,
+        коллапс вместо ускорения). Непосредственные соседи текущего GOP
+        (chained=False) греются всегда: веер ограничен depth и
+        самозатухает через _scheduled/_tasks/_cache, а без него каждая
+        граница холодная.
+        Цепочки дополнительно требуют полного простоя (ни одного ждуна
+        ни на одной задаче): при живом спросе дальняя спекуляция лишь
+        отбирает CPU у demand-декода.
         """
-        if _BUDGET.pressured():
-            return
+        if chained:
+            if _BUDGET.pressured():
+                return
+            if _any_waiters():
+                return
         idx = self._ensure_index()
         step = -1 if direction < 0 else 1
-        for d in range(1, PREFETCH_AHEAD + 1):
+        dmax = PREFETCH_AHEAD if depth is None else max(0, depth)
+        for d in range(1, dmax + 1):
             ng = g + step * d
             if ng < 0 or ng >= len(idx.bounds) - 1:
                 break
@@ -631,9 +783,12 @@ class _Provider:
                     continue
                 self._scheduled.add(nkey)
                 task = _GopTask(quality, scale)
+                task.speculative = True
+                task.gen = self._gen
                 self._tasks[nkey] = task
             try:
-                _DECODE_POOL.submit(self._run_pooled, nkey, task)
+                # Спекуляция — в свой пул (не подпирает demand в FIFO).
+                _PREFETCH_POOL.submit(self._run_pooled, nkey, task)
             except Exception:
                 # Пул остановлен (завершение приложения) — убираем как несостоявшийся.
                 with self._ilock:
@@ -682,9 +837,12 @@ class _Provider:
             key = self._key(g, quality, scale)
             j = self._cache_hit(key, index)
             if j is not None:
-                # Группа в кэше — прогреваем соседей по ходу обхода заранее,
-                # чтобы перемотка дальше не упиралась в холодную границу.
-                self._prefetch(g, quality, scale, direction)
+                # Группа в кэше — соседей греем только на прыжке/ходе назад
+                # (depth по _fanout_depth): при ходе вперёд вход в следующий
+                # GOP с его начала отдаётся demand-путём без stall'а, а веер
+                # лишь отбирал бы CPU у стрима.
+                self._prefetch(g, quality, scale, direction,
+                               depth=self._fanout_depth(direction))
                 return j, {"source": "cache", "abandoned": False}
             task = self._task_for(g, quality, scale, direction)
             if task is not None:
@@ -697,7 +855,7 @@ class _Provider:
         return single, {"source": "single", "abandoned": False}
 
     def _task_for(self, g: int, quality: int, scale: float,
-                  direction: int = 1) -> Optional[_GopTask]:
+                   direction: int = 1) -> Optional[_GopTask]:
         """Создать (и запустить в пуле) задачу GOP, если её ещё нет."""
         key = self._key(g, quality, scale)
         with self._ilock:
@@ -708,6 +866,10 @@ class _Provider:
                 created = True
             else:
                 created = False
+                # Спрос усыновляет спекулятивную задачу: раз кадр реально
+                # ждут, tasks-gen её больше не сбросит (иначе ждун получил
+                # бы None вместо кадра после прыжка назад).
+                task.speculative = False
         if created:
             try:
                 _DECODE_POOL.submit(self._run_pooled, key, task)
@@ -719,7 +881,10 @@ class _Provider:
                 return None
             # Соседние группы прогреваем сразу — параллельно текущему декоду,
             # тогда переход через границу не застанет холодную группу.
-            self._prefetch(g, quality, scale, direction)
+            # При подтверждённом ходе вперёд веера нет (depth=0): demand-путь
+            # справляется сам, см. _fanout_depth.
+            self._prefetch(g, quality, scale, direction,
+                           depth=self._fanout_depth(direction))
         return task
 
     # --- одиночный seek (до первого ключевого кадра и прочие огрехи) ---
@@ -809,6 +974,15 @@ def get_metadata(path: str) -> dict:
     return _get_provider(path).metadata()
 
 
+def get_visible_pts(path: str) -> list:
+    """PTS видимых кадров (мкс, display-порядок) — для t-диапазонов экспорта.
+
+    Блокирует до готовности индекса (к моменту экспорта он уже собран
+    валидацией). Возвращает обычный list (копия внутреннего массива).
+    """
+    return list(_get_provider(path)._ensure_index().visible_pts)
+
+
 logger = logging.getLogger(__name__)
 
 # Фоновая сборка индексов: путь -> поток уже запущен. При ошибке сборки
@@ -888,3 +1062,86 @@ def try_get_metadata(path: str) -> Optional[dict]:
 def close_source(path: str) -> None:
     with _providers_lock:
         _providers.pop(path, None)
+
+
+def _any_waiters() -> bool:
+    """Хоть одна задача хоть одного провайдера сейчас ожидается клиентом.
+
+    Честный сигнал живого спроса для гейта цепочек: пока кадры реально
+    ждут, дальняя спекуляция запрещена (CPU — demand-стриму). Порядок
+    блокировок как в cache_usage: _providers_lock -> _ilock.
+    """
+    with _providers_lock:
+        provs = list(_providers.values())
+    for p in provs:
+        with p._ilock:
+            for t in p._tasks.values():
+                if t.waiters > 0:
+                    return True
+    return False
+
+
+# --- runtime-настройка кэша GOP ---
+CACHE_GOPS_MIN, CACHE_GOPS_MAX = 1, 1024
+CACHE_MB_MIN, CACHE_MB_MAX = 16, 16384
+
+
+def cache_caps() -> dict:
+    """Текущие лимиты кэша GOP (могут меняться в runtime)."""
+    return {"gops": CACHE_GOPS, "mb": CACHE_MB}
+
+
+def tuning_info() -> dict:
+    """Железо, автотюн и источник каждого лимита (auto/env/runtime)."""
+    return {"ncpu": _NCPU, "ram_mb": _RAM_MB, "auto": dict(_AUTO),
+            "source": dict(_TUNE_SOURCE)}
+
+
+def cache_usage() -> dict:
+    """Фактическое заполнение кэша по всем провайдерам."""
+    with _providers_lock:
+        provs = list(_providers.values())
+    gops = 0
+    for p in provs:
+        with p._ilock:
+            gops += len(p._cache)
+    return {
+        "gops": gops,
+        "gops_cap": CACHE_GOPS,
+        "mb": round(_BUDGET.cached_bytes() / (1 << 20), 1),
+        "mb_cap": CACHE_MB,
+        "sources": len(provs),
+    }
+
+
+def set_cache_caps(*, gops: Optional[int] = None,
+                   mb: Optional[int] = None) -> dict:
+    """Сменить лимиты кэша GOP без рестарта (ValueError — вне диапазона).
+
+    Уменьшение лимита тут же вытесняет лишнее (LRU по всем провайдерам);
+    увеличение просто поднимает потолок. Транзитные декоды дорабатывают
+    как есть и под новый лимит не подгоняются.
+    """
+    global CACHE_GOPS, CACHE_MB
+    if gops is None and mb is None:
+        raise ValueError("нужен хотя бы один из параметров: gops, mb")
+    if gops is not None:
+        gops = int(gops)
+        if not CACHE_GOPS_MIN <= gops <= CACHE_GOPS_MAX:
+            raise ValueError(
+                f"gops вне диапазона {CACHE_GOPS_MIN}..{CACHE_GOPS_MAX}")
+        CACHE_GOPS = gops
+        _TUNE_SOURCE["VC_GOP_CACHE_GOPS"] = "runtime"
+    if mb is not None:
+        mb = int(mb)
+        if not CACHE_MB_MIN <= mb <= CACHE_MB_MAX:
+            raise ValueError(
+                f"mb вне диапазона {CACHE_MB_MIN}..{CACHE_MB_MAX}")
+        CACHE_MB = mb
+        _BUDGET.set_limit(mb << 20)
+        _TUNE_SOURCE["VC_GOP_CACHE_MB"] = "runtime"
+    with _providers_lock:
+        provs = list(_providers.values())
+    for p in provs:
+        p._evict_to_limit()
+    return cache_caps()

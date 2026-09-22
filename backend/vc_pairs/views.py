@@ -281,6 +281,31 @@ def workspace_frame(request, workspace_id: str, index: int):
     return response
 
 
+@require_http_methods(["GET", "POST"])
+def cache_config(request):
+    """Лимиты GOP-кэша: GET — лимиты + заполнение, POST — смена без рестарта.
+
+    POST-тело (JSON): {"gops": 16, "mb": 512} — хотя бы одно поле.
+    Уменьшение тут же вытесняет лишнее (LRU); увеличение поднимает потолок.
+    """
+    if request.method == "GET":
+        return JsonResponse({
+            "caps": frame_provider.cache_caps(),
+            "usage": frame_provider.cache_usage(),
+            "tuning": frame_provider.tuning_info(),
+        })
+    try:
+        body = json.loads(request.body or "{}")
+    except ValueError:
+        return JsonResponse({"error": "Тело должно быть JSON"}, status=400)
+    try:
+        caps = frame_provider.set_cache_caps(
+            gops=body.get("gops"), mb=body.get("mb"))
+    except (ValueError, TypeError) as e:
+        return JsonResponse({"error": str(e)}, status=400)
+    return JsonResponse({"caps": caps, "usage": frame_provider.cache_usage()})
+
+
 @require_http_methods(["GET"])
 def workspace_meta(request, workspace_id: str):
     """Метаданные workspace (без фрагментов)."""
