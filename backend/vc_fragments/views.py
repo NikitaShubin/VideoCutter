@@ -4,6 +4,7 @@
 Фрагменты хранятся как fragments.tsv в директории workspace.
 """
 
+import hashlib
 import json
 import os
 import threading
@@ -11,7 +12,11 @@ import threading
 from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods
 
-from videocutter.core.exporter import Exporter, FFmpegError
+from videocutter.core.exporter import (
+    Exporter,
+    ExportCancelled,
+    FFmpegError,
+)
 from vc_pairs import frame_provider
 from workspace import get_workspace
 
@@ -48,7 +53,29 @@ def _fragments_sig(frags) -> str:
                       separators=(",", ":"))
 
 
-def _export_finished_ok(ws_id: str, created: list[str], sig: str) -> None:
+def _video_identity(path: str):
+    """Идентичность видео {size, mtime_ns} (None — файла нет)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+def _task_hash(frags, size: int, mtime_ns: int) -> str:
+    """Хеш состояния нарезки: границы (порядок не важен) + видео.
+
+    Совпал — файлы соответствуют нынешнему состоянию, отдаём готовое.
+    """
+    canon = json.dumps({
+        "fragments": sorted([f["start"], f["end"]] for f in frags),
+        "video": {"size": size, "mtime_ns": mtime_ns},
+    }, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _export_finished_ok(ws_id: str, created: list[str], sig: str,
+                         task_hash) -> None:
     urls = []
     for i, path in enumerate(created, 1):
         filename = os.path.basename(path)
@@ -58,7 +85,8 @@ def _export_finished_ok(ws_id: str, created: list[str], sig: str) -> None:
             "url": f"/api/v1/pairs/{ws_id}/export/{filename}",
         })
     with EXPORTS_LOCK:
-        EXPORTS[ws_id] = {"state": "done", "files": urls, "sig": sig}
+        EXPORTS[ws_id] = {"state": "done", "files": urls, "sig": sig,
+                          "hash": task_hash}
     # Sidecar для восстановления статуса после рестарта (имена файлов без
     # ws_id — переименование задачи его не инвалидирует).
     if created:
@@ -66,6 +94,7 @@ def _export_finished_ok(ws_id: str, created: list[str], sig: str) -> None:
             with open(os.path.join(os.path.dirname(created[0]), _SIDECAR),
                       "w", encoding="utf-8") as f:
                 json.dump({
+                    "hash": task_hash,
                     "sig": sig,
                     "files": [os.path.basename(p) for p in created],
                 }, f)
@@ -120,10 +149,18 @@ def _run_export(ws_id: str) -> None:
                     "total": total,
                 }
 
-        created = exporter.extract_fragments(fragments, progress=progress)
+        def cancelled() -> bool:
+            with EXPORTS_LOCK:
+                return ws_id in EXPORT_CANCEL
+
+        created = exporter.extract_fragments(
+            fragments, progress=progress, cancelled=cancelled)
         sig = _fragments_sig(frags)
-        _export_finished_ok(ws_id, created, sig)
-    except _ExportCancelled:
+        vid = _video_identity(ws.original)
+        task_hash = _task_hash(frags, vid["size"], vid["mtime_ns"]) \
+            if vid is not None else None
+        _export_finished_ok(ws_id, created, sig, task_hash)
+    except (_ExportCancelled, ExportCancelled):
         # Файлы, появившиеся за этот запуск (готовые фрагменты валидны,
         # но пользователь просил зачистку) — удаляем по снапшоту каталога.
         try:
@@ -301,7 +338,11 @@ def pair_settings(request, pair_id: str):
 
 @require_http_methods(["POST"])
 def fragment_export(request, pair_id: str):
-    """Запускает ffmpeg-нарезку в фоне; прогресс — через status."""
+    """Запускает ffmpeg-нарезку в фоне; прогресс — через status.
+
+    Нарезки актуальны (хеш границ+видео совпал с готовыми) — сразу done
+    с файлами, без прогона. ``?force=1`` — всегда гнать заново.
+    """
     ws = get_workspace(pair_id)
     if ws is None:
         return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
@@ -317,6 +358,16 @@ def fragment_export(request, pair_id: str):
                 {"error": "Экспорт уже выполняется для этого workspace"},
                 status=409,
             )
+
+    if request.GET.get("force") != "1":
+        done = _current_done(pair_id)
+        if done is not None:
+            return JsonResponse(done)
+
+    # Несоответствие — сносим прежние наши нарезки и запускаем новое.
+    _drop_previous_outputs(ws)
+
+    with EXPORTS_LOCK:
         EXPORTS[pair_id] = {"state": "running", "index": 0, "total": len(frags)}
 
     threading.Thread(target=_run_export, args=(pair_id,), daemon=True).start()
@@ -325,7 +376,7 @@ def fragment_export(request, pair_id: str):
 
 @require_http_methods(["POST"])
 def fragment_export_cancel(request, pair_id: str):
-    """Просит фоновый экспорт остановиться (срабатывает между фрагментами).
+    """Просит фоновый экспорт остановиться (в т.ч. посреди фрагмента, ~0.5с).
 
     Частичные файлы этого запуска зачищаются, состояние — "cancelled".
     Отмена не бегущего экспорта — 409.
@@ -350,33 +401,76 @@ def fragment_export_status(request, pair_id: str):
     """Текущий статус экспорта."""
     with EXPORTS_LOCK:
         state = EXPORTS.get(pair_id)
-    if not state:
-        # Памяти нет (рестарт?) — сверяемся с диском: готовые файлы + тот же
-        # набор фрагментов = done без повторного прогона.
-        state = _status_from_disk(pair_id)
-    if not state:
-        return JsonResponse({"state": "idle"})
-    if "files" in state:
-        body = {"state": "done", "files": state["files"]}
-        if state.get("sig"):
-            body["sig"] = state["sig"]
-        return JsonResponse(body)
-    if state["state"] == "error":
-        return JsonResponse({"state": "error", "error": state.get("error", "Ошибка экспорта")})
-    if state["state"] in ("cancelled", "cancelling"):
-        return JsonResponse({"state": state["state"]})
-    return JsonResponse({
-        "state": "running",
-        "index": state.get("index", 0),
-        "total": state.get("total", 1),
-    })
+    if state and state.get("state") != "done":
+        # Бегущий/упавший/отменённый — как есть (память).
+        if state["state"] == "error":
+            return JsonResponse({"state": "error", "error": state.get("error", "Ошибка экспорта")})
+        if state["state"] in ("cancelled", "cancelling"):
+            return JsonResponse({"state": state["state"]})
+        return JsonResponse({
+            "state": "running",
+            "index": state.get("index", 0),
+            "total": state.get("total", 1),
+        })
+    # done или нет памяти: перепроверяем под текущее состояние (границы+видео
+    # могли измениться после финиша; рестарт стирает память).
+    done = _current_done(pair_id)
+    if done is not None:
+        return JsonResponse(done)
+    return JsonResponse({"state": "idle"})
 
 
-def _status_from_disk(pair_id: str):
+def _current_done(pair_id: str):
+    """Готовый результат под ТЕКУЩЕЕ состояние (None — гнать заново)."""
+    ws = get_workspace(pair_id)
+    if ws is None:
+        return None
+    frags = ws.load_fragments()
+    if not frags or not ws.original:
+        return None
+    vid = _video_identity(ws.original)
+    if vid is None:
+        return None
+    want = _task_hash(frags, vid["size"], vid["mtime_ns"])
+    with EXPORTS_LOCK:
+        state = EXPORTS.get(pair_id)
+    if state and state.get("state") == "done" and state.get("hash") == want:
+        return {"state": "done", "files": state["files"], "sig": state.get("sig")}
+    return _status_from_disk(pair_id, want)
+
+
+def _drop_previous_outputs(ws) -> None:
+    """Удаляет прежние наши нарезки перед новым прогоном (mismatch/force).
+
+    Только файлы из sidecar и нашего именного шаблона; чужие (keep.txt) целы.
+    """
+    out_dir = os.path.join(ws.path, "exports")
+    victims = set()
+    try:
+        with open(os.path.join(out_dir, _SIDECAR), encoding="utf-8") as f:
+            saved = json.load(f)
+        for filename in saved.get("files") or []:
+            victims.add(os.path.basename(filename))
+    except (OSError, ValueError):
+        pass
+    try:
+        for filename in os.listdir(out_dir):
+            if "_fragment_" in filename:
+                victims.add(filename)
+    except OSError:
+        return
+    for filename in victims:
+        try:
+            os.remove(os.path.join(out_dir, filename))
+        except OSError:
+            pass
+
+
+def _status_from_disk(pair_id: str, want: str):
     """Статус done из sidecar (после рестарта) или None.
 
-    Возвращает done, только если sidecar-сигнатура совпадает с текущими
-    границами фрагментов и все файлы на месте.
+    Возвращает done, только если sidecar-хеш совпал с нынешним состоянием
+    и все файлы на месте и ненулевые.
     """
     ws = get_workspace(pair_id)
     if ws is None:
@@ -387,8 +481,7 @@ def _status_from_disk(pair_id: str):
             saved = json.load(f)
     except (OSError, ValueError):
         return None
-    frags = ws.load_fragments()
-    if not frags or saved.get("sig") != _fragments_sig(frags):
+    if not saved.get("hash") or saved["hash"] != want:
         return None
     urls = []
     for i, filename in enumerate(saved.get("files") or [], 1):
@@ -406,7 +499,7 @@ def _status_from_disk(pair_id: str):
         })
     if not urls:
         return None
-    return {"state": "done", "files": urls, "sig": saved["sig"]}
+    return {"state": "done", "files": urls, "sig": saved.get("sig")}
 
 
 @require_GET

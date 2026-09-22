@@ -85,6 +85,17 @@ class WorkspaceApiTestBase(SimpleTestCase):
 
     def tearDown(self):
         import workspace
+        # Дожидаемся фона экспорта: иначе поток переживает rmtree и пишет
+        # чужой статус / читает удалённый каталог (флейк между тестами).
+        deadline = time.time() + 30
+        while True:
+            with EXPORTS_LOCK:
+                st = (EXPORTS.get(self.ws_id) or {}).get("state")
+            if st not in ("running", "cancelling"):
+                break
+            if time.time() > deadline:
+                break
+            time.sleep(0.05)
         settings.VC_WORKSPACE_ROOT = self._orig_root
         workspace.WORKSPACE_ROOT = self._orig_root
         _workspaces.clear()
@@ -297,7 +308,7 @@ class ExportApiTests(WorkspaceApiTestBase):
             def __init__(self, *a, **k):
                 pass
 
-            def extract_fragments(self, fragments, progress=None):
+            def extract_fragments(self, fragments, progress=None, cancelled=None):
                 while True:
                     if progress:
                         progress(1, len(fragments), fragments[0])
@@ -358,11 +369,14 @@ class ExportApiTests(WorkspaceApiTestBase):
         """Пустой EXPORTS (рестарт) не гонит экспорт заново: done из sidecar."""
         import vc_fragments.views as export_views
 
+        # Нейтральное имя (без маркера роли): source == preview == файл.
+        shutil.copy2(self.video, os.path.join(self.ws_dir, "video.mp4"))
+
         class FakeExporter:
             def __init__(self, src, out_dir, **k):
                 self.out_dir = out_dir
 
-            def extract_fragments(self, fragments, progress=None):
+            def extract_fragments(self, fragments, progress=None, cancelled=None):
                 created = []
                 for i, (s, e) in enumerate(fragments, 1):
                     if progress:
@@ -396,6 +410,170 @@ class ExportApiTests(WorkspaceApiTestBase):
         self.assertEqual(st2["state"], "done")
         self.assertEqual(st2["sig"], sig)
         self.assertEqual(len(st2["files"]), 2)
+
+    def _neutral_video(self):
+        """Копия видео нейтральным именем (source == preview == файл)."""
+        dst = os.path.join(self.ws_dir, "video.mp4")
+        if not os.path.isfile(dst):
+            shutil.copy2(self.video, dst)
+        return dst
+
+    def _write_sidecar(self, out_dir, frags, video_path, files, hash=None):
+        import vc_fragments.views as export_views
+
+        if hash is None:
+            st = os.stat(video_path)
+            hash = export_views._task_hash(frags, st.st_size, st.st_mtime_ns)
+        with open(os.path.join(out_dir, ".export-state.json"), "w") as f:
+            json.dump(
+                {"hash": hash,
+                 "sig": export_views._fragments_sig(frags),
+                 "files": files}, f)
+        return hash
+
+    def _frags(self):
+        return [{"start": 0, "end": 3}, {"start": 5, "end": 9}]
+
+    def test_post_returns_done_when_current(self):
+        """POST при актуальных файлах: сразу done, поток не стартует."""
+        import vc_fragments.views as export_views
+
+        video = self._neutral_video()
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        files = []
+        for i in (1, 2):
+            name = f"video_fragment_{i}.mp4"
+            with open(os.path.join(out_dir, name), "wb") as f:
+                f.write(b"fake")
+            files.append(name)
+        self._write_sidecar(out_dir, self._frags(), video, files)
+
+        resp = self.client.post(self.export_url)
+        body = resp.json()
+        self.assertEqual(body["state"], "done")
+        self.assertEqual(len(body["files"]), 2)
+        with export_views.EXPORTS_LOCK:
+            self.assertNotEqual(
+                export_views.EXPORTS.get(self.ws_id, {}).get("state"), "running")
+
+    def test_post_mismatch_cleans_and_reruns(self):
+        """Протухший sidecar: старые наши файлы сносятся, идёт полный прогон."""
+        import vc_fragments.views as export_views
+
+        video = self._neutral_video()
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        stale = os.path.join(out_dir, "video_fragment_9.mp4")
+        with open(stale, "wb") as f:
+            f.write(b"stale")
+        listed = os.path.join(out_dir, "old.mp4")
+        with open(listed, "wb") as f:
+            f.write(b"stale")
+        with open(os.path.join(out_dir, "keep.txt"), "w") as f:
+            f.write("чужой")
+        with open(os.path.join(out_dir, ".export-state.json"), "w") as f:
+            json.dump({"hash": "0" * 64, "sig": "[]", "files": ["old.mp4"]}, f)
+
+        class FakeExporter:
+            def __init__(self, src, out_dir, **k):
+                base, ext = os.path.splitext(os.path.basename(src))
+                self.out_dir = out_dir
+                self.base = base
+                self.ext = ext
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None):
+                created = []
+                for i, (s, e) in enumerate(fragments, 1):
+                    if progress:
+                        progress(i, len(fragments), (s, e))
+                    path = os.path.join(
+                        self.out_dir, f"{self.base}_fragment_{i}{self.ext}")
+                    with open(path, "wb") as f:
+                        f.write(b"fake")
+                    created.append(path)
+                return created
+
+        with mock.patch.object(export_views, "Exporter", FakeExporter):
+            resp = self.client.post(self.export_url)
+            self.assertEqual(resp.json()["state"], "running")
+            deadline = time.time() + 30
+            while True:
+                st = self.client.get(self.export_status_url).json()
+                if st["state"] == "done":
+                    break
+                self.assertNotEqual(st["state"], "error", st)
+                if time.time() > deadline:
+                    self.fail(f"export not done: {st}")
+                time.sleep(0.05)
+        self.assertFalse(os.path.exists(stale))
+        self.assertFalse(os.path.exists(listed))
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "video_fragment_1.mp4")))
+        self.assertTrue(os.path.isfile(os.path.join(out_dir, "keep.txt")))
+
+    def test_post_force_reruns(self):
+        """?force=1 при актуальных файлах: всё равно полный прогон."""
+        import vc_fragments.views as export_views
+
+        video = self._neutral_video()
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        files = []
+        for i in (1, 2):
+            name = f"video_fragment_{i}.mp4"
+            with open(os.path.join(out_dir, name), "wb") as f:
+                f.write(b"fake")
+            files.append(name)
+        self._write_sidecar(out_dir, self._frags(), video, files)
+
+        class FakeExporter:
+            def __init__(self, *a, **k):
+                pass
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None):
+                return []
+
+        with mock.patch.object(export_views, "Exporter", FakeExporter):
+            resp = self.client.post(self.export_url + "?force=1")
+            body = resp.json()
+            self.assertEqual(body["state"], "running")
+
+    def test_cancel_aborts_mid_fragment(self):
+        """Отмена срабатывает посреди фрагмента (секунды, не граница)."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import ExportCancelled
+
+        self._neutral_video()
+
+        class BlockingExporter:
+            def __init__(self, *a, **k):
+                pass
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None):
+                while True:
+                    if cancelled is not None and cancelled():
+                        raise ExportCancelled("cancelled in test")
+                    time.sleep(0.02)
+                return []
+
+        with mock.patch.object(export_views, "Exporter", BlockingExporter):
+            resp = self.client.post(self.export_url)
+            self.assertEqual(resp.json()["state"], "running")
+            t0 = time.time()
+            cancel = self.client.post(self.export_url + "/cancel")
+            self.assertEqual(cancel.json()["state"], "cancelling")
+            deadline = t0 + 15
+            while True:
+                st = self.client.get(self.export_status_url).json()
+                if st["state"] == "cancelled":
+                    break
+                self.assertNotEqual(st["state"], "error", st)
+                if time.time() > deadline:
+                    self.fail(f"cancel not instant: {st} "
+                              f"({time.time() - t0:.1f}s)")
+                time.sleep(0.05)
+            self.assertLess(time.time() - t0, 15)
 
     def test_exporter_nice_prefix(self):
         """Exporter подставляет nice-префикс только при заданном nice."""

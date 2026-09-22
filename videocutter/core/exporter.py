@@ -20,6 +20,10 @@ class FFmpegError(RuntimeError):
     """Возникает, когда FFmpeg завершился с ошибкой при экспорте фрагмента."""
 
 
+class ExportCancelled(RuntimeError):
+    """Отмена экспорта пользователем (в т.ч. посреди фрагмента)."""
+
+
 class Exporter:
     def __init__(
         self,
@@ -67,6 +71,8 @@ class Exporter:
             vf = f"{select},setpts=N/FRAME_RATE/TB"
         cmd = [
             "ffmpeg",
+            "-loglevel",
+            "error",
             "-i",
             self.source_video_file,
             "-y",
@@ -93,11 +99,14 @@ class Exporter:
         self,
         fragments: Sequence[Fragment],
         progress: Optional[Callable[[int, int, Fragment], None]] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
     ) -> List[str]:
         """Режет все фрагменты и возвращает список созданных файлов.
 
         :param fragments: список пар (start, end) индексов кадров.
         :param progress: callback(fragment_index (1-based), total, fragment).
+        :param cancelled: callback () -> bool; True — убить текущий ffmpeg
+            немедленно (не ждать границу фрагмента) и бросить ExportCancelled.
         :return: пути к созданным файлам.
         """
         if not shutil.which("ffmpeg"):
@@ -113,11 +122,39 @@ class Exporter:
                 progress(fragment_ind, total, (start, end))
 
             cmd = self.build_command(start, end, target_file)
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True)
+            try:
+                while proc.poll() is None:
+                    if cancelled is not None and cancelled():
+                        raise ExportCancelled(
+                            f"Экспорт отменён на фрагменте {fragment_ind}")
+                    try:
+                        proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                _, stderr = proc.communicate()
+            finally:
+                # Подбираем процесс при любом исходе (мёртвый — no-op).
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
+                try:
+                    if proc.stderr:
+                        proc.stderr.close()
+                except Exception:
+                    pass
+            if proc.returncode != 0:
                 raise FFmpegError(
                     f"FFmpeg не смог обработать фрагмент {fragment_ind} "
-                    f"(кадры {start}-{end}):\n{result.stderr[-2000:]}"
+                    f"(кадры {start}-{end}):\n{stderr[-2000:]}"
                 )
             created.append(target_file)
 
