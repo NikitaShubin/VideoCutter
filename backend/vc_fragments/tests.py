@@ -353,7 +353,8 @@ class ExportApiTests(WorkspaceApiTestBase):
             def __init__(self, *a, **k):
                 pass
 
-            def extract_fragments(self, fragments, progress=None, cancelled=None):
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
                 while True:
                     if progress:
                         progress(1, len(fragments), fragments[0])
@@ -417,20 +418,19 @@ class ExportApiTests(WorkspaceApiTestBase):
         # Нейтральное имя (без маркера роли): source == preview == файл.
         shutil.copy2(self.video, os.path.join(self.ws_dir, "video.mp4"))
 
-        class FakeExporter:
-            def __init__(self, src, out_dir, **k):
-                self.out_dir = out_dir
+        from videocutter.core.exporter import Exporter as RealExporter
 
-            def extract_fragments(self, fragments, progress=None, cancelled=None):
-                created = []
-                for i, (s, e) in enumerate(fragments, 1):
-                    if progress:
-                        progress(i, len(fragments), (s, e))
-                    path = os.path.join(self.out_dir, f"frag_{i}.mp4")
-                    with open(path, "wb") as f:
-                        f.write(b"fake")
-                    created.append(path)
-                return created
+        class FakeExporter:
+            """Делегирует настоящему (крошечный клип — быстро)."""
+
+            def __init__(self, src, out_dir, **k):
+                self.real = RealExporter(src, out_dir)
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                return self.real.extract_fragments(
+                    fragments, progress=progress, cancelled=cancelled,
+                    frame_ts_ranges=frame_ts_ranges)
 
         with mock.patch.object(export_views, "Exporter", FakeExporter):
             resp = self.client.post(self.export_url)
@@ -515,24 +515,19 @@ class ExportApiTests(WorkspaceApiTestBase):
         with open(os.path.join(out_dir, ".export-state.json"), "w") as f:
             json.dump({"hash": "0" * 64, "files": ["old.mp4"]}, f)
 
-        class FakeExporter:
-            def __init__(self, src, out_dir, **k):
-                base, ext = os.path.splitext(os.path.basename(src))
-                self.out_dir = out_dir
-                self.base = base
-                self.ext = ext
+        from videocutter.core.exporter import Exporter as RealExporter
 
-            def extract_fragments(self, fragments, progress=None, cancelled=None):
-                created = []
-                for i, (s, e) in enumerate(fragments, 1):
-                    if progress:
-                        progress(i, len(fragments), (s, e))
-                    path = os.path.join(
-                        self.out_dir, f"{self.base}_fragment_{i}{self.ext}")
-                    with open(path, "wb") as f:
-                        f.write(b"fake")
-                    created.append(path)
-                return created
+        class FakeExporter:
+            """Делегирует настоящему (крошечный клип — быстро)."""
+
+            def __init__(self, src, out_dir, **k):
+                self.real = RealExporter(src, out_dir)
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                return self.real.extract_fragments(
+                    fragments, progress=progress, cancelled=cancelled,
+                    frame_ts_ranges=frame_ts_ranges)
 
         with mock.patch.object(export_views, "Exporter", FakeExporter):
             resp = self.client.post(self.export_url)
@@ -567,12 +562,19 @@ class ExportApiTests(WorkspaceApiTestBase):
             files.append(name)
         self._write_sidecar(out_dir, self._frags(), video, files)
 
-        class FakeExporter:
-            def __init__(self, *a, **k):
-                pass
+        from videocutter.core.exporter import Exporter as RealExporter
 
-            def extract_fragments(self, fragments, progress=None, cancelled=None):
-                return []
+        class FakeExporter:
+            """Делегирует настоящему (крошечный клип — быстро)."""
+
+            def __init__(self, *a, **k):
+                self.real = RealExporter(*a, **k)
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                return self.real.extract_fragments(
+                    fragments, progress=progress, cancelled=cancelled,
+                    frame_ts_ranges=frame_ts_ranges)
 
         with mock.patch.object(export_views, "Exporter", FakeExporter):
             resp = self.client.post(self.export_url + "?force=1")
@@ -590,7 +592,8 @@ class ExportApiTests(WorkspaceApiTestBase):
             def __init__(self, *a, **k):
                 pass
 
-            def extract_fragments(self, fragments, progress=None, cancelled=None):
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
                 while True:
                     if cancelled is not None and cancelled():
                         raise ExportCancelled("cancelled in test")
@@ -638,6 +641,41 @@ class ExportApiTests(WorkspaceApiTestBase):
             )
         st = self.client.get(self.export_status_url).json()
         self.assertEqual(st["state"], "idle")
+
+    def test_verify_cut_rejects_garbage(self):
+        """Мусор вместо нарезки: ffprobe провал → FFmpegError, не silent."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        bad = os.path.join(self.ws_dir, "garbage.mp4")
+        with open(bad, "wb") as f:
+            f.write(b"not a video")
+        with self.assertRaises(FFmpegError):
+            export_views._verify_cut(self.video, 0, bad, 1)
+
+    def test_verify_cut_rejects_count_mismatch(self):
+        """Чужое число кадров: несовпадение счётчика → FFmpegError."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        with self.assertRaises(FFmpegError):
+            export_views._verify_cut(self.video, 0, self.video, 5)
+
+    def test_verify_cut_rejects_content_mismatch(self):
+        """Счётчик сошёлся, контент чужой: SSD выше порога → FFmpegError."""
+        import cv2
+        import numpy as np
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        other = os.path.join(self.ws_dir, "other.mp4")
+        vw = cv2.VideoWriter(
+            other, cv2.VideoWriter_fourcc(*"mp4v"), 10, (96, 96))
+        for _ in range(10):
+            vw.write(np.zeros((96, 96, 3), dtype=np.uint8))
+        vw.release()
+        with self.assertRaises(FFmpegError):
+            export_views._verify_cut(self.video, 0, other, 10)
 
 
 class SettingsApiTests(WorkspaceApiTestBase):

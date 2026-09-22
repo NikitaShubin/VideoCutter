@@ -49,26 +49,29 @@ class Exporter:
         self.tune = tune
         self.nice = nice
 
-    def build_command(self, start: int, end: int, target_file: str) -> List[str]:
+    def build_command(self, start: int, end: int, target_file: str,
+                      frame_ts_range=None) -> List[str]:
         """Собирает команду ffmpeg для вырезания кадров [start, end] (вкл.).
 
-        Индексы — в пространстве видимых (декодируемых) кадров источника:
-        ``select`` нумерует кадры, дошедшие до фильтра, а битые access unit
-        кадра не дают и номер не занимают — поэтому такие кадры пропускаются
-        сами, без дублей соседей и пустых вставок. ``mpdecimate`` по умолчанию
-        выключен: он выкидывает кадры и сдвигает нумерацию, ломая соответствие
-        индексов с превью.
-
-        При заданном ``nice`` команда запускается с пониженным приоритетом
-        (экспорт берёт только свободные CPU, интерактиву уступает).
+        Привязка — только к кадрам: ``start``/``end`` — индексы. Отбор идёт
+        по ``frame_ts_range`` (секунды из индекса — метки именно этих кадров):
+        неуязвим к сбоям счётчика ``n`` на аномальных файлах.
+        ``between`` инклюзивен: ровно end-start+1.
         """
         # Аргумент передаётся списком (subprocess), поэтому кавычки не нужны.
-        # select=between(n,start,end+1) — end+1 включается включительно в диапазон.
-        select = f"select=between(n\\,{start}\\,{end + 1})"
-        if self.remove_duplicates:
-            vf = f"mpdecimate,setpts=N/FRAME_RATE/TB,{select},setpts=PTS-STARTPTS"
+        # БЕЗ setpts: setpts=N/... съедает один кадр из выхлопа (доказано
+        # матрицей: 5 отобранных -> 4 в файле; без setpts — ровно). Метки
+        # непрерывны внутри диапазона, перенумерация не нужна; non-zero
+        # старт для mp4 штатен (avoid_negative_ts страхует).
+        if frame_ts_range is not None:
+            t0, t1 = frame_ts_range
+            select = f"select=between(t\\,{t0}\\,{t1})"
         else:
-            vf = f"{select},setpts=N/FRAME_RATE/TB"
+            select = f"select=between(n\\,{start}\\,{end})"
+        if self.remove_duplicates:
+            vf = f"mpdecimate,{select}"
+        else:
+            vf = select
         cmd = [
             "ffmpeg",
             "-loglevel",
@@ -81,6 +84,8 @@ class Exporter:
             "-vf",
             vf,
             "-an",
+            "-vsync",
+            "0",
             "-c:v",
             "libx264",
             "-preset",
@@ -100,6 +105,7 @@ class Exporter:
         fragments: Sequence[Fragment],
         progress: Optional[Callable[[int, int, Fragment], None]] = None,
         cancelled: Optional[Callable[[], bool]] = None,
+        frame_ts_ranges: Optional[Sequence[Optional[Tuple[float, float]]]] = None,
     ) -> List[str]:
         """Режет все фрагменты и возвращает список созданных файлов.
 
@@ -107,10 +113,15 @@ class Exporter:
         :param progress: callback(fragment_index (1-based), total, fragment).
         :param cancelled: callback () -> bool; True — убить текущий ffmpeg
             немедленно (не ждать границу фрагмента) и бросить ExportCancelled.
+        :param frame_ts_ranges: опционально диапазоны меток кадров
+            [(t0, t1), ...] параллельно fragments (None — отбор по счётчику n).
         :return: пути к созданным файлам.
         """
         if not shutil.which("ffmpeg"):
             raise FFmpegError("FFmpeg не найден в PATH")
+
+        if frame_ts_ranges is not None and len(frame_ts_ranges) != len(fragments):
+            raise FFmpegError("frame_ts_ranges не совпадает с fragments по длине")
 
         created: List[str] = []
         total = len(fragments)
@@ -121,7 +132,8 @@ class Exporter:
             if progress:
                 progress(fragment_ind, total, (start, end))
 
-            cmd = self.build_command(start, end, target_file)
+            frame_ts_range = frame_ts_ranges[fragment_ind - 1] if frame_ts_ranges is not None else None
+            cmd = self.build_command(start, end, target_file, frame_ts_range=frame_ts_range)
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 text=True)

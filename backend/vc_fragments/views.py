@@ -7,8 +7,11 @@
 import hashlib
 import json
 import os
+import subprocess
 import threading
 
+import cv2
+import numpy as np
 from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods
 
@@ -27,6 +30,11 @@ try:
     EXPORT_NICE = max(0, min(19, int(os.environ.get("VC_EXPORT_NICE", "19"))))
 except (TypeError, ValueError):
     EXPORT_NICE = 19
+
+# Порог сверки контента нарезки: средний квадрат разности даунскейла.
+# Своя (crf15) нарезка даёт доли единицы, чужой динамичный контент — тысячи;
+# почти статичный чужой контент неразличим по построению (и безвреден).
+VERIFY_SSD_MAX = float(os.environ.get("VC_EXPORT_VERIFY_SSD", "100"))
 
 
 # Прогресс экспортов в памяти процесса: workspace_id -> {"state": ...}.
@@ -54,6 +62,25 @@ def _video_identity(path: str):
     except OSError:
         return None
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+# Допуск границ frame_ts-диапазона (c): float-неточность представления меток.
+# На порядки меньше межкадрового интервала — соседние кадры не цепляет.
+_FRAME_TS_EPS = 0.0005
+
+
+def _frame_ts_bounds(vpts, start: int, end: int):
+    """Секундный диапазон для кадров [start, end]: [t0-eps, t1-next-eps).
+
+    Верхняя граница — следующий кадр минус eps (полуинтервал): кадр end
+    входит точно, следующий — никогда, независимо от float-округлений.
+    """
+    t0 = vpts[start] / 1e6 - _FRAME_TS_EPS
+    if end + 1 < len(vpts):
+        t1 = vpts[end + 1] / 1e6 - _FRAME_TS_EPS
+    else:
+        t1 = vpts[end] / 1e6 + _FRAME_TS_EPS
+    return (t0, t1)
 
 
 def _task_hash(frags, size: int, mtime_ns: int) -> str:
@@ -110,6 +137,66 @@ def _export_cancelled(ws_id: str, created_now: list[str]) -> None:
         EXPORT_CANCEL.discard(ws_id)
 
 
+def _ffprobe_frame_count(path: str):
+    """Число видеокадров файла (decode-подсчёт) или None."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-count_frames",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=nb_read_frames",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _frame_small_at(path: str, index: int):
+    """Кадр даунскейл-gray float32 (None — не декодируется)."""
+    cap = cv2.VideoCapture(path)
+    try:
+        if index > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+        ok, fr = cap.read()
+        if not ok or fr is None:
+            return None
+        g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(g, (64, 36),
+                         interpolation=cv2.INTER_AREA).astype(np.float32)
+    finally:
+        cap.release()
+
+
+def _verify_cut(src_path: str, start_index: int, cut_path: str,
+                expected_count: int) -> None:
+    """Проверка нарезки: счётчик кадров + контент первого кадра.
+
+    :raises FFmpegError: несовпадение — молчаливого успеха не будет.
+    """
+    actual = _ffprobe_frame_count(cut_path)
+    if actual is None:
+        raise FFmpegError(f"Не удалось посчитать кадры: {cut_path}")
+    if actual != expected_count:
+        raise FFmpegError(
+            f"Кадров в нарезке: {actual}, ожидалось: {expected_count} "
+            f"({cut_path})")
+    exp = _frame_small_at(src_path, start_index)
+    got = _frame_small_at(cut_path, 0)
+    if exp is None or got is None:
+        raise FFmpegError(f"Не декодируется кадр для сверки: {cut_path}")
+    d = exp - got
+    ssd = float((d * d).mean())
+    if ssd > VERIFY_SSD_MAX:
+        raise FFmpegError(
+            f"Контент не совпал (ssd={ssd:.1f} > {VERIFY_SSD_MAX}): "
+            f"{cut_path}")
+
+
 def _run_export(ws_id: str) -> None:
     """Выполняет нарезку фрагментов в фоне."""
     try:
@@ -130,6 +217,17 @@ def _run_export(ws_id: str) -> None:
         exporter = Exporter(ws.original, out_dir, nice=EXPORT_NICE)
         fragments = [(f["start"], f["end"]) for f in frags]
         total = len(fragments)
+
+        # Секундные диапазоны из индекса: отбор по t неуязвим к сбоям
+        # счётчика n на аномальных файлах; границы — точные метки кадров.
+        vpts = frame_provider.get_visible_pts(ws.original)
+        frame_ts_ranges = []
+        for (start, end) in fragments:
+            if not 0 <= start <= end < len(vpts):
+                raise FFmpegError(
+                    f"Фрагмент [{start}, {end}] вне диапазона "
+                    f"[0, {len(vpts)})")
+            frame_ts_ranges.append(_frame_ts_bounds(vpts, start, end))
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
             with EXPORTS_LOCK:
                 if ws_id in EXPORT_CANCEL:
@@ -145,7 +243,10 @@ def _run_export(ws_id: str) -> None:
                 return ws_id in EXPORT_CANCEL
 
         created = exporter.extract_fragments(
-            fragments, progress=progress, cancelled=cancelled)
+            fragments, progress=progress, cancelled=cancelled,
+            frame_ts_ranges=frame_ts_ranges)
+        for (start, end), path in zip(fragments, created):
+            _verify_cut(ws.original, start, path, end - start + 1)
         vid = _video_identity(ws.original)
         task_hash = _task_hash(frags, vid["size"], vid["mtime_ns"]) \
             if vid is not None else None
@@ -160,6 +261,17 @@ def _run_export(ws_id: str) -> None:
         created_now = [os.path.join(out_dir, name) for name in after - before]
         _export_cancelled(ws_id, created_now)
     except FFmpegError as e:
+        # Проваленный прогон не оставляет мусора: чистим созданное сейчас
+        # (как при отмене), чтобы следующий запуск начинался с чистого поля.
+        try:
+            after = set(os.listdir(out_dir))
+        except OSError:
+            after = set()
+        for name in after - before:
+            try:
+                os.remove(os.path.join(out_dir, name))
+            except OSError:
+                pass
         _export_failed(ws_id, str(e))
     except Exception as e:
         _export_failed(ws_id, str(e))
