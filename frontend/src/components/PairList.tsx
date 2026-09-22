@@ -413,14 +413,13 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
                   fragments={p.fragments}
                   position={p.position}
                 />
-                <span className="pair-label">
+                <span className="pair-label">{p.id}</span>
+                <span className="pair-meta">
                   {p.source_name}
                   {p.preview_name && p.preview_name !== p.source_name
                     ? ` → ${p.preview_name}`
                     : ""}
-                </span>
-                <span className="pair-meta">
-                  {p.total_frames} кадров · {p.width}×{p.height}
+                  {` · ${p.total_frames} кадров · ${p.width}×${p.height}`}
                 </span>
                 {p.pair_warning && (
                   <span className="pair-warn" title={p.pair_warning}>
