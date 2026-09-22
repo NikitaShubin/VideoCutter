@@ -111,12 +111,28 @@ class WorkspaceListTests(WorkspaceApiTestBase):
 
     def test_list_item_has_preview_data(self):
         """Элемент списка несёт фрагменты/позицию/время правки — для превью."""
-        resp = self.client.get(self.ws_list_url)
-        item = next(w for w in resp.json() if w["id"] == self.ws_id)
+        import task_meta
+
+        task_meta.save(self.ws_dir, task_meta.init_new())
+        deadline = time.time() + 15
+        while True:
+            resp = self.client.get(self.ws_list_url)
+            item = next(w for w in resp.json() if w["id"] == self.ws_id)
+            if not item["indexing"]:
+                break
+            if time.time() > deadline:
+                self.fail("background index never finished")
+            time.sleep(0.05)
         self.assertEqual(len(item["fragments"]), 2)
         self.assertEqual(item["position"], 0)
         self.assertTrue(isinstance(item["updated_at"], (int, float)))
         self.assertGreater(item["updated_at"], 0)
+        # Даты и бейдж экспорта — всегда в записи.
+        self.assertTrue(item["created_at"])
+        self.assertIsNone(item["last_opened_at"])
+        self.assertFalse(item["indexing"])
+        self.assertFalse(item["broken"])
+        self.assertIsNone(item["export"])
 
     def test_list_sorted_by_updated_at_desc(self):
         """Свежие правки (mtime fragments.tsv) — вверху списка."""
@@ -155,6 +171,35 @@ class WorkspaceListTests(WorkspaceApiTestBase):
     def test_detail_404_for_missing(self):
         resp = self.client.get("/api/v1/workspaces/nonexistent/")
         self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_detail_stamps_opened(self):
+        """GET detail штампует открытие; без паспорта created_at пуст."""
+        import task_meta
+
+        body = self.client.get(self.ws_detail_url).json()
+        self.assertTrue(body["last_opened_at"])
+        meta = task_meta.load(self.ws_dir)
+        self.assertIsNone(meta["created_at"])
+        self.assertEqual(meta["last_opened_at"], body["last_opened_at"])
+        body2 = self.client.get(self.ws_detail_url).json()
+        self.assertGreaterEqual(
+            body2["last_opened_at"], body["last_opened_at"])
+
+    def test_list_shows_export_badge(self):
+        """Бегущий экспорт виден в записи списка."""
+        from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+
+        with EXPORTS_LOCK:
+            EXPORTS[self.ws_id] = {"state": "running", "index": 2, "total": 5}
+        try:
+            resp = self.client.get(self.ws_list_url)
+            item = next(w for w in resp.json() if w["id"] == self.ws_id)
+            self.assertEqual(item["export"]["state"], "running")
+            self.assertEqual(item["export"]["index"], 2)
+            self.assertEqual(item["export"]["total"], 5)
+        finally:
+            with EXPORTS_LOCK:
+                EXPORTS.pop(self.ws_id, None)
 
     def test_meta(self):
         resp = self.client.get(self.ws_meta_url)
@@ -400,7 +445,6 @@ class ExportApiTests(WorkspaceApiTestBase):
                     self.fail(f"export not done: {st}")
                 time.sleep(0.05)
             self.assertTrue(st["files"])
-            sig = st["sig"]
 
         # Симулируем рестарт: память пуста, файлы и sidecar на месте.
         with EXPORTS_LOCK:
@@ -408,7 +452,6 @@ class ExportApiTests(WorkspaceApiTestBase):
             EXPORT_CANCEL.clear()
         st2 = self.client.get(self.export_status_url).json()
         self.assertEqual(st2["state"], "done")
-        self.assertEqual(st2["sig"], sig)
         self.assertEqual(len(st2["files"]), 2)
 
     def _neutral_video(self):
@@ -425,10 +468,7 @@ class ExportApiTests(WorkspaceApiTestBase):
             st = os.stat(video_path)
             hash = export_views._task_hash(frags, st.st_size, st.st_mtime_ns)
         with open(os.path.join(out_dir, ".export-state.json"), "w") as f:
-            json.dump(
-                {"hash": hash,
-                 "sig": export_views._fragments_sig(frags),
-                 "files": files}, f)
+            json.dump({"hash": hash, "files": files}, f)
         return hash
 
     def _frags(self):
@@ -473,7 +513,7 @@ class ExportApiTests(WorkspaceApiTestBase):
         with open(os.path.join(out_dir, "keep.txt"), "w") as f:
             f.write("чужой")
         with open(os.path.join(out_dir, ".export-state.json"), "w") as f:
-            json.dump({"hash": "0" * 64, "sig": "[]", "files": ["old.mp4"]}, f)
+            json.dump({"hash": "0" * 64, "files": ["old.mp4"]}, f)
 
         class FakeExporter:
             def __init__(self, src, out_dir, **k):

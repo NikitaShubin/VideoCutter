@@ -8,10 +8,9 @@ Workspace автономного режима — это папка с виде�
 
 Роли видео (как в десктопном PyVideoCutter: ``preview`` — что показывает
 пользователя, ``source`` — из чего вырезаются фрагменты) кодируются **в имени
-файла**. Новым файлам сервис выдаёт унифицированные ролевые имена:
-``source.<ext>`` / ``preview.<ext>`` (оригинальное имя уходит в имя workspace);
-старые суффиксные имена (``<base>_source``/``<base>_preview``) по-прежнему
-читаются сканером. Одиночный файл без маркера роли — «нейтральный»: он играет
+файла**. Файлам сервис выдаёт унифицированные ролевые имена:
+``source.<ext>`` / ``preview.<ext>`` (оригинальное имя уходит в имя workspace).
+Одиночный файл без маркера роли — «нейтральный»: он играет
 обе роли сразу (source = preview).
 """
 
@@ -38,8 +37,6 @@ _NAME_RE = re.compile(r"^[^/\\\x00-\x1f]+$")
 
 # Роли видео и их маркеры в имени файла.
 ROLES = ("source", "preview")
-_EXACT_ROLE_SUFFIXES = {"_source": "source", "_preview": "preview"}
-_LEGACY_PREVIEW_SUFFIXES = ("_viz", "_visualization", "_vis")
 
 # Не-видео расширение для временных файлов загрузки/свапа (сканер их игнорирует).
 _TMP_SUFFIX = ".part"
@@ -85,33 +82,24 @@ def _ext_ok(filename: str) -> bool:
 def _exact_role(filename: str) -> Optional[str]:
     """Точная роль видео по имени файла: 'source' | 'preview' | None.
 
-    Распознаются унифицированные имена (``source.mp4``/``preview.mp4``) и
-    суффиксный вариант старого формата (``<base>_source``/``<base>_preview``).
+    Распознаются только унифицированные имена (``source.mp4``/``preview.mp4``).
     """
     stem = os.path.splitext(filename)[0].lower()
     if stem == "source" or stem == "preview":
         return stem
-    return _EXACT_ROLE_SUFFIXES.get(
-        next((s for s in _EXACT_ROLE_SUFFIXES if stem.endswith(s)), ""))
+    return None
 
 
 def role_of_name(filename: str) -> Optional[str]:
     """Точная роль, закодированная в имени файла ('source'|'preview'), или None."""
     return _exact_role(filename)
 
-def _is_legacy_viz(filename: str) -> bool:
-    """Файл со старым маркером превью (_viz/_visualization/_vis)."""
-    stem = os.path.splitext(filename)[0].lower()
-    return stem.endswith(_LEGACY_PREVIEW_SUFFIXES)
-
 
 def role_filename(filename: str, role: str) -> str:
     """Имя файла роли: ``<role>.<ext>`` — унифицированные имена source/preview.
 
     Идентичность файла определяет его роль, а не исходное имя: загруженные
-    ``6.avi`` и ``6_preview.mp4`` сохраняются как ``source.avi`` и
-    ``preview.mp4``. Суффиксный вариант старого формата на диске читается,
-    но новые файлы пишутся с ролевым именем.
+    ``6.avi`` и ``clip.mp4`` сохраняются как ``source.avi`` и ``preview.mp4``.
     """
     if role not in ROLES:
         raise InvalidWorkspaceError(f"Неизвестная роль: {role!r}")
@@ -122,11 +110,9 @@ def classify_videos(root: str, name: str) -> dict:
     """Разделяет видеофайлы workspace на source/preview/unassigned.
 
     Приоритет:
-      1. Точные маркеры ролей ``_source``/``_preview``;
-      2. legacy-маркеры превью (``_viz`` и др.) — только если превью не задано
-         маркером (обратная совместимость со старыми flat-workspaces);
-      3. одиночный «нейтральный» файл без маркера играет обе роли;
-      4. пара нейтральных файлов: первый — source-кандидат (и обе роли ему),
+      1. Точные маркеры ролей (``source``/``preview``);
+      2. одиночный «нейтральный» файл без маркера играет обе роли;
+      3. пара нейтральных файлов: первый — source-кандидат (и обе роли ему),
          остальные нейтральные — в ``unassigned``.
 
     Возвращает ``{"source": path|None, "preview": path|None, "unassigned": [..]}``
@@ -138,7 +124,6 @@ def classify_videos(root: str, name: str) -> dict:
     )
 
     exact_source = exact_preview = None
-    viz: list = []
     plain: list = []
     for p in vfiles:
         base = os.path.basename(p)
@@ -147,16 +132,10 @@ def classify_videos(root: str, name: str) -> dict:
             exact_source = exact_source or p
         elif r == "preview":
             exact_preview = exact_preview or p
-        elif _is_legacy_viz(base):
-            viz.append(p)
         else:
             plain.append(p)
 
     source, preview = exact_source, exact_preview
-
-    # Превью из legacy-маркера (если ещё не назначено точно).
-    if preview is None and viz:
-        preview = viz[0]
 
     # Источник: предпочитаем нейтральный файл; иначе — само превью.
     if source is None:
@@ -266,8 +245,8 @@ def write_stream(stream: BinaryIO, path: str) -> None:
 def promote_plain_video(root: str, name: str, role: str) -> Optional[str]:
     """Даёт роль ранее «нейтральному» (неразмеченному) видеофайлу.
 
-    Переименовывает первый нейтральный (без маркера роли и без legacy-маркера)
-    видеофайл в ``<base>_<role>.<ext>``. Возвращает новый путь или None,
+    Переименовывает первый нейтральный (без маркера роли) видеофайл
+    в ``<role>.<ext>``. Возвращает новый путь или None,
     если нейтрального видео нет.
     """
     if role not in ROLES:
@@ -277,7 +256,7 @@ def promote_plain_video(root: str, name: str, role: str) -> Optional[str]:
         full = os.path.join(d, f)
         if not os.path.isfile(full) or not _ext_ok(f):
             continue
-        if _exact_role(f) is not None or _is_legacy_viz(f):
+        if _exact_role(f) is not None:
             continue
         final = os.path.join(d, role_filename(f, role))
         os.replace(full, final)
@@ -294,7 +273,7 @@ def commit_role_upload(
 ) -> str:
     """Атомарно вносит загруженный (уже провалидированный) файл под роль.
 
-    Перемещает ``tmp_path`` в ``<base>_<role>.<ext>`` и удаляет прежний файл
+    Перемещает ``tmp_path`` в ``<role>.<ext>`` и удаляет прежний файл
     этой роли (если его имя отличается от нового).
     """
     if role not in ROLES:
@@ -321,7 +300,7 @@ def assign_role_file(root: str, name: str, role: str, filename: str) -> str:
     """Назначает роль существующему «неразмеченному» видеофайлу.
 
     ``filename`` — имя нейтрального/unassigned видеофайла (без маркера роли).
-    Переименовывает его в ``<base>_<role>.<ext>``, возвращает новый путь.
+    Переименовывает его в ``<role>.<ext>``, возвращает новый путь.
     Роль нельзя назначить, если этот файл уже размечен, либо она уже занята
     другим файлом.
     """
@@ -333,7 +312,7 @@ def assign_role_file(root: str, name: str, role: str, filename: str) -> str:
     src = os.path.join(d, filename)
     if not os.path.isfile(src) or not _ext_ok(filename):
         raise InvalidWorkspaceError(f"Видеофайл {filename!r} не найден")
-    if _exact_role(filename) is not None or _is_legacy_viz(filename):
+    if _exact_role(filename) is not None:
         raise InvalidWorkspaceError(f"Файл {filename!r} уже размечен ролью")
 
     old = _found_role_path(d, role)

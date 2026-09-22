@@ -170,8 +170,7 @@ def _cache_load(path: str, size, mtime_ns):
         with open(os.path.join(_FRAME_CACHE_DIR, _cache_key(path)),
                   "r", encoding="utf-8") as f:
             data = json.load(f)
-        if (data.get("v") != 1
-                or data.get("path") != os.path.abspath(path)
+        if (data.get("path") != os.path.abspath(path)
                 or data.get("size") != size
                 or data.get("mtime_ns") != mtime_ns):
             return None
@@ -191,7 +190,6 @@ def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us) -> None
         cp = os.path.join(_FRAME_CACHE_DIR, _cache_key(path))
         with open(cp + ".tmp", "w", encoding="utf-8") as f:
             json.dump({
-                "v": 1,
                 "path": os.path.abspath(path),
                 "size": size,
                 "mtime_ns": mtime_ns,

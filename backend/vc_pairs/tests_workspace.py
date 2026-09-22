@@ -134,7 +134,7 @@ class RoleApiTests(WorkspaceApiTestBase):
         self.assertEqual(resp.status_code, HTTP_CREATED)
         ws_dir = os.path.join(self._tmpdir, "unif")
         files = sorted(os.listdir(ws_dir))
-        self.assertEqual(files, ["preview.mp4", "source.avi"])
+        self.assertEqual(files, ["preview.mp4", "source.avi", "task.json"])
         body = self.client.get("/api/v1/workspaces/unif/").json()
         self.assertEqual(body["source_name"], "source.avi")
         self.assertEqual(body["preview_name"], "preview.mp4")

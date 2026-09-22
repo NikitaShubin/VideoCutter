@@ -55,9 +55,6 @@ export function CutEditor({ pairId, onBack }: Props) {
   // (exporting нет в deps эффекта), а повторный запуск/отмена идут через E.
   const exportingRef = useRef(false);
   const pollTimerRef = useRef<number | null>(null);
-  // Сигнатура последнего удачного экспорта [[start,end],...] — повтор без
-  // изменений пропускается.
-  const lastExportSigRef = useRef<string | null>(null);
 
   const modelRef = useRef<FragmentModel | null>(null);
   if (!modelRef.current) modelRef.current = new FragmentModel(0);
@@ -649,11 +646,6 @@ export function CutEditor({ pairId, onBack }: Props) {
     setExportProgress(null);
   };
 
-  // Сигнатура границ [[start,end],...] — комментарии на выхлоп не влияют
-  // (сервер режет только по границам), формат 1-в-1 с серверным.
-  const fragmentsSig = () =>
-    JSON.stringify((modelRef.current?.getFragments() ?? []).map((f) => [f.start, f.end]));
-
   const startPolling = () => {
     stopPolling();
     pollTimerRef.current = window.setInterval(async () => {
@@ -671,7 +663,6 @@ export function CutEditor({ pairId, onBack }: Props) {
       } else if (st.state === "done") {
         finishExportUi();
         setExportItems(st.files ?? []);
-        lastExportSigRef.current = st.sig ?? fragmentsSig();
         flash(`Экспортировано фрагментов: ${st.files?.length ?? 0}`);
       } else if (st.state === "cancelled") {
         finishExportUi();
@@ -687,7 +678,7 @@ export function CutEditor({ pairId, onBack }: Props) {
     }, 500);
   };
 
-  const handleExport = async () => {
+  const handleExport = async (force = false) => {
     // Повтор во время экспорта — отмена, а не второй запуск (кнопка и E
     // работают как переключатель).
     if (exportingRef.current) {
@@ -698,17 +689,19 @@ export function CutEditor({ pairId, onBack }: Props) {
       }
       return;
     }
-    const sig = fragmentsSig();
-    if (lastExportSigRef.current !== null && lastExportSigRef.current === sig) {
-      flash("Экспорт актуален, изменений нет");
-      return;
-    }
     setExportingUi(true);
     setExportProgress(0);
     startPolling();
     try {
-      const st = await startExport(pairId);
-      if (st.state !== "running") {
+      // Актуальность решает сервер по хешу (границы+видео): совпал — сразу
+      // done с файлами, иначе прогон. Локальных сравнений больше нет.
+      const st = await startExport(pairId, force);
+      if (st.state === "done") {
+        // Нарезки актуальны — сервер отдал готовые без прогона.
+        setExportItems(st.files ?? []);
+        flash(`Нарезки актуальны, файлов: ${st.files?.length ?? 0}`);
+        finishExportUi();
+      } else if (st.state !== "running") {
         finishExportUi();
         if (st.state === "error") flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
         else flash("Экспорт не запущен");
@@ -733,7 +726,6 @@ export function CutEditor({ pairId, onBack }: Props) {
           startPolling();
         } else if (st.state === "done") {
           setExportItems(st.files ?? []);
-          lastExportSigRef.current = st.sig ?? null;
         } else if (st.state === "error") {
           flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
         }
@@ -834,6 +826,15 @@ export function CutEditor({ pairId, onBack }: Props) {
                 : "Экспорт (E)"}
             </span>
           </button>
+          {exportItems !== null && exportItems.length > 0 && !exporting && (
+            <button
+              className="toolbar-help"
+              onClick={() => handleExport(true)}
+              title="Перегнать заново (игнорировать готовые)"
+            >
+              ⟳
+            </button>
+          )}
           <button
             className="toolbar-help"
             onClick={() => setHelpOpen(true)}

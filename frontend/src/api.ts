@@ -239,10 +239,9 @@ export function savePosition(
   }).then((r) => json<{ position: number }>(r));
 }
 
-export function startExport(pairId: string): Promise<ExportStatus> {
-  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export`, { method: "POST" }).then((r) =>
-    json<ExportStatus>(r),
-  );
+export function startExport(pairId: string, force = false): Promise<ExportStatus> {
+  const url = `${BASE}/pairs/${encodeURIComponent(pairId)}/export${force ? "?force=1" : ""}`;
+  return fetch(url, { method: "POST" }).then((r) => json<ExportStatus>(r));
 }
 
 export function getExportStatus(pairId: string): Promise<ExportStatus> {

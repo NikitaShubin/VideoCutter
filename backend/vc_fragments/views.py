@@ -47,12 +47,6 @@ class _ExportCancelled(Exception):
 _SIDECAR = ".export-state.json"
 
 
-def _fragments_sig(frags) -> str:
-    """Сигнатура границ [[start,end],...] — формат 1-в-1 с клиентом."""
-    return json.dumps([[f["start"], f["end"]] for f in frags],
-                      separators=(",", ":"))
-
-
 def _video_identity(path: str):
     """Идентичность видео {size, mtime_ns} (None — файла нет)."""
     try:
@@ -74,8 +68,7 @@ def _task_hash(frags, size: int, mtime_ns: int) -> str:
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
-def _export_finished_ok(ws_id: str, created: list[str], sig: str,
-                         task_hash) -> None:
+def _export_finished_ok(ws_id: str, created: list[str], task_hash) -> None:
     urls = []
     for i, path in enumerate(created, 1):
         filename = os.path.basename(path)
@@ -85,8 +78,7 @@ def _export_finished_ok(ws_id: str, created: list[str], sig: str,
             "url": f"/api/v1/pairs/{ws_id}/export/{filename}",
         })
     with EXPORTS_LOCK:
-        EXPORTS[ws_id] = {"state": "done", "files": urls, "sig": sig,
-                          "hash": task_hash}
+        EXPORTS[ws_id] = {"state": "done", "files": urls, "hash": task_hash}
     # Sidecar для восстановления статуса после рестарта (имена файлов без
     # ws_id — переименование задачи его не инвалидирует).
     if created:
@@ -95,7 +87,6 @@ def _export_finished_ok(ws_id: str, created: list[str], sig: str,
                       "w", encoding="utf-8") as f:
                 json.dump({
                     "hash": task_hash,
-                    "sig": sig,
                     "files": [os.path.basename(p) for p in created],
                 }, f)
         except OSError:
@@ -155,11 +146,10 @@ def _run_export(ws_id: str) -> None:
 
         created = exporter.extract_fragments(
             fragments, progress=progress, cancelled=cancelled)
-        sig = _fragments_sig(frags)
         vid = _video_identity(ws.original)
         task_hash = _task_hash(frags, vid["size"], vid["mtime_ns"]) \
             if vid is not None else None
-        _export_finished_ok(ws_id, created, sig, task_hash)
+        _export_finished_ok(ws_id, created, task_hash)
     except (_ExportCancelled, ExportCancelled):
         # Файлы, появившиеся за этот запуск (готовые фрагменты валидны,
         # но пользователь просил зачистку) — удаляем по снапшоту каталога.
@@ -435,7 +425,7 @@ def _current_done(pair_id: str):
     with EXPORTS_LOCK:
         state = EXPORTS.get(pair_id)
     if state and state.get("state") == "done" and state.get("hash") == want:
-        return {"state": "done", "files": state["files"], "sig": state.get("sig")}
+        return {"state": "done", "files": state["files"]}
     return _status_from_disk(pair_id, want)
 
 
@@ -499,7 +489,7 @@ def _status_from_disk(pair_id: str, want: str):
         })
     if not urls:
         return None
-    return {"state": "done", "files": urls, "sig": saved.get("sig")}
+    return {"state": "done", "files": urls}
 
 
 @require_GET

@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 TASK_FILE = "task.json"
-SCHEMA_VERSION = 1
 
 STATUSES = ("new", "in_progress", "completed", "rejected")
 STAGES = ("annotation", "validation", "acceptance")
@@ -28,17 +27,22 @@ SUBSETS = ("train", "val", "test", None)
 def defaults() -> Dict[str, Any]:
     """Пустые метаданные (эквивалент отсутствующего task.json)."""
     return {
-        "v": SCHEMA_VERSION,
         "owner": None,
         "assignees": [],
         "status": "new",
         "stage": "annotation",
         "created_at": None,
+        "last_opened_at": None,
         "status_changed_at": None,
         "status_changed_by": None,
         "notes": "",
         "subset": None,
     }
+
+
+def now_iso() -> str:
+    """Сейчас в ISO8601 UTC (штампы открытия)."""
+    return _now_iso()
 
 
 def _now_iso() -> str:
@@ -65,7 +69,6 @@ def validate(meta: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"Недопустимый subset: {out.get('subset')!r}")
     base = defaults()
     base.update(out)
-    base["v"] = SCHEMA_VERSION
     base["assignees"] = _as_str_list(base.get("assignees"))
     if base.get("notes") is None:
         base["notes"] = ""

@@ -15,6 +15,7 @@ import time
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
+import task_meta
 import workspace as ws_module
 from videocutter.standalone import workspace as ws_fs
 from vc_pairs import frame_provider
@@ -29,6 +30,19 @@ from workspace import (
 
 def _ws_404(name: str) -> JsonResponse:
     return JsonResponse({"error": f"Workspace '{name}' не найден"}, status=404)
+
+
+def _stamp_opened(name: str) -> None:
+    """Штамп последнего открытия редактора."""
+    ws = get_workspace(name)
+    if ws is None:
+        return
+    try:
+        meta = task_meta.load(ws.path)
+        meta["last_opened_at"] = task_meta.now_iso()
+        task_meta.save(ws.path, meta)
+    except Exception:  # noqa: BLE001 — штамп не роняет detail
+        pass
 
 
 # Удаление: попыток и пауза между ними (FUSE + открытые хендлы).
@@ -48,6 +62,7 @@ def workspace_list(request):
 def workspace_detail(request, workspace_id: str):
     """GET — detail workspace; PATCH — переименовать; DELETE — безвозвратно удалить."""
     if request.method == "GET":
+        _stamp_opened(workspace_id)
         data = get_workspace_detail(workspace_id)
         if data is None:
             return _ws_404(workspace_id)
@@ -121,6 +136,12 @@ def _workspace_upload(request) -> JsonResponse:
         ws_fs.delete_workspace(ws_module.WORKSPACE_ROOT, name)
         scan_workspaces()
         return JsonResponse({"error": f"Не удалось прочитать видео: {e}"}, status=400)
+
+    # Паспорт задачи: создание — единственное место рождения created_at.
+    try:
+        task_meta.save(ws.path, task_meta.init_new())
+    except Exception:  # noqa: BLE001 — паспорт не роняет создание
+        pass
 
     entry = next((w for w in list_workspaces() if w["id"] == name), None)
     return JsonResponse(entry or {"id": name}, status=201)

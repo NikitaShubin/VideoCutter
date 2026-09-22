@@ -22,6 +22,41 @@ function fileStem(filename: string): string {
   return filename.replace(/\.[^.]+$/, "");
 }
 
+type SortMode = "updated" | "created" | "opened" | "name";
+
+const SORT_KEY = "vc-sort";
+
+function readSortMode(): SortMode {
+  try {
+    const v = window.localStorage.getItem(SORT_KEY);
+    if (v === "created" || v === "opened" || v === "name" || v === "updated") return v;
+  } catch {
+    /* ignore */
+  }
+  return "updated";
+}
+
+function timeKey(s: string | null): number {
+  if (!s) return Number.NEGATIVE_INFINITY;
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+}
+
+function sortPairs(pairs: VideoPair[], mode: SortMode): VideoPair[] {
+  const arr = [...pairs];
+  switch (mode) {
+    case "name":
+      return arr.sort((a, b) => a.id.localeCompare(b.id, "ru"));
+    case "created":
+      return arr.sort((a, b) => timeKey(b.created_at) - timeKey(a.created_at));
+    case "opened":
+      return arr.sort((a, b) => timeKey(b.last_opened_at) - timeKey(a.last_opened_at));
+    case "updated":
+    default:
+      return arr.sort((a, b) => b.updated_at - a.updated_at);
+  }
+}
+
 export function PairList({ pairs, onSelect, onChanged }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -40,10 +75,22 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
 
   const firstFile = source ?? preview;
 
-  // Пока есть индексирующиеся задачи — опрашиваем список (индекс строится
-  // в фоне на сервере). Опрос прекращается, когда indexing гаснет у всех.
+  const [sortMode, setSortMode] = useState<SortMode>(readSortMode);
+  const visible = pairs === null ? null : sortPairs(pairs, sortMode);
+
+  // Пока есть индексирующиеся задачи или бегущий экспорт — опрашиваем
+  // список (фон сервера). Опрос прекращается, когда всё тихо.
   useEffect(() => {
-    if (!pairs || !pairs.some((p) => p.indexing)) return;
+    if (
+      !pairs ||
+      !pairs.some(
+        (p) =>
+          p.indexing ||
+          p.export?.state === "running" ||
+          p.export?.state === "cancelling",
+      )
+    )
+      return;
     const id = window.setInterval(onChanged, 2000);
     return () => window.clearInterval(id);
   }, [pairs, onChanged]);
@@ -321,7 +368,27 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
   return (
     <div className="pair-list">
       <div className="pair-list-head">
-        <h2>Рабочие пространства</h2>
+        <h2>Задачи</h2>
+        <label className="sort-label">
+          Сортировка{" "}
+          <select
+            value={sortMode}
+            onChange={(e) => {
+              const v = e.target.value as SortMode;
+              setSortMode(v);
+              try {
+                window.localStorage.setItem(SORT_KEY, v);
+              } catch {
+                /* ignore */
+              }
+            }}
+          >
+            <option value="updated">Недавние</option>
+            <option value="created">Новые</option>
+            <option value="opened">Открытые</option>
+            <option value="name">По имени</option>
+          </select>
+        </label>
         <button
           className="add-btn"
           onClick={() => (showForm ? reset() : setShowForm(true))}
@@ -385,10 +452,10 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
 
       <ul>
         {pairs === null && <li className="loading">Загрузка списка…</li>}
-        {pairs !== null && pairs.length === 0 && (
-          <li className="empty">Пока нет workspace-ов.</li>
+        {visible !== null && visible.length === 0 && (
+          <li className="empty">Пока нет задач.</li>
         )}
-        {(pairs ?? []).map((p) =>
+        {(visible ?? []).map((p) =>
           p.broken ? (
             <li key={p.id} className="broken">
               <div className="pair-row">
@@ -430,6 +497,30 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
                 {p.pair_warning && (
                   <span className="pair-warn" title={p.pair_warning}>
                     ⚠ {p.pair_warning}
+                  </span>
+                )}
+                {p.export?.state === "running" && (
+                  <span className="pair-warn" title="Экспорт выполняется">
+                    ⏳ экспорт {p.export.index}/{p.export.total}
+                  </span>
+                )}
+                {p.export?.state === "cancelling" && (
+                  <span className="pair-warn">⏳ отмена экспорта…</span>
+                )}
+                {p.export?.state === "done" && (
+                  <span
+                    className="pair-warn"
+                    title="Нарезки готовы — откройте задачу"
+                  >
+                    ✓ нарезки готовы
+                  </span>
+                )}
+                {p.export?.state === "error" && (
+                  <span
+                    className="pair-warn"
+                    title={p.export.error || "Ошибка экспорта"}
+                  >
+                    ⚠ ошибка экспорта
                   </span>
                 )}
               </button>

@@ -33,20 +33,22 @@ class VideoRolesFSTests(SimpleTestCase):
     # ── classify ────────────────────────────────────────────────────────────
 
     def test_classify_exact_pair(self):
-        self._write("a_source.mp4")
-        self._write("b_preview.mp4")
+        self._write("source.mp4")
+        self._write("preview.mp4")
         got = ws_fs.classify_videos(self.root, "ws")
-        self.assertEqual(os.path.basename(got["source"]), "a_source.mp4")
-        self.assertEqual(os.path.basename(got["preview"]), "b_preview.mp4")
+        self.assertEqual(os.path.basename(got["source"]), "source.mp4")
+        self.assertEqual(os.path.basename(got["preview"]), "preview.mp4")
         self.assertEqual([os.path.basename(p) for p in got["unassigned"]], [])
 
-    def test_classify_legacy_viz(self):
-        """Старые flat-workspaces с _viz остаются совместимыми."""
+    def test_classify_suffixed_names_are_neutral(self):
+        """Суффиксы (_source/_preview/_viz) ролей не задают: файлы нейтральны."""
         self._write("clip.mp4")
         self._write("clip_viz.mp4")
         got = ws_fs.classify_videos(self.root, "ws")
         self.assertEqual(os.path.basename(got["source"]), "clip.mp4")
-        self.assertEqual(os.path.basename(got["preview"]), "clip_viz.mp4")
+        self.assertEqual(os.path.basename(got["preview"]), "clip.mp4")
+        self.assertEqual(
+            [os.path.basename(p) for p in got["unassigned"]], ["clip_viz.mp4"])
 
     def test_classify_single_neutral_acts_as_both(self):
         self._write("alone.mp4")
@@ -66,22 +68,22 @@ class VideoRolesFSTests(SimpleTestCase):
     def test_classify_exact_preview_with_neutral_source(self):
         """Превью задано маркером, нейтральный файл — источник (случай add)."""
         self._write("a.mp4")
-        self._write("a_preview.mp4")
+        self._write("preview.mp4")
         got = ws_fs.classify_videos(self.root, "ws")
         self.assertEqual(os.path.basename(got["source"]), "a.mp4")
-        self.assertEqual(os.path.basename(got["preview"]), "a_preview.mp4")
+        self.assertEqual(os.path.basename(got["preview"]), "preview.mp4")
 
     # ── role_filename ───────────────────────────────────────────────────────
 
     def test_role_filename_unified(self):
         """Новые файлы получают ролевые имена source/preview (имя файла = роль)."""
         self.assertEqual(ws_fs.role_filename("6.avi", "source"), "source.avi")
-        self.assertEqual(ws_fs.role_filename("6_preview.mp4", "preview"), "preview.mp4")
-        self.assertEqual(ws_fs.role_filename("video_source.mp4", "source"), "source.mp4")
-        # Сканер читает и унифицированные, и старые суффиксные имена.
+        self.assertEqual(ws_fs.role_filename("clip.mp4", "preview"), "preview.mp4")
+        self.assertEqual(ws_fs.role_filename("video.mp4", "source"), "source.mp4")
+        # Сканер читает только унифицированные имена; суффиксы — нейтральны.
         self.assertEqual(ws_fs.role_of_name("source.avi"), "source")
         self.assertEqual(ws_fs.role_of_name("preview.mp4"), "preview")
-        self.assertEqual(ws_fs.role_of_name("clip_preview.mp4"), "preview")
+        self.assertEqual(ws_fs.role_of_name("clip_preview.mp4"), None)
         self.assertEqual(ws_fs.role_of_name("a.mp4"), None)
         with self.assertRaises(ws_fs.InvalidWorkspaceError):
             ws_fs.role_filename("a.mp4", "bogus")
@@ -99,8 +101,8 @@ class VideoRolesFSTests(SimpleTestCase):
     # ── swap ────────────────────────────────────────────────────────────────
 
     def test_swap_exchanges_roles(self):
-        self._write("foo_source.mp4", b"SRC")
-        self._write("bar_preview.mp4", b"PVW")
+        self._write("source.mp4", b"SRC")
+        self._write("preview.mp4", b"PVW")
         new_s, new_p = ws_fs.swap_role_files(self.root, "ws")
         self.assertEqual(os.path.basename(new_s), "source.mp4")
         self.assertEqual(os.path.basename(new_p), "preview.mp4")
@@ -110,30 +112,31 @@ class VideoRolesFSTests(SimpleTestCase):
             self.assertEqual(f.read(), b"SRC")
 
     def test_swap_preserves_extensions(self):
-        self._write("v1_source.mp4", b"SRC")
-        self._write("v2_preview.webm", b"PVW")
+        self._write("source.mp4", b"SRC")
+        self._write("preview.webm", b"PVW")
         ws_fs.swap_role_files(self.root, "ws")
         with open(os.path.join(self.ws, "preview.mp4"), "rb") as f:
             self.assertEqual(f.read(), b"SRC")
         with open(os.path.join(self.ws, "source.webm"), "rb") as f:
             self.assertEqual(f.read(), b"PVW")
-        self.assertNotIn("v2_preview.webm", self._files())
+        self.assertNotIn("preview.webm", self._files())
 
     def test_swap_requires_two_roles(self):
-        self._write("only_source.mp4")
+        self._write("only.mp4")
         with self.assertRaises(ws_fs.InvalidWorkspaceError):
             ws_fs.swap_role_files(self.root, "ws")
 
     # ── commit_role_upload ──────────────────────────────────────────────────
 
     def test_commit_role_upload_replaces_old_role_file(self):
-        self._write("old_source.mp4", b"OLD")
+        self._write("source.mp4", b"OLD")
         tmp = ws_fs.make_upload_temp(self.root, "ws")
         ws_fs.write_stream(open(__file__, "rb"), tmp)
         final = ws_fs.commit_role_upload(self.root, "ws", "source", tmp, "new.mp4")
         self.assertEqual(os.path.basename(final), "source.mp4")
         self.assertIn("source.mp4", self._files())
-        self.assertNotIn("old_source.mp4", self._files())
+        with open(os.path.join(self.ws, "source.mp4"), "rb") as f:
+            self.assertNotEqual(f.read(), b"OLD")
         self.assertNotIn(os.path.basename(tmp), self._files())
 
     def test_commit_role_upload_overwrites_same_name(self):
@@ -160,7 +163,7 @@ class VideoRolesFSTests(SimpleTestCase):
             ws_fs.assign_role_file(self.root, "ws", "source", "preview.mp4")
 
     def test_assign_role_file_rejects_taken_role(self):
-        self._write("x_source.mp4")
+        self._write("source.mp4")
         self._write("y.mp4")
         with self.assertRaises(ws_fs.InvalidWorkspaceError):
             ws_fs.assign_role_file(self.root, "ws", "source", "y.mp4")

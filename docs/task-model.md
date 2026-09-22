@@ -17,12 +17,12 @@ workspace. Аналог бекапа задачи CVAT (JSON), но только
 
 ```json
 {
-  "v": 1,
   "owner": "username | null",
   "assignees": ["username"],
   "status": "new | in_progress | completed | rejected",
   "stage": "annotation | validation | acceptance",
   "created_at": "iso8601 | null",
+  "last_opened_at": "iso8601 | null",
   "status_changed_at": "iso8601 | null",
   "status_changed_by": "username | null",
   "notes": "string",
@@ -40,6 +40,9 @@ workspace. Аналог бекапа задачи CVAT (JSON), но только
 - `status`/`stage` вне справочника при записи = `ValueError`.
 - Выводимое не храним: прогресс, превью, `updated_at` (mtime),
   счётчики кадров — вычисляются.
+- `created_at` пишется один раз при создании задачи.
+- `last_opened_at` штампуется при каждом открытии редактора (GET detail);
+  используется сортировкой «Открытые», на `updated_at` не влияет.
 
 ## Соответствие CVAT (чистая копия)
 

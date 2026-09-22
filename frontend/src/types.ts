@@ -28,6 +28,14 @@ export interface VideoPair {
   indexing: boolean;
   broken: boolean;
   error: string;
+  created_at: string | null;
+  last_opened_at: string | null;
+  export: {
+    state: string;
+    index: number;
+    total: number;
+    error: string;
+  } | null;
 }
 
 export interface VideoPairDetail extends VideoPair {}
@@ -43,8 +51,6 @@ export interface ExportStatus {
   index?: number;
   total?: number;
   files?: ExportItem[];
-  /** Сигнатура экспортированных границ [[start,end],...] — для пропуска повтора. */
-  sig?: string;
   error?: string;
 }
 

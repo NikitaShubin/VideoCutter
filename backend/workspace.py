@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import task_meta
 from vc_pairs import frame_provider
 from videocutter.standalone import workspace as ws_fs
 from videocutter.standalone.workspace import VIDEO_EXTS
@@ -57,8 +58,8 @@ class Workspace:
         """Находит роли видео в директории: source (original), preview, unassigned.
 
         Роли кодируются именами файлов: унифицированные ``source.<ext>`` /
-        ``preview.<ext>``, а также суффиксные ``<base>_source``/``<base>_preview``;
-        старые flat-workspaces с ``_viz`` распознаются как legacy-превью.
+        ``preview.<ext>``. Одиночный файл без маркера — «нейтральный»
+        (играет обе роли).
         """
         if self._original is not None:
             return
@@ -389,6 +390,29 @@ def _empty_meta() -> dict:
     }
 
 
+def _task_dates(ws: Workspace):
+    """(created_at, last_opened_at) из task.json (None — нет)."""
+    try:
+        meta = task_meta.load(ws.path)
+    except Exception:
+        return None, None
+    return meta.get("created_at"), meta.get("last_opened_at")
+
+
+def _export_state(name: str):
+    """Состояние фона экспорта для бейджа списка (None — тихо)."""
+    try:
+        from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+    except Exception:
+        return None
+    with EXPORTS_LOCK:
+        exp = EXPORTS.get(name)
+    if exp is None:
+        return None
+    return {"state": exp.get("state"), "index": exp.get("index", 0),
+            "total": exp.get("total", 1), "error": exp.get("error", "")}
+
+
 def _fast_role_meta(ws: Workspace, role: str):
     """(meta, ready): метаданные роли без долгого ожидания индекса.
 
@@ -439,6 +463,7 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
     both = bool(ws.original and ws.visualization and ws.original != ws.visualization)
     unassigned = ws.unassigned
     quality, scale = ws.load_settings()
+    created_at, last_opened_at = _task_dates(ws)
     return {
         "id": ws.name,
         "source_name": os.path.basename(ws.original) if ws.original else "",
@@ -460,6 +485,9 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
         "quality": quality,
         "scale": scale,
         "updated_at": _workspace_updated_at(ws),
+        "created_at": created_at,
+        "last_opened_at": last_opened_at,
+        "export": _export_state(ws.name),
         "indexing": indexing,
         "broken": False,
         "error": "",
@@ -472,6 +500,8 @@ def _broken_entry(ws: Workspace, err: Exception) -> dict:
     visualization = _safe(
         lambda: os.path.basename(ws.visualization) if ws.visualization else "", "")
     unassigned = _safe(ws.unassigned, [])
+    created_at, last_opened_at = _safe(
+        lambda: _task_dates(ws), (None, None))
     return {
         "id": ws.name,
         "source_name": original,
@@ -493,6 +523,9 @@ def _broken_entry(ws: Workspace, err: Exception) -> dict:
         "quality": DEFAULT_QUALITY,
         "scale": DEFAULT_SCALE,
         "updated_at": _workspace_updated_at(ws),
+        "created_at": created_at,
+        "last_opened_at": last_opened_at,
+        "export": _export_state(ws.name),
         "indexing": False,
         "broken": True,
         "error": f"{type(err).__name__}: {err}"[:300],
