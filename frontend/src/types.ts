@@ -25,6 +25,9 @@ export interface VideoPair {
   video_ver: string;
   quality: number;
   scale: number;
+  indexing: boolean;
+  broken: boolean;
+  error: string;
 }
 
 export interface VideoPairDetail extends VideoPair {}

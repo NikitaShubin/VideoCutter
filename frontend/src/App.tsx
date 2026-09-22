@@ -8,7 +8,7 @@ type Screen = "list" | "editor";
 
 export function App() {
   const [screen, setScreen] = useState<Screen>("list");
-  const [pairs, setPairs] = useState<VideoPair[]>([]);
+  const [pairs, setPairs] = useState<VideoPair[] | null>(null);
   const [pairId, setPairId] = useState<string | null>(null);
 
   const reload = useCallback(() => {

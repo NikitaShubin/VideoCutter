@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   assignWorkspaceVideo,
   bumpWorkspaceNonce,
@@ -13,7 +13,7 @@ import { VIDEO_ACCEPT, type VideoPair } from "../types";
 import { StatusbarPreview } from "./StatusbarPreview";
 
 interface Props {
-  pairs: VideoPair[];
+  pairs: VideoPair[] | null;
   onSelect: (id: string) => void;
   onChanged: () => void;
 }
@@ -37,6 +37,16 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
   const [editProgress, setEditProgress] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
   const [editError, setEditError] = useState("");
+
+  const firstFile = source ?? preview;
+
+  // Пока есть индексирующиеся задачи — опрашиваем список (индекс строится
+  // в фоне на сервере). Опрос прекращается, когда indexing гаснет у всех.
+  useEffect(() => {
+    if (!pairs || !pairs.some((p) => p.indexing)) return;
+    const id = window.setInterval(onChanged, 2000);
+    return () => window.clearInterval(id);
+  }, [pairs, onChanged]);
 
   const pickFile = (which: "source" | "preview") => (f: File | null) => {
     if (which === "source") setSource(f);
@@ -350,6 +360,10 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
               }}
             />
           </label>
+          <div className="name-preview">
+            Задача будет называться: «
+            {name.trim() || (firstFile ? fileStem(firstFile.name) : "—")}»
+          </div>
           {progress !== null && (
             <div className="upload-progress">
               <div
@@ -366,8 +380,30 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
       )}
 
       <ul>
-        {pairs.length === 0 && <li className="empty">Пока нет workspace-ов.</li>}
-        {pairs.map((p) => (
+        {pairs === null && <li className="loading">Загрузка списка…</li>}
+        {pairs !== null && pairs.length === 0 && (
+          <li className="empty">Пока нет workspace-ов.</li>
+        )}
+        {(pairs ?? []).map((p) =>
+          p.broken ? (
+            <li key={p.id} className="broken">
+              <div className="pair-row">
+                <span className="pair-label">{p.id}</span>
+                <span className="pair-meta">
+                  ⚠ {p.error || "Не удалось прочитать задачу"}
+                </span>
+                <div className="pair-actions">
+                  <button
+                    className="pair-delete"
+                    title="Удалить workspace"
+                    onClick={() => remove(p)}
+                  >
+                    🗑
+                  </button>
+                </div>
+              </div>
+            </li>
+          ) : (
           <li key={p.id} className={editingId === p.id ? "editing" : undefined}>
             <div className="pair-row">
               <button className="pair-open" onClick={() => onSelect(p.id)}>
@@ -411,7 +447,8 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
             </div>
             {editingId === p.id && renderEdit(p)}
           </li>
-        ))}
+          )
+        )}
       </ul>
     </div>
   );

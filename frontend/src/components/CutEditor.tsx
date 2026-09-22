@@ -41,6 +41,7 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [message, setMessage] = useState("");
+  const [loadError, setLoadError] = useState("");
   // Настройки просмотра: масштаб (0.05..1.0) и качество JPEG (30..95).
   const [scale, setScale] = useState(0.75);
   const [quality, setQuality] = useState(78);
@@ -95,6 +96,7 @@ export function CutEditor({ pairId, onBack }: Props) {
   const MAX_CACHE = 60;
   const SEEK_STEP = 10;
   const CHASE_CAP = 6;
+  const DRAIN_CAP = 8;
   const schedRef = useRef<FrameScheduler | null>(null);
   if (!schedRef.current) schedRef.current = new FrameScheduler(MAX_CACHE);
   const [shownFrame, setShownFrame] = useState(-1);
@@ -108,6 +110,11 @@ export function CutEditor({ pairId, onBack }: Props) {
 
   // Загрузка пары + фрагментов.
   const loadPairInto = useCallback((p: VideoPairDetail) => {
+    if (!p || !Array.isArray(p.fragments) || typeof p.total_frames !== "number") {
+      setLoadError("Задача не найдена или ответ сервера неполный.");
+      return;
+    }
+    setLoadError("");
     setPair(p);
     setScale(p.scale ?? 0.75);
     setQuality(p.quality ?? 78);
@@ -133,12 +140,16 @@ export function CutEditor({ pairId, onBack }: Props) {
   }, []);
 
   useEffect(() => {
-    getPair(pairId).then(loadPairInto);
+    getPair(pairId)
+      .then(loadPairInto)
+      .catch((e: Error) => setLoadError(e.message));
   }, [pairId, loadPairInto]);
 
-  // Воспроизведение: позиция продвигается только ПОСЛЕ показа текущего кадра
-  // (shownFrame === position), поэтому каждый кадр реально отображается,
-  // без пропусков. Скорость задаёт паузу между кадрами (0-9 — прореживание).
+  // Воспроизведение — flat-out: следующий шаг сразу после показа текущего,
+  // без искусственных пауз. Темп задаёт только железо (декод/сеть/рендер).
+  // speed (1/2/4/… с клавиш 0–9) — stride: сколько кадров проходить за шаг
+  // (прореживание для скоростного ревью). Показ — все кадры подряд,
+  // без пропусков (кроме явного stride). Покадровая точность — везде.
   const totalFrames = pair?.total_frames ?? 0;
   // Цель J-воспроизведения («до границы»): стоп на ней; на краю видео (0/последний
   // кадр) направление разворачивается, как при обычном проигрывании пробелом.
@@ -146,34 +157,41 @@ export function CutEditor({ pairId, onBack }: Props) {
   useEffect(() => {
     if (!playing) return;
     if (shownFrame !== position) return; // ждём, пока текущий кадр встанет в <img>
-    const delay = Math.round(1000 / (30 * speed));
     const id = window.setTimeout(() => {
-      const target = playTargetRef.current;
-      if (target !== null && position + direction === target) {
-        // J: доехали до ближайшей границы — стоп точно на ней. На краю видео
-        // разворот направления, как у обычного воспроизведения (пробел): иначе
-        // после J до последнего/первого кадра следующий пуск шёл бы «в стену».
-        playTargetRef.current = null;
-        setPosition(target);
-        if (target === 0 || target === totalFrames - 1) {
-          setDirection(direction === 1 ? -1 : 1);
+      // Симуляция stride шагов от текущей позиции: J-цель и края — точно.
+      let pos = position;
+      let done = false;
+      for (let k = 0; k < Math.max(1, speed) && !done; k++) {
+        const target = playTargetRef.current;
+        if (target !== null && pos + direction === target) {
+          // J: доехали до ближайшей границы — стоп точно на ней. На краю видео
+          // разворот направления, как у обычного воспроизведения (пробел): иначе
+          // после J до последнего/первого кадра следующий пуск шёл бы «в стену».
+          playTargetRef.current = null;
+          setPosition(target);
+          if (target === 0 || target === totalFrames - 1) {
+            setDirection(direction === 1 ? -1 : 1);
+          }
+          setPlaying(false);
+          done = true;
+          break;
         }
-        setPlaying(false);
-        return;
+        const step = nextPlayPosition(pos, direction, totalFrames);
+        if (step.stop) {
+          // Дошли до начала/конца: разворачиваемся на воспроизведение
+          // в обратную сторону, иначе пробел после остановки не запустит видео.
+          // J-прогон завершился на краю — устаревшая цель не должна всплывать
+          // при последующем воспроизведении.
+          playTargetRef.current = null;
+          setDirection(step.direction);
+          setPlaying(false);
+          done = true;
+          break;
+        }
+        pos = step.pos;
       }
-      const step = nextPlayPosition(position, direction, totalFrames);
-      if (step.stop) {
-        // Дошли до начала/конца: разворачиваемся на воспроизведение
-        // в обратную сторону, иначе пробел после остановки не запустит видео.
-        // J-прогон завершился на краю — устаревшая цель не должна всплывать
-        // при последующем воспроизведении.
-        playTargetRef.current = null;
-        setDirection(step.direction);
-        setPlaying(false);
-      } else {
-        setPosition(step.pos);
-      }
-    }, delay);
+      if (!done && pos !== position) setPosition(pos);
+    }, 0);
     return () => window.clearTimeout(id);
   }, [playing, position, shownFrame, direction, speed, totalFrames]);
 
@@ -233,9 +251,10 @@ export function CutEditor({ pairId, onBack }: Props) {
     // Дедупликация: кадр уже грузится.
     const inflight = inflightRef.current;
     if (inflight.has(target)) return;
-    // Chase: ограничиваем поток одновременных запросов — остальные кадры
-    // «пропускаются» (следующее изменение позиции запросит новее).
-    if (chase && inflight.size >= CHASE_CAP) return;
+    // Chase/drain: ограничиваем поток одновременных запросов — остальные кадры
+    // «пропускаются» (следующее изменение позиции запросит новее). Без колпачка
+    // на drain скраб по большому файлу ставит сотни декодов в очередь сервера.
+    if (inflight.size >= (chase ? CHASE_CAP : DRAIN_CAP)) return;
 
     const { gen, cached } = sched.begin(target);
     if (cached) {
@@ -727,14 +746,23 @@ export function CutEditor({ pairId, onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pairId]);
 
+  if (loadError) {
+    return (
+      <div className="loading">
+        <div>⚠ {loadError}</div>
+        <button onClick={onBack}>← Назад к списку</button>
+      </div>
+    );
+  }
+
   if (!pair) {
     return <div className="loading">Загрузка видео-пары…</div>;
   }
 
   const sel = modelRef.current?.selectedFrames() ?? 0;
 
-  // Индикатор загрузки — только при ручной навигации: при воспроизведении
-  // кадр встаёт до продвижения позиции (покадровый шаг), индикатор не нужен.
+  // Индикатор загрузки — только при ручной навигации. При воспроизведении
+  // задержек не показываем: кадры идут все подряд в темпе железа.
   const frameLoading = !playing && position !== shownFrame;
 
   return (
