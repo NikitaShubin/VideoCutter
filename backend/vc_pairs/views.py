@@ -31,6 +31,11 @@ def _ws_404(name: str) -> JsonResponse:
     return JsonResponse({"error": f"Workspace '{name}' не найден"}, status=404)
 
 
+# Удаление: попыток и пауза между ними (FUSE + открытые хендлы).
+_DELETE_ATTEMPTS = 4
+_DELETE_RETRY_DELAY = 2.0
+
+
 @require_http_methods(["GET", "POST"])
 def workspace_list(request):
     """GET — список workspace-ов; POST — создать workspace из загруженного видео."""
@@ -160,12 +165,30 @@ def _workspace_delete(name: str) -> JsonResponse:
         if path:
             frame_provider.close_source(path)
 
-    try:
-        ws_fs.delete_workspace(ws_module.WORKSPACE_ROOT, name)
-    except ws_fs.InvalidWorkspaceError as e:
-        return JsonResponse({"error": str(e)}, status=404)
+    from vc_fragments.views import EXPORTS, EXPORTS_LOCK, EXPORT_CANCEL
 
-    from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+    # Останавливаем фон экспорта (проверяется между фрагментами).
+    with EXPORTS_LOCK:
+        if EXPORTS.get(name, {}).get("state") == "running":
+            EXPORT_CANCEL.add(name)
+
+    # На FUSE удаление при открытых хендлах (декод/префетч в полёте) оставляет
+    # .fuse_hidden и роняет rmdir (ENOTEMPTY): повторяем с паузой, чтобы
+    # in-flight декоды успели закрыть файлы. Причина всегда в ответе.
+    last_err = None
+    for _ in range(_DELETE_ATTEMPTS):
+        try:
+            ws_fs.delete_workspace(ws_module.WORKSPACE_ROOT, name)
+            last_err = None
+            break
+        except ws_fs.InvalidWorkspaceError as e:
+            return JsonResponse({"error": str(e)}, status=404)
+        except OSError as e:
+            last_err = e
+            time.sleep(_DELETE_RETRY_DELAY)
+    if last_err is not None:
+        return JsonResponse(
+            {"error": f"Не удалось удалить '{name}': {last_err}"}, status=500)
 
     with EXPORTS_LOCK:
         EXPORTS.pop(name, None)

@@ -10,10 +10,12 @@
 import os
 import shutil
 import time
+from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from vc_fragments.tests import WorkspaceApiTestBase
+from videocutter.standalone import workspace as ws_fs
 
 HTTP_CREATED = 201
 
@@ -444,3 +446,34 @@ class ListRobustnessTests(WorkspaceApiTestBase):
             time.sleep(0.1)
         self.assertFalse(item["broken"])
         self.assertGreater(item["total_frames"], 0)
+
+
+class DeleteRobustnessTests(WorkspaceApiTestBase):
+    """Удаление: причина в ответе, отмена фона экспорта (F7)."""
+
+    def test_delete_oserror_returns_500_with_reason(self):
+        import vc_pairs.views as views
+
+        with mock.patch.object(
+            ws_fs, "delete_workspace", side_effect=OSError("busy")
+        ), mock.patch.object(views, "_DELETE_ATTEMPTS", 2), mock.patch.object(
+            views, "_DELETE_RETRY_DELAY", 0
+        ):
+            resp = self.client.delete(self.ws_detail_url)
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("busy", resp.json()["error"])
+
+    def test_delete_requests_export_cancel(self):
+        from vc_fragments.views import EXPORTS, EXPORTS_LOCK, EXPORT_CANCEL
+
+        with EXPORTS_LOCK:
+            EXPORTS[self.ws_id] = {"state": "running", "index": 1, "total": 2}
+        try:
+            resp = self.client.delete(self.ws_detail_url)
+            self.assertEqual(resp.status_code, 200)
+            with EXPORTS_LOCK:
+                self.assertIn(self.ws_id, EXPORT_CANCEL)
+        finally:
+            with EXPORTS_LOCK:
+                EXPORTS.pop(self.ws_id, None)
+                EXPORT_CANCEL.discard(self.ws_id)
