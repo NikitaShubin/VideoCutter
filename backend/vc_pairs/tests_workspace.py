@@ -390,6 +390,25 @@ class RenameApiTests(WorkspaceApiTestBase):
         self.assertEqual(len(frags), 2)
         self.assertGreater(self.client.get("/api/v1/workspaces/preserved/").json()["total_frames"], 0)
 
+    def test_rename_blocked_while_export_running(self):
+        """Переименование при активном экспорте — 409, каталог на месте."""
+        from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+
+        with EXPORTS_LOCK:
+            EXPORTS[self.ws_id] = {"state": "running", "index": 1, "total": 2}
+        try:
+            resp = self.client.patch(
+                self.ws_detail_url,
+                data='{"name": "renamed"}',
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 409)
+            self.assertIn("Экспорт", resp.json()["error"])
+            self.assertTrue(os.path.isdir(self.ws_dir))
+        finally:
+            with EXPORTS_LOCK:
+                EXPORTS.pop(self.ws_id, None)
+
 
 class ListRobustnessTests(WorkspaceApiTestBase):
     """Список переживает битые задачи и долгую индексацию (F2/F3)."""

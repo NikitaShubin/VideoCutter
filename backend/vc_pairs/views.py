@@ -130,6 +130,17 @@ def _workspace_rename(request, name: str) -> JsonResponse:
         return JsonResponse({"error": "Некорректный JSON"}, status=400)
 
     new_name = payload.get("name") if isinstance(payload, dict) else None
+
+    from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+
+    # Переименование под работающим ffmpeg убивает экспорт (пути захвачены
+    # потоком): требуем дождаться завершения или отмены.
+    with EXPORTS_LOCK:
+        if EXPORTS.get(name, {}).get("state") == "running":
+            return JsonResponse(
+                {"error": "Экспорт выполняется — дождитесь завершения или отмените его"},
+                status=409,
+            )
     try:
         renamed = ws_fs.rename_workspace(ws_module.WORKSPACE_ROOT, name, new_name)
     except ws_fs.WorkspaceExistsError as e:
@@ -141,8 +152,6 @@ def _workspace_rename(request, name: str) -> JsonResponse:
     if renamed != name:
         # Освобождаем провайдеры кадров (перезаймётся по новому имени файлов —
         # здесь пути не меняются, только имя каталога, поэтому кэш кадров жив).
-        from vc_fragments.views import EXPORTS, EXPORTS_LOCK
-
         with EXPORTS_LOCK:
             if name in EXPORTS:
                 EXPORTS[renamed] = EXPORTS.pop(name)
