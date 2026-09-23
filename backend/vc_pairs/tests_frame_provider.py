@@ -197,10 +197,13 @@ class FrameProviderTest(SimpleTestCase):
         self.assertEqual(prov._walk_direction(12), 1)  # подтверждён +1
         self.assertEqual(prov._walk_direction(12), 0)  # повтор кадра
         self.assertEqual(prov._walk_direction_peek(), 1)  # повтор держит +1
-        self.assertEqual(prov._walk_direction(3), 0)  # прыжок назад — сброс
-        self.assertEqual(prov._walk_direction_peek(), 0)
+        self.assertEqual(prov._walk_direction(3), 0)  # мелкий разворот — 0
+        # Гистерезис: мелкий разворот направление НЕ сбрасывает.
+        self.assertEqual(prov._walk_direction_peek(), 1)
         self.assertEqual(prov._walk_direction(2), -1)  # подтверждён -1
         self.assertEqual(prov._walk_direction_peek(), -1)
+        self.assertEqual(prov._walk_direction(500), 0)  # дальний прыжок
+        self.assertEqual(prov._walk_direction_peek(), 0)  # сброс
 
     def test_frames_match_reference(self):
         """Побитовое совпадение GOP-движка с последовательным декодом."""
@@ -400,12 +403,26 @@ class CacheCapsTest(SimpleTestCase):
         for p in paths:
             _make_clip(p)
             self.addCleanup(fp.close_source, p)
-        fp.set_cache_caps(gops=2, mb=512)
         provs = [_prop(p) for p in paths]
         keys = [[pr._key(g, fp.JPEG_QUALITY, fp.FRAME_SCALE)
                  for g in range(2)] for pr in provs]
+
+        def quiesce(timeout=20.0):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                with fp._providers_lock:
+                    live = list(fp._providers.values())
+                if all(not len(pr._tasks) for pr in live):
+                    return True
+                time.sleep(0.05)
+            return False
+
         # Только demand-декоды: веер и цепочки глушим, иначе поздние
         # спекулятивные посадки смажут порядок вытеснения (флейк).
+        # Греем БЕЗ вытеснений (лимит 16): иначе гонка «посадка против
+        # первого опроса» — глобальный LRU вправе снести запись за
+        # миллисекунды до опроса, и это корректно, а не баг.
+        fp.set_cache_caps(gops=16, mb=512)
         with mock.patch.object(fp, "PREFETCH_AHEAD", 0), \
                 mock.patch.object(fp, "_any_waiters", return_value=True):
             for p in paths:
@@ -415,8 +432,13 @@ class CacheCapsTest(SimpleTestCase):
                 for k in ks:
                     self.assertTrue(_wait_cache(pr, k),
                                     f"{k} не попала в кэш")
-        # Всего 4 GOP при лимите 2: старейшие (первого провайдера) вытеснены,
-        # свежие (второго) целы; суммарно в лимите.
+            self.assertTrue(quiesce(), "фоновые декоды не завершились")
+            # Перекасаемся активного (его метки свежее всех), затем жмём
+            # лимит: жертвами детерминированно становятся старые записи.
+            for i in (1, 30):
+                fp.get_frame_jpeg(paths[1], i)
+            fp.set_cache_caps(gops=2, mb=512)
+        # Суммарно в лимите; свежие (второго) целы, старые (первого) ушли.
         total = sum(len(pr._cache) for pr in provs)
         self.assertLessEqual(total, 2, f"глобальный лимит не держится: {total}")
         with provs[1]._ilock:
@@ -641,19 +663,43 @@ class SpeculationGenTest(SimpleTestCase):
         single.assert_called_once()
 
     def test_walk_start_keeps_generation(self):
-        # Старт обхода (второй запрос) — не разрыв: веер посадки живёт.
-        # Разрыв подтверждённого хода (прыжок/разворот) — двигает поколение.
+        # Старт обхода и мелкий рассинхрон — не разрывы: поколение стоит.
+        # Двигает только шаг > _WALK_JUMP_STEP.
         prov = fp._Provider("/nonexistent/clip.mp4")
         prov._walk_direction(10)  # первое касание
         g0 = prov._gen
-        prov._walk_direction(11)  # старт: last_step было 0 — без bump
+        prov._walk_direction(11)  # старт: без bump
         self.assertEqual(prov._gen, g0)
         prov._walk_direction(12)  # подтверждён: без bump
         self.assertEqual(prov._gen, g0)
-        prov._walk_direction(5)  # разворот: bump
-        self.assertEqual(prov._gen, g0 + 1)
-        prov._walk_direction(6)  # смена знака: bump
+        prov._walk_direction(5)  # мелкий разворот: без bump
+        self.assertEqual(prov._gen, g0)
+        self.assertEqual(prov._walk_direction_peek(), 1)  # гистерезис
+        prov._walk_direction(6)  # мелкая смена знака: без bump
+        self.assertEqual(prov._gen, g0)
+        prov._walk_direction(500)  # дальний прыжок по ходу: bump,
+        self.assertEqual(prov._gen, g0 + 1)  # направление держится
+        self.assertEqual(prov._walk_direction_peek(), 1)
+        prov._walk_direction(400)  # дальний прыжок назад: bump + сброс
         self.assertEqual(prov._gen, g0 + 2)
+        self.assertEqual(prov._walk_direction_peek(), 0)
+
+    def test_pipelined_disorder_keeps_generation(self):
+        """Рваное прибытие пайплайна (8-wide) — не прыжки: gen стоит.
+
+        Регрессия живых тормозов: рассинхрон прибытия давал хронические
+        sign-flip'ы, поколение churn'илось, спекуляция сбрасывалась
+        и разбрасывалась заново — повторные grinding'и и пилы CPU.
+        """
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        g0 = prov._gen
+        for i in (704, 703, 700, 701, 698, 699, 697, 702):
+            prov._walk_direction(i)
+        self.assertEqual(prov._gen, g0)
+        prov._walk_direction(690)
+        prov._walk_direction(689)
+        self.assertEqual(prov._walk_direction_peek(), -1)
+        self.assertEqual(prov._gen, g0)
 
     def test_chained_prefetch_gated_by_fresh_demand(self):
         # Цепочки без свежего спроса запрещены (иначе каскад до конца
