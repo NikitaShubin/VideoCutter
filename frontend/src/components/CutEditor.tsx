@@ -104,6 +104,16 @@ export function CutEditor({ pairId, onBack }: Props) {
   const inflightRef = useRef<Set<number>>(new Set());
   const rightHeldRef = useRef(false);
   const leftHeldRef = useRef(false);
+  // Замер клиента (диагностика тормозов, поведения не меняет): load — мс
+  // от постановки src до onload (сеть+сервер+декод браузера), show — мс от
+  // onload до отрисовки (рендер), fps — показанных кадров в секунду.
+  // Агрегация раз в секунду в perf (ниже), чтобы не дёргать рендер на кадр.
+  const issueT0Ref = useRef(new Map<number, number>());
+  const perfAccumRef = useRef({
+    winT0: performance.now(), shown: 0, n: 0, loadSum: 0, showSum: 0,
+    shownN: 0,
+  });
+  const [perf, setPerf] = useState({ fps: 0, load: 0, show: 0 });
 
   // Загрузка пары + фрагментов.
   const loadPairInto = useCallback((p: VideoPairDetail) => {
@@ -264,21 +274,39 @@ export function CutEditor({ pairId, onBack }: Props) {
     const myChase = chase;
     inflight.add(target);
     const img = new Image();
+    issueT0Ref.current.set(target, performance.now());
+    const acc = perfAccumRef.current;
     img.onload = () => {
+      const tLoad = performance.now();
+      const t0 = issueT0Ref.current.get(target) ?? tLoad;
+      issueT0Ref.current.delete(target);
+      acc.n++;
+      acc.loadSum += tLoad - t0;
       inflight.delete(target);
       // Режим сменился с момента запроса (chase/буфер тапов брошен, прыжок) —
       // ответ устарел, не показываем.
       if (myEpoch !== epochRef.current) return;
+      let shownIt = false;
       if (myChase) {
         if (sched.deliverStreaming(target, img.src, heldDirRef.current)) {
           showFrame(target);
+          shownIt = true;
         }
       } else if (sched.deliver(target, gen, img.src)) {
         showFrame(target);
+        shownIt = true;
+      }
+      if (shownIt) {
+        acc.shown++;
+        acc.shownN++;
+        requestAnimationFrame(() => {
+          acc.showSum += performance.now() - tLoad;
+        });
       }
     };
     img.onerror = () => {
       inflight.delete(target);
+      issueT0Ref.current.delete(target);
       if (myEpoch !== epochRef.current) return;
       // Кадр не загрузился: разблокируем покадровое воспроизведение/догон,
       // иначе воспроизведение залипнет на битом кадре.
@@ -293,6 +321,28 @@ export function CutEditor({ pairId, onBack }: Props) {
   useEffect(() => {
     pump();
   }, [pump]);
+
+  // Агрегатор клиентского замера: раз в секунду сворачиваем аккумулятор
+  // в perf (один рендер в секунду вместо рендера на кадр).
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const r = perfAccumRef.current;
+      const now = performance.now();
+      const dt = (now - r.winT0) / 1000;
+      setPerf({
+        fps: dt > 0 ? Math.round(r.shown / dt) : 0,
+        load: r.n ? Math.round(r.loadSum / r.n) : 0,
+        show: r.shownN ? Math.round(r.showSum / r.shownN) : 0,
+      });
+      r.shown = 0;
+      r.n = 0;
+      r.loadSum = 0;
+      r.showSum = 0;
+      r.shownN = 0;
+      r.winT0 = now;
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Ползунки качества/масштаба: сохраняем на сервер с debounce и перечитываем
   // текущий кадр под новые настройки (URL кадра меняется → браузер берёт свежий).
@@ -805,6 +855,10 @@ export function CutEditor({ pairId, onBack }: Props) {
             title={playing ? (direction === -1 ? "идёт назад (R — сменить)" : "идёт вперёд (R — сменить)") : (direction === -1 ? "пауза (пробел), направление: назад" : "пауза (пробел), направление: вперёд")}
             aria-label={playing ? (direction === -1 ? "воспроизведение назад" : "воспроизведение вперёд") : (direction === -1 ? "пауза, направление: назад" : "пауза, направление: вперёд")}
           >{playing ? (direction === -1 ? "◀" : "▶") : (direction === -1 ? "◁" : "▷")}x{speed}</span>
+          <span
+            className="info"
+            title="Замер клиента за секунду: к/с показа · мс загрузки кадра (сеть + сервер + декод браузера) · мс показа (рендер до отрисовки). Сервер тёплое отдаёт за миллисекунды: если ↓ мало, а к/с низкие — упираемся в рендер браузера."
+          >⏱ {perf.fps}/с · ↓{perf.load}мс · ⊙{perf.show}мс</span>
           {pair.pair_warning && (
             <span className="info warn" title={pair.pair_warning}>
               ⚠ {pair.pair_warning}
