@@ -1347,7 +1347,10 @@ def cache_usage() -> dict:
             mb = round(sum(p._gop_sizes.values()) / (1 << 20), 1)
         gops += n
         if n:
-            per_source[os.path.basename(path)] = {"gops": n, "mb": mb}
+            # Два последних компонента пути: basename'ы сталкиваются
+            # (source.mp4 в каждом workspace), полный путь — шумный.
+            short = "/".join(path.replace("\\", "/").split("/")[-2:])
+            per_source[short] = {"gops": n, "mb": mb}
     return {
         "gops": gops,
         "gops_cap": CACHE_GOPS,
