@@ -153,6 +153,15 @@ class FrameProviderTest(SimpleTestCase):
             img = cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_COLOR)
             self.assertIsNotNone(img, f"битый JPEG кадра {i}")
 
+    def test_warmup_notes_demand(self):
+        # Прогрев к открытию штампует спрос: иначе idle-аборт убивает его
+        # до первого пакета (ждунов нет, спрос stale) — прогрев не работал.
+        prov = _prop(self.path)
+        prov._ensure_index()
+        prov._last_demand = 0.0
+        fp.warm_gop(self.path, 0)
+        self.assertGreater(prov._last_demand, 0.0)
+
     def test_cache_hit_is_fast(self):
         prov = _prop(self.path)
         key0 = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
@@ -463,6 +472,20 @@ class CacheCapsTest(SimpleTestCase):
         self.assertEqual(
             fp._Provider._fanout_depth(-1), 2 * fp.PREFETCH_AHEAD)
 
+    def test_fanout_depth_live_shrinks_on_waiters(self):
+        # Живые ждуны ужимают веер до ближнего: demand забирает CPU.
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        with mock.patch.object(fp, "_any_waiters", return_value=False):
+            self.assertEqual(prov._fanout_depth_live(-1),
+                             2 * fp.PREFETCH_AHEAD)
+            self.assertEqual(prov._fanout_depth_live(0), fp.PREFETCH_AHEAD)
+            self.assertEqual(prov._fanout_depth_live(1), 0)
+        with mock.patch.object(fp, "_any_waiters", return_value=True):
+            self.assertEqual(prov._fanout_depth_live(-1), 1)
+            self.assertEqual(prov._fanout_depth_live(0), 1)
+            self.assertEqual(prov._fanout_depth_live(1), 0)
+
     def test_landing_warms_both_sides(self):
         """Посадка (направления нет) греет веер вперёд и назад."""
         if shutil.which("ffmpeg") is None:
@@ -525,10 +548,11 @@ class CacheCapsTest(SimpleTestCase):
     def test_auto_tune_grid(self):
         # (ncpu, ram_mb) -> (decode, prefetch, cache_mb, cache_gops).
         cases = [
-            ((16, 15197), (14, 4, 1266, 39)),
-            ((8, 8192), (6, 2, 682, 21)),
-            ((4, 4096), (2, 1, 341, 10)),
-            ((2, 2048), (2, 1, 256, 8)),
+            ((16, 15197), (14, 4, 2532, 79)),
+            ((8, 8192), (6, 2, 1365, 42)),
+            ((4, 4096), (2, 1, 682, 21)),
+            ((2, 2048), (2, 1, 341, 10)),
+            ((1, 512), (2, 1, 256, 8)),
             ((64, 131072), (62, 20, 4096, 128)),
         ]
         for (ncpu, ram), (d, p, mb, gops) in cases:

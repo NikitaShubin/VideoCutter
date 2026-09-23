@@ -18,4 +18,5 @@ urlpatterns = [
     path("workspaces/<str:workspace_id>/swap/", views.workspace_swap, name="workspace-swap-slash"),
     path("cache", views.cache_config, name="cache-config"),
     path("cache/", views.cache_config, name="cache-config-slash"),
+    path("debug/threads", views.debug_threads, name="debug-threads"),
 ]

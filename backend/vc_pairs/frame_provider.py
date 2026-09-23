@@ -107,12 +107,14 @@ def _host_resources() -> tuple:
 def _auto_tune(ncpu: int, ram_mb: int) -> dict:
     """Стартовые лимиты под железо (чистая функция — тестируется без железа).
 
-    Два ядра всегда остаются системе/экспорту/UI; кэш — ~1/12 RAM
-    в клампе 256 МБ..4 ГБ; счётный предохранитель растёт вместе с байтами.
+    Всё относительно ресурсов, никаких абсолютных констант: два ядра всегда
+    остаются системе/экспорту/UI; кэш — ~1/6 RAM в клампе 256 МБ..4 ГБ
+    (q78-GOP ~40МБ, q95 ~100МБ — окно 39 GOP требует гигабайты);
+    счётный предохранитель растёт вместе с байтами.
     """
     decode = max(2, int(ncpu) - 2)
     prefetch = max(1, decode // 3)
-    cache_mb = min(4096, max(256, int(ram_mb) // 12))
+    cache_mb = min(4096, max(256, int(ram_mb) // 6))
     cache_gops = max(8, cache_mb // 32)
     return {"decode_cores": decode, "prefetch_workers": prefetch,
             "cache_mb": cache_mb, "cache_gops": cache_gops}
@@ -589,6 +591,8 @@ class _GopTask:
         self.speculative = False  # префетч: может быть сброшен прыжком
         self.gen = 0  # поколение позиции, при котором задача создана
         self.holds_demand_slot = False  # держит слот demand-семафора провайдера
+        self.born = time.monotonic()  # для диагностики churn'а задач
+        self.puts = 0  # кадров положено (диагностика)
 
     def put(self, frame: int, bgr: "numpy.ndarray") -> None:
         jpeg = _Provider._encode(bgr, self.quality, self.scale)
@@ -596,6 +600,7 @@ class _GopTask:
             return
         with self._lock:
             self.frames[frame] = jpeg
+            self.puts += 1
             ev = self._events.pop(frame, None)
         if ev is not None:
             ev.set()
@@ -814,6 +819,7 @@ class _Provider:
             with task._lock:
                 task.abandoned = True
             task.mark_done()
+            _stat_inc("dropped_stale")
             self._finish_task(key, task)
             return
         self._decode_gop(g, task)
@@ -883,6 +889,19 @@ class _Provider:
             return 2 * PREFETCH_AHEAD
         return PREFETCH_AHEAD
 
+    def _fanout_depth_live(self, direction: int) -> int:
+        """Веер с учётом живых ждунов: пока кадры реально ждут, спекуляция
+        ужата до ближнего соседа — demand-декод получает почти весь CPU.
+
+        Замер: деливший CPU веер растягивал хвостовой затор ~10с (q95,
+        GOP-259) вместо ~4-5с на полном CPU. После затора (ждунов нет)
+        веер снова полный — догоняющий прогрев свободными ядрами.
+        """
+        depth = self._fanout_depth(direction)
+        if depth > 1 and _any_waiters():
+            return 1
+        return depth
+
     def _finish_task(self, key: tuple, task: _GopTask) -> None:
         # Слот demand-семафора — первым (без локов): декод завершён,
         # соседи по провайдеру могут стартовать немедленно.
@@ -894,11 +913,14 @@ class _Provider:
             self._scheduled.discard(key)
         if task.error is not None:
             logger.warning("gop task failed %s: %r", key, task.error)
+            _stat_inc("error")
         if not task.error and task.frames:
             self._cache_put(key, task.frames, task.reserved)
+            _stat_inc("landed")
         elif task.reserved:
             # Освобождаем и неизрасходованную часть резерва (JPEG < BGR).
             _BUDGET.release(task.reserved)
+            _stat_inc("empty")
         g, q, s = key
         # Цепочный префетч — только в простое без ждунов (решение внутри
         # _prefetch): паузный глубокий прогрев. При живом спросе цепочки —
@@ -1002,11 +1024,12 @@ class _Provider:
             j = self._cache_hit(key, index)
             if j is not None:
                 # Группа в кэше — соседей греем только на прыжке/ходе назад
-                # (depth по _fanout_depth): при ходе вперёд вход в следующий
+                # (depth по _fanout_depth_live): при ходе вперёд вход в следующий
                 # GOP с его начала отдаётся demand-путём без stall'а, а веер
-                # лишь отбирал бы CPU у стрима.
+                # лишь отбирал бы CPU у стрима. При живых ждунах веер ужáт
+                # до ближнего соседа — demand забирает почти весь CPU.
                 self._prefetch(g, quality, scale, direction,
-                               depth=self._fanout_depth(direction))
+                               depth=self._fanout_depth_live(direction))
                 return j, {"source": "cache", "abandoned": False}
             task = self._task_for(g, quality, scale, direction)
             if task is not None:
@@ -1067,9 +1090,10 @@ class _Provider:
             # Соседние группы прогреваем сразу — параллельно текущему декоду,
             # тогда переход через границу не застанет холодную группу.
             # При подтверждённом ходе вперёд веера нет (depth=0): demand-путь
-            # справляется сам, см. _fanout_depth.
+            # справляется сам, см. _fanout_depth. Глубина живая
+            # (_fanout_depth_live): ждуны ужимают веер до ближнего.
             self._prefetch(g, quality, scale, direction,
-                           depth=self._fanout_depth(direction))
+                           depth=self._fanout_depth_live(direction))
         return task
 
     # --- одиночный seek (до первого ключевого кадра и прочие огрехи) ---
@@ -1112,7 +1136,14 @@ _providers: "Dict[str, _Provider]" = {}
 _providers_lock = threading.Lock()
 
 
-# --- глобальный LRU кэша GOP ---
+# --- счётчики исходов задач (наблюдаемость churn'а, VDO) ---
+_STAT = {"landed": 0, "empty": 0, "error": 0, "dropped_stale": 0}
+_STAT_LOCK = threading.Lock()
+
+
+def _stat_inc(name: str) -> None:
+    with _STAT_LOCK:
+        _STAT[name] = _STAT.get(name, 0) + 1
 # Лимиты CACHE_GOPS/CACHE_MB — машинные (на все провайдеры сразу): иначе
 # N юзеров × лимит бесконтрольно растят RAM, а idle-юзер держит своё вечно
 # (его провайдер ничего не кладёт → ничего не чистит), выжимая активного.
@@ -1191,6 +1222,10 @@ def warm_gop(path: str, index: int = 0, quality: int = JPEG_QUALITY,
     """
     try:
         prov = _get_provider(path)
+        # Открытие редактора — намерение смотреть: штампуем спрос, иначе
+        # idle-аборт прибьёт прогрев в первые же микросекунды (ждунов нет,
+        # спрос stale) — и прогрев к открытию не работал бы вообще.
+        prov._note_demand()
         idx = prov._index_if_ready()
         if idx is None or not 0 <= index < idx.total:
             return
@@ -1348,6 +1383,73 @@ def tuning_info() -> dict:
     """Железо, автотюн и источник каждого лимита (auto/env/runtime)."""
     return {"ncpu": _NCPU, "ram_mb": _RAM_MB, "auto": dict(_AUTO),
             "source": dict(_TUNE_SOURCE)}
+
+
+def debug_snapshot() -> dict:
+    """Снимок состояния движка для диагностики зависших запросов.
+
+    Только чтение (без мутаций): потоки пулов, очередь, семафоры,
+    задачи с ждунами, возраст спроса, Python-стеки (faulthandler).
+    """
+    import faulthandler
+    import io
+    now = time.monotonic()
+    with _providers_lock:
+        provs = list(_providers.items())
+    sources = []
+    for path, p in provs:
+        with p._ilock:
+            tasks = []
+            for key, t in p._tasks.items():
+                with t._lock:
+                    tasks.append({
+                        "gop": key[0], "q": key[1], "s": key[2],
+                        "id": id(t) % 100000, "age_s": round(now - t.born, 1),
+                        "waiters": t.waiters,
+                        "done": t.done, "frames": len(t.frames),
+                        "puts": t.puts,
+                        "spec": t.speculative, "gen": t.gen,
+                        "abandoned": t.abandoned,
+                        "holds_slot": t.holds_demand_slot,
+                        "error": repr(t.error)[:120] if t.error else None,
+                    })
+            scheduled = [k[0] for k in p._scheduled]
+            cache_keys = [k[0] for k in p._cache]
+        sources.append({
+            "path": path.replace("\\", "/").split("/")[-2:],
+            "gen": p._gen,
+            "walkdir": p._walk_dir,
+            "demand_age_s": round(now - p._last_demand, 1),
+            "tasks": tasks,
+            "scheduled_gops": scheduled,
+            "cached_gops": cache_keys,
+        })
+    buf = io.StringIO()
+    try:
+        faulthandler.dump_traceback(file=buf)
+        stacks = buf.getvalue()
+    except Exception as e:  # noqa: BLE001
+        stacks = f"unavailable: {e}"
+    return {
+        "now": now,
+        "task_outcomes": dict(_STAT),
+        "decode_pool": {
+            "threads": len(_DECODE_POOL._threads),
+            "queued": _DECODE_POOL._work_queue.qsize(),
+            "max": _DECODE_POOL._max_workers,
+        },
+        "prefetch_pool": {
+            "threads": len(_PREFETCH_POOL._threads),
+            "queued": _PREFETCH_POOL._work_queue.qsize(),
+            "max": _PREFETCH_POOL._max_workers,
+        },
+        "heavy_slots_free": _HEAVY._value,
+        "budget": {"transient": _BUDGET._transient,
+                   "cached": _BUDGET._cached,
+                   "limit": _BUDGET._limit},
+        "sources": sources,
+        "stacks": stacks,
+    }
 
 
 def cache_usage() -> dict:

@@ -281,13 +281,14 @@ def workspace_frame(request, workspace_id: str, index: int):
     return response
 
 
+@require_http_methods(["GET"])
+def debug_threads(request):
+    """Снимок движка: пулы, очередь, семафоры, задачи, стеки (диагностика)."""
+    return JsonResponse(frame_provider.debug_snapshot())
+
+
 @require_http_methods(["GET", "POST"])
 def cache_config(request):
-    """Лимиты GOP-кэша: GET — лимиты + заполнение, POST — смена без рестарта.
-
-    POST-тело (JSON): {"gops": 16, "mb": 512} — хотя бы одно поле.
-    Уменьшение тут же вытесняет лишнее (LRU); увеличение поднимает потолок.
-    """
     if request.method == "GET":
         return JsonResponse({
             "caps": frame_provider.cache_caps(),
