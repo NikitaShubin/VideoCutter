@@ -11,6 +11,7 @@ import {
   workspaceNonce,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
+import { CacheControl } from "./CacheControl";
 import { HelpModal } from "./HelpModal";
 import {
   FrameScheduler,
@@ -859,6 +860,7 @@ export function CutEditor({ pairId, onBack }: Props) {
             className="info"
             title="Замер клиента за секунду: к/с показа · мс загрузки кадра (сеть + сервер + декод браузера) · мс показа (рендер до отрисовки). Сервер тёплое отдаёт за миллисекунды: если ↓ мало, а к/с низкие — упираемся в рендер браузера."
           >⏱ {perf.fps}/с · ↓{perf.load}мс · ⊙{perf.show}мс</span>
+          <CacheControl />
           {pair.pair_warning && (
             <span className="info warn" title={pair.pair_warning}>
               ⚠ {pair.pair_warning}

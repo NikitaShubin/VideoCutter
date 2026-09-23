@@ -178,6 +178,39 @@ export function setPairSettings(
   }).then((r) => json<{ quality: number; scale: number }>(r));
 }
 
+export interface CacheState {
+  caps: { gops: number; mb: number };
+  usage: {
+    gops: number;
+    gops_cap: number;
+    mb: number;
+    mb_cap: number;
+    sources: number;
+    per_source?: Record<string, { gops: number; mb: number }>;
+  };
+  tuning: {
+    ncpu: number;
+    ram_mb: number;
+    auto: Record<string, number>;
+    source: Record<string, string>;
+  };
+}
+
+export function getCache(): Promise<CacheState> {
+  return fetch(`${BASE}/cache`).then((r) => json<CacheState>(r));
+}
+
+export function setCache(patch: {
+  gops?: number;
+  mb?: number;
+}): Promise<CacheState> {
+  return fetch(`${BASE}/cache`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  }).then((r) => json<CacheState>(r));
+}
+
 export function frameUrl(
   pairId: string,
   index: number,

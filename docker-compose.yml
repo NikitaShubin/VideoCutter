@@ -9,6 +9,14 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     restart: always
+    # Ротация логов: access-лог пишет каждый кадр (~100/с) — без лимита
+    # json-file растёт гигабайтами на долгоживущих системах.
+    # Вступает в силу только на пересоздании контейнера (up -d НЕ хватает).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       VC_WORKSPACE_ROOT: /data/workspaces
       # Тюнинг префетча кадров (замерено матрицей 2026-09-22):
@@ -41,6 +49,11 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
       - videocutter_backend
     ports:
