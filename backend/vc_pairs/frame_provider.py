@@ -47,6 +47,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 from typing import Dict, List, Optional
 
 import av
@@ -274,12 +275,31 @@ def _cache_load(path: str, size, mtime_ns):
             return None
         return (int(data["packet_total"]),
                 array.array("q", data["visible_pts"]),
-                array.array("q", data["kf_pts"]))
+                array.array("q", data["kf_pts"]),
+                data.get("tb"), data.get("fps"),
+                data.get("width"), data.get("height"))
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
 
-def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us) -> None:
+def _stream_params(path: str):
+    """Параметры видеопотока без декода (tb, fps, width, height)."""
+    try:
+        cont = av.open(path)
+    except Exception as e:
+        raise ValueError(f"Ошибка открытия видеофайла: {path} ({e})")
+    try:
+        stream = cont.streams.video[0]
+        rate = stream.average_rate
+        return (stream.time_base, float(rate) if rate else 0.0,
+                stream.codec_context.width, stream.codec_context.height)
+    finally:
+        cont.close()
+
+
+def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us,
+                tb=None, fps: float = 0.0, width: int = 0,
+                height: int = 0) -> None:
     """Best-effort запись кэша (атомарно через .tmp)."""
     if size is None:
         return
@@ -294,6 +314,10 @@ def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us) -> None
                 "packet_total": packet_total,
                 "visible_pts": list(visible),
                 "kf_pts": list(kf_us),
+                "tb": str(tb) if tb is not None else None,
+                "fps": fps,
+                "width": width,
+                "height": height,
             }, f, separators=(",", ":"))
         os.replace(cp + ".tmp", cp)
     except OSError:
@@ -316,6 +340,124 @@ def _make_bounds(visible, kf_us) -> List[int]:
     if kf_idx[-1] != total:
         kf_idx.append(total)
     return kf_idx
+
+
+# Воркеров сегментной сборки индекса: формула + VC_INDEX_WORKERS-оверрайд.
+# Декод CPU-bound (освобождает GIL), сегменты независимы (старт строго
+# с ключевого кадра) — масштабируется почти линейно до ~8.
+INDEX_WORKERS = _env_or_auto(
+    "VC_INDEX_WORKERS", min(8, max(2, _NCPU - 2)))
+
+
+def _scan_packets(path: str):
+    """Фаза 1 сборки индекса: быстрый demux-скан без декода.
+
+    Возвращает (tb, fps, width, height, packet_total, kf_us). Demux на
+    порядки дешевле декода, поэтому предскан почти бесплатен, а даёт
+    точные границы сегментов (по ключевым кадрам) для фазы 2.
+    """
+    try:
+        cont = av.open(path)
+    except Exception as e:
+        raise ValueError(f"Ошибка открытия видеофайла: {path} ({e})")
+    try:
+        stream = cont.streams.video[0]
+        tb = stream.time_base
+        width = stream.codec_context.width
+        height = stream.codec_context.height
+        rate = stream.average_rate
+        fps = float(rate) if rate else 0.0
+        packet_total = 0
+        kf_us = array.array("q")
+        for pkt in cont.demux(stream):
+            if pkt.pts is None:
+                continue
+            packet_total += 1
+            if pkt.is_keyframe:
+                t = pkt.pts * float(pkt.time_base or tb)
+                kf_us.append(round(t * 1e6))
+    finally:
+        cont.close()
+    return tb, fps, width, height, packet_total, kf_us
+
+
+def _decode_range(path: str, tb: float, start_us, end_us) -> list:
+    """Декодить диапазон [start_us, end_us) в список видимых PTS (мкс).
+
+    start_us=None — с начала файла; end_us=None — до конца (с хвостом
+    декодера). Границы — строго по ключевым кадрам (даёт фаза 1), кадры
+    чужого диапазона отсекаются по PTS (старт seek может встать раньше,
+    задержанные B-кадры — позже). N=1 без отсечений побитово повторяет
+    старый однопроходный скан. Предположение: закрытые GOP (open-GOP
+    leading-кадры прошлого GOP не воспроизводятся — на камерных H.264
+    и x264-умолчаниях их нет, равенство проверяется тестом и замером).
+    """
+    out = []
+    cont = av.open(path)
+    try:
+        stream = cont.streams.video[0]
+        if start_us is not None:
+            tick = int((start_us / 1e6) / tb + 0.5)
+            cont.seek(tick, stream=stream, backward=True, any_frame=False)
+        end_tick = int((end_us / 1e6) / tb + 0.5) \
+            if end_us is not None else None
+        for pkt in cont.demux(stream):
+            if pkt.pts is None:
+                continue
+            if end_tick is not None and pkt.pts >= end_tick:
+                break
+            try:
+                for fr in stream.decode(pkt):
+                    ts = (fr.pts or 0) * float(fr.time_base or tb)
+                    us = round(ts * 1e6)
+                    if start_us is not None and us < start_us:
+                        continue
+                    if end_us is not None and us >= end_us:
+                        continue
+                    out.append(us)
+            except av.InvalidDataError:
+                continue
+        # Дренаж задержанных B-кадров своего диапазона (у последнего —
+        # всего хвоста файла).
+        try:
+            for fr in stream.decode(None):
+                ts = (fr.pts or 0) * float(fr.time_base or tb)
+                us = round(ts * 1e6)
+                if start_us is not None and us < start_us:
+                    continue
+                if end_us is not None and us >= end_us:
+                    continue
+                out.append(us)
+        except av.FFmpegError:
+            pass
+    finally:
+        cont.close()
+    return out
+
+
+def _scan_visible(path: str, tb: float, kf_us, n_seg: int) -> list:
+    """Фаза 2: видимые PTS N сегментами (по группам ключевых кадров)."""
+    n_seg = max(1, min(int(n_seg), len(kf_us) or 1))
+    if n_seg <= 1:
+        return _decode_range(path, float(tb), None, None)
+    # Делим ключевые кадры на непрерывные группы (остаток — первым).
+    per, rem = divmod(len(kf_us), n_seg)
+    launches = []
+    lo = 0
+    for k in range(n_seg):
+        hi = lo + per + (1 if k < rem else 0)
+        start = kf_us[lo] if lo > 0 else None
+        end = kf_us[hi] if hi < len(kf_us) else None
+        launches.append((start, end))
+        lo = hi
+    f_tb = float(tb)
+    with ThreadPoolExecutor(max_workers=n_seg) as ex:
+        parts = list(ex.map(
+            lambda arg: _decode_range(path, f_tb, arg[0], arg[1]), launches))
+    out = []
+    for part in parts:
+        out.extend(part)
+    return out
 
 
 def _build_index(path: str) -> _Index:
@@ -358,17 +500,6 @@ class _Index:
 
     def __init__(self, path: str) -> None:
         try:
-            cont = av.open(path)
-        except Exception as e:
-            raise ValueError(f"Ошибка открытия видеофайла: {path} ({e})")
-        stream = cont.streams.video[0]
-        self.tb = stream.time_base
-        self.width = stream.codec_context.width
-        self.height = stream.codec_context.height
-        rate = stream.average_rate
-        self.fps = float(rate) if rate else 0.0
-
-        try:
             st = os.stat(path)
             size, mtime_ns = st.st_size, st.st_mtime_ns
         except OSError:
@@ -376,39 +507,31 @@ class _Index:
 
         cached = _cache_load(path, size, mtime_ns)
         if cached is not None:
-            packet_total, visible, kf_us = cached
-            cont.close()
+            packet_total, visible, kf_us, tb_s, fps, width, height = cached
+            if tb_s is None:
+                # Старый формат кэша (без параметров): доберём лёгким
+                # открытием потока, без декода.
+                self.tb, self.fps, self.width, self.height = \
+                    _stream_params(path)
+            else:
+                self.tb = Fraction(tb_s)
+                self.fps = fps or 0.0
+                self.width = width or 0
+                self.height = height or 0
         else:
-            tb = float(self.tb)
-            packet_total = 0
-            kf_us = array.array("q")
-            visible = array.array("q")
-
-            # Один проход: демукс-пакеты и их декод. Декодируем per-packet,
-            # чтобы битый access unit (InvalidDataError) не обрывал весь файл,
-            # а лишь пропускался — так же, как делает ffmpeg при подсчёте.
-            for pkt in cont.demux(stream):
-                if pkt.pts is None:
-                    continue
-                packet_total += 1
-                t = pkt.pts * float(pkt.time_base or self.tb)
-                if pkt.is_keyframe:
-                    kf_us.append(round(t * 1e6))
-                try:
-                    for fr in stream.decode(pkt):
-                        ts = (fr.pts or 0) * float(fr.time_base or tb)
-                        visible.append(round(ts * 1e6))
-                except av.InvalidDataError:
-                    continue
-            # Хвост декодера (отложенные B-кадры): иначе теряются последние.
-            try:
-                for fr in stream.decode(None):
-                    ts = (fr.pts or 0) * float(fr.time_base or tb)
-                    visible.append(round(ts * 1e6))
-            except av.FFmpegError:
-                pass
-            cont.close()
-            _cache_save(path, size, mtime_ns, packet_total, visible, kf_us)
+            # Фаза 1 — быстрый demux-скан (пакеты + ключевые кадры).
+            tb, fps, width, height, packet_total, kf_us = \
+                _scan_packets(path)
+            self.tb = tb
+            self.width = width
+            self.height = height
+            self.fps = fps
+            # Фаза 2 — параллельный декод по сегментам ключевых кадров.
+            n_seg = min(INDEX_WORKERS, len(kf_us)) if kf_us else 1
+            visible = array.array(
+                "q", _scan_visible(path, float(tb), kf_us, n_seg))
+            _cache_save(path, size, mtime_ns, packet_total, visible, kf_us,
+                        tb, fps, width, height)
 
         self.packet_total = packet_total
         self.visible_pts = visible  # array('q'), микросекунды, display-порядок
@@ -670,10 +793,16 @@ class _Provider:
         # Устаревшая спекуляция (прыжок случился, пока задача стояла
         # в очереди пула): декод не стартуем, сразу завершаем. Demand-задачи
         # (speculative=False) и спекуляция текущего поколения идут как обычно.
+        # Сброс — только без ждунов и под локом задачи: усыновление спросом
+        # (_task_for) идёт под тем же локом, гонка «сброс vs attach» закрыта
+        # в обе стороны (проигравший усыновлению видит done и создаёт свежую).
         with self._ilock:
-            stale = task.speculative and task.gen != self._gen
-        if stale:
-            task.abandoned = True
+            gen = self._gen
+        with task._lock:
+            drop = task.speculative and task.gen != gen and task.waiters == 0
+        if drop:
+            with task._lock:
+                task.abandoned = True
             task.mark_done()
             self._finish_task(key, task)
             return
@@ -702,8 +831,12 @@ class _Provider:
                     # Прыжок/смена знака/первый шаг — подтверждённого
                     # направления больше нет.
                     self._walk_dir = 0
-                    if self._last_idx is not None:
-                        # Разрыв: было куда идти, пошли в другое место.
+                    if self._last_idx is not None and self._last_step != 0:
+                        # Разрыв ПОДТВЕРЖДЁННОГО хода. Старт обхода
+                        # (last_step == 0, второй запрос) поколение не
+                        # двигает — иначе веер посадки (оба направления)
+                        # убивался бы следующим же запросом, не начав
+                        # работать.
                         self._gen += 1
             if step != 0:
                 self._last_step = step
@@ -720,15 +853,21 @@ class _Provider:
     def _fanout_depth(direction: int) -> int:
         """Глубина веера непосредственных соседей по направлению обхода.
 
-        Подтверждённый ход ВПЕРЁД (direction > 0) не греем вовсе: вход
-        в следующий GOP всегда с его начала (head≈0), demand-путь отдаёт
-        первый кадр за ~десятки мс — а каждый спекулятивный декод отбирает
-        CPU у demand-стрима (замер: 13–17 к/с вместо ~95). Прыжок/неизвестно
-        (0) и ход НАЗАД (< 0, вход с конца GOP = полный форвард-декод)
-        греют полным веером PREFETCH_AHEAD.
+        Грев строго в направлении движения. Подтверждённый ход ВПЕРЁД
+        (direction > 0) не греем вовсе: вход в следующий GOP всегда с его
+        начала (head≈0), demand-путь отдаёт первый кадр за ~десятки мс —
+        а каждый спекулятивный декод отбирает CPU у demand-стрима (замер:
+        13–17 к/с вместо ~95). Ход НАЗАД (< 0, вход с конца GOP = полный
+        форвард-декод) греет глубоко: 2×PREFETCH_AHEAD, чтобы очередь не
+        осушалась за время хвостового затора. Посадка (0, направления нет)
+        греет ±PREFETCH_AHEAD в ОБЕ стороны (реализует вызывающий веер):
+        не та сторона дёшево инвалидируется gen-guard'ом при следующем
+        прыжке.
         """
         if direction > 0:
             return 0
+        if direction < 0:
+            return 2 * PREFETCH_AHEAD
         return PREFETCH_AHEAD
 
     def _finish_task(self, key: tuple, task: _GopTask) -> None:
@@ -770,30 +909,37 @@ class _Provider:
                 return
             if _any_waiters():
                 return
+            if not _demand_fresh():
+                # Спрос умер (редактор закрыт / пауза дольше IDLE):
+                # цепочки стоят, иначе каскад до конца файла без зрителя.
+                return
         idx = self._ensure_index()
-        step = -1 if direction < 0 else 1
+        # Посадка (direction == 0, направления нет) греет обе стороны:
+        # неизвестно, куда пойдёт движение. Ход — только свою сторону.
+        steps = (1, -1) if direction == 0 else ((-1 if direction < 0 else 1),)
         dmax = PREFETCH_AHEAD if depth is None else max(0, depth)
-        for d in range(1, dmax + 1):
-            ng = g + step * d
-            if ng < 0 or ng >= len(idx.bounds) - 1:
-                break
-            nkey = self._key(ng, quality, scale)
-            with self._ilock:
-                if nkey in self._cache or nkey in self._tasks or nkey in self._scheduled:
-                    continue
-                self._scheduled.add(nkey)
-                task = _GopTask(quality, scale)
-                task.speculative = True
-                task.gen = self._gen
-                self._tasks[nkey] = task
-            try:
-                # Спекуляция — в свой пул (не подпирает demand в FIFO).
-                _PREFETCH_POOL.submit(self._run_pooled, nkey, task)
-            except Exception:
-                # Пул остановлен (завершение приложения) — убираем как несостоявшийся.
+        for step in steps:
+            for d in range(1, dmax + 1):
+                ng = g + step * d
+                if ng < 0 or ng >= len(idx.bounds) - 1:
+                    break
+                nkey = self._key(ng, quality, scale)
                 with self._ilock:
-                    self._tasks.pop(nkey, None)
-                    self._scheduled.discard(nkey)
+                    if nkey in self._cache or nkey in self._tasks or nkey in self._scheduled:
+                        continue
+                    self._scheduled.add(nkey)
+                    task = _GopTask(quality, scale)
+                    task.speculative = True
+                    task.gen = self._gen
+                    self._tasks[nkey] = task
+                try:
+                    # Спекуляция — в свой пул (не подпирает demand в FIFO).
+                    _PREFETCH_POOL.submit(self._run_pooled, nkey, task)
+                except Exception:
+                    # Пул остановлен (завершение приложения) — убираем как несостоявшийся.
+                    with self._ilock:
+                        self._tasks.pop(nkey, None)
+                        self._scheduled.discard(nkey)
 
     # --- чтение кадра ---
     def _note_demand(self) -> None:
@@ -850,7 +996,13 @@ class _Provider:
                 if j is not None:
                     return j, {"source": "task", "abandoned": False}
                 if task.abandoned:
-                    return None, {"source": "abandoned", "abandoned": True}
+                    # Брошенная задача: не 404 сразу, а одиночный декод
+                    # ниже — медленный кадр лучше дырки в воспроизведении.
+                    # 404 — только если кадр реально недекодируем.
+                    logger.debug("gop task abandoned for frame %s, "
+                                 "single fallback", index)
+                    single = self._read_one(index, quality, scale)
+                    return single, {"source": "single", "abandoned": True}
         single = self._read_one(index, quality, scale)
         return single, {"source": "single", "abandoned": False}
 
@@ -865,11 +1017,19 @@ class _Provider:
                 self._tasks[key] = task
                 created = True
             else:
-                created = False
                 # Спрос усыновляет спекулятивную задачу: раз кадр реально
                 # ждут, tasks-gen её больше не сбросит (иначе ждун получил
-                # бы None вместо кадра после прыжка назад).
-                task.speculative = False
+                # бы None вместо кадра после прыжка назад). Под локом задачи
+                # (порядок _ilock -> task._lock везде): done-задачу не
+                # усыновляем, а создаём свежую demand-задачу.
+                with task._lock:
+                    if task.done:
+                        task = _GopTask(quality, scale)
+                        self._tasks[key] = task
+                        created = True
+                    else:
+                        task.speculative = False
+                        created = False
         if created:
             try:
                 _DECODE_POOL.submit(self._run_pooled, key, task)
@@ -1078,6 +1238,22 @@ def _any_waiters() -> bool:
             for t in p._tasks.values():
                 if t.waiters > 0:
                     return True
+    return False
+
+
+def _demand_fresh() -> bool:
+    """Хоть один провайдер получал спрос в окне PREFETCH_IDLE_S.
+
+    Второй (наряду с отсутствием ждунов) гейт цепочек: редактор закрыт
+    или пауза дольше IDLE — дальняя спекуляция стоит, иначе после ухода
+    пользователя цепочки каскадом декодировали бы файл до конца.
+    """
+    now = time.monotonic()
+    with _providers_lock:
+        provs = list(_providers.values())
+    for p in provs:
+        if now - p._last_demand <= PREFETCH_IDLE_S:
+            return True
     return False
 
 

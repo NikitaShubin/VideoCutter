@@ -94,6 +94,10 @@ class GopIndexTest(SimpleTestCase):
     def test_make_bounds_empty(self):
         self.assertEqual(fp._make_bounds(array.array("q"), array.array("q")), [0])
 
+    def test_scan_packets_broken_raises(self):
+        with self.assertRaises(ValueError):
+            fp._scan_packets("/nonexistent/clip.mp4")
+
 
 class FrameProviderTest(SimpleTestCase):
     """Интеграционные тесты на настоящем клипе."""
@@ -125,6 +129,18 @@ class FrameProviderTest(SimpleTestCase):
         self.assertEqual(idx.bounds[-1], CLIP_FRAMES)
         # Больше одного ключевого кадра — иначе тест бессмысленен.
         self.assertGreater(len([b for b in idx.bounds if b < CLIP_FRAMES]), 2)
+
+    def test_index_scan_parallel_matches_single(self):
+        """Сегментный скан побитово равен однопроходному."""
+        tb, fps, w, h, total, kf = fp._scan_packets(self.path)
+        self.assertGreater(len(kf), 1, "в клипе нет нескольких GOP")
+        v1 = fp._scan_visible(self.path, float(tb), kf, 1)
+        v4 = fp._scan_visible(self.path, float(tb), kf, 4)
+        self.assertEqual(v1, v4)
+        self.assertEqual(len(v1), total)
+        idx = _prop(self.path)._ensure_index()
+        self.assertEqual(list(idx.visible_pts), v1)
+        self.assertEqual(idx.bounds, fp._make_bounds(v1, kf))
 
     def test_serve_all_frames(self):
         import cv2
@@ -380,10 +396,28 @@ class CacheCapsTest(SimpleTestCase):
 
     def test_fanout_depth_rule(self):
         # Ход вперёд — тишина (вход в GOP с начала отдаёт demand-путь),
-        # прыжок/неизвестно/назад — полный веер.
+        # ход назад — глубокий веер (хвостовой затор), посадка — веер
+        # на сторону (вызывающий греет обе).
         self.assertEqual(fp._Provider._fanout_depth(1), 0)
         self.assertEqual(fp._Provider._fanout_depth(0), fp.PREFETCH_AHEAD)
-        self.assertEqual(fp._Provider._fanout_depth(-1), fp.PREFETCH_AHEAD)
+        self.assertEqual(
+            fp._Provider._fanout_depth(-1), 2 * fp.PREFETCH_AHEAD)
+
+    def test_landing_warms_both_sides(self):
+        """Посадка (направления нет) греет веер вперёд и назад."""
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg не найден")
+        tmpdir = tempfile.TemporaryDirectory(prefix="vcland_")
+        self.addCleanup(tmpdir.cleanup)
+        path = os.path.join(tmpdir.name, "clip.mp4")
+        _make_clip(path)
+        self.addCleanup(fp.close_source, path)
+        prov = _prop(path)
+        fp.get_frame_jpeg(path, 50)  # первое касание: gop2, direction 0
+        key1 = prov._key(1, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        key3 = prov._key(3, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        self.assertTrue(_wait_cache(prov, key1), "назад от посадки не прогрето")
+        self.assertTrue(_wait_cache(prov, key3), "вперёд от посадки не прогрето")
 
     def test_forward_walk_skips_prefetch(self):
         """Подтверждённый ход вперёд не разбрасывает спекулятивные декоды."""
@@ -506,3 +540,98 @@ class SpeculationGenTest(SimpleTestCase):
         got = prov._task_for(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
         self.assertIs(got, task)
         self.assertFalse(task.speculative)
+
+    def test_stale_drop_respects_waiters(self):
+        # Протухшую задачу, которую ждут, не сбрасываем — декодируем.
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.speculative = True
+        task.gen = 0
+        with task._lock:
+            task.waiters = 1
+        prov._gen = 5
+        key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        prov._tasks[key] = task
+        with mock.patch.object(fp._Provider, "_decode_gop") as dec, \
+                mock.patch.object(fp._Provider, "_prefetch"):
+            prov._run_pooled(key, task)
+        dec.assert_called_once()
+        with task._lock:
+            task.waiters = 0
+
+    def test_adopt_done_task_creates_fresh(self):
+        # Усыновление done-задачи: создаём свежую demand, а не ждём пустоту.
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.speculative = True
+        task.gen = 3
+        task.mark_done()
+        key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        prov._tasks[key] = task
+        prov._gen = 7
+        with mock.patch.object(fp._DECODE_POOL, "submit"), \
+                mock.patch.object(fp._Provider, "_prefetch"):
+            got = prov._task_for(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        self.assertIsNot(got, task)
+        self.assertFalse(got.speculative)
+        self.assertFalse(got.done)
+
+    def test_abandoned_falls_back_to_single(self):
+        # Брошенная задача: одиночный декод вместо мгновенного 404.
+        import types
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        idx = types.SimpleNamespace(total=100, bounds=[0, 50, 100],
+                                    gop_of=lambda i: 0 if i < 50 else 1)
+        prov._ensure_index = lambda: idx
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.abandoned = True
+        task.mark_done()
+        with mock.patch.object(fp._Provider, "_task_for",
+                               return_value=task), \
+                mock.patch.object(fp._Provider, "_read_one",
+                                  return_value=b"JPEG") as single, \
+                mock.patch.object(fp._Provider, "_prefetch"):
+            j, info = prov.get_frame(10)
+        self.assertEqual(j, b"JPEG")
+        self.assertTrue(info["abandoned"])
+        single.assert_called_once()
+
+    def test_walk_start_keeps_generation(self):
+        # Старт обхода (второй запрос) — не разрыв: веер посадки живёт.
+        # Разрыв подтверждённого хода (прыжок/разворот) — двигает поколение.
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        prov._walk_direction(10)  # первое касание
+        g0 = prov._gen
+        prov._walk_direction(11)  # старт: last_step было 0 — без bump
+        self.assertEqual(prov._gen, g0)
+        prov._walk_direction(12)  # подтверждён: без bump
+        self.assertEqual(prov._gen, g0)
+        prov._walk_direction(5)  # разворот: bump
+        self.assertEqual(prov._gen, g0 + 1)
+        prov._walk_direction(6)  # смена знака: bump
+        self.assertEqual(prov._gen, g0 + 2)
+
+    def test_chained_prefetch_gated_by_fresh_demand(self):
+        # Цепочки без свежего спроса запрещены (иначе каскад до конца
+        # файла после ухода пользователя); со свежим — идут.
+        import types
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        fp._providers["/nonexistent/clip.mp4"] = prov
+        self.addCleanup(fp._providers.pop, "/nonexistent/clip.mp4", None)
+        prov._ensure_index = lambda: types.SimpleNamespace(
+            bounds=[0, 25, 50, 75, 96])
+        prov._last_demand = 0.0  # спрос умер давно
+        with mock.patch.object(fp._PREFETCH_POOL, "submit") as sub:
+            prov._prefetch(1, fp.JPEG_QUALITY, fp.FRAME_SCALE, chained=True)
+            self.assertEqual(
+                sub.call_count, 0,
+                "цепочки без свежего спроса запрещены")
+            prov._note_demand()  # свежий спрос
+            prov._prefetch(1, fp.JPEG_QUALITY, fp.FRAME_SCALE, chained=True)
+            self.assertGreater(
+                sub.call_count, 0,
+                "цепочки со свежим спросом идут")
