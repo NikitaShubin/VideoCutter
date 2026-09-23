@@ -389,6 +389,44 @@ class CacheCapsTest(SimpleTestCase):
             n = len(prov._cache)
         self.assertLessEqual(n, 1, f"сжатие до gops=1 не вытеснило: {n}")
 
+    def test_global_lru_evicts_idle_provider(self):
+        """Лимиты машинные: активный провайдер вытесняет idle-соседа."""
+        import unittest.mock as mock
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg не найден")
+        tmpdir = tempfile.TemporaryDirectory(prefix="vclru_")
+        self.addCleanup(tmpdir.cleanup)
+        paths = [os.path.join(tmpdir.name, f"c{i}.mp4") for i in (1, 2)]
+        for p in paths:
+            _make_clip(p)
+            self.addCleanup(fp.close_source, p)
+        fp.set_cache_caps(gops=2, mb=512)
+        provs = [_prop(p) for p in paths]
+        keys = [[pr._key(g, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+                 for g in range(2)] for pr in provs]
+        # Только demand-декоды: веер и цепочки глушим, иначе поздние
+        # спекулятивные посадки смажут порядок вытеснения (флейк).
+        with mock.patch.object(fp, "PREFETCH_AHEAD", 0), \
+                mock.patch.object(fp, "_any_waiters", return_value=True):
+            for p in paths:
+                for i in (1, 30):  # две GOP провайдера
+                    fp.get_frame_jpeg(p, i)
+            for pr, ks in zip(provs, keys):
+                for k in ks:
+                    self.assertTrue(_wait_cache(pr, k),
+                                    f"{k} не попала в кэш")
+        # Всего 4 GOP при лимите 2: старейшие (первого провайдера) вытеснены,
+        # свежие (второго) целы; суммарно в лимите.
+        total = sum(len(pr._cache) for pr in provs)
+        self.assertLessEqual(total, 2, f"глобальный лимит не держится: {total}")
+        with provs[1]._ilock:
+            for k in keys[1]:
+                self.assertIn(k, provs[1]._cache,
+                              "свежие записи активного вытеснены")
+        with provs[0]._ilock:
+            self.assertEqual(len(provs[0]._cache), 0,
+                             "idle-провайдер держит чужое место")
+
     def test_prefetch_pool_separate(self):
         # Спекуляция — свой пул: иначе пачка префетча подпирает demand-декод
         # в FIFO общего пула (секунды заморозки на холодных границах).
@@ -444,14 +482,17 @@ class CacheCapsTest(SimpleTestCase):
             return False
 
         self.assertTrue(quiesce(), "фоновые задачи не завершились")
-        # Два шага вперёд (второй подтверждает ход), сброс счётчика,
-        # затем ход по прогретой группе: пул префетча должен молчать.
-        # Фоновых завершений в окне нет (quiesce) — цепочкам не на что
-        # сработать, кэш-хиты задач не создают (ждунов нет).
+        # Даём спросу протухнуть (PREFETCH_IDLE_S): иначе долетающие
+        # завершения порождают цепочки уже под моком — флейк подсчёта.
+        # После этого фона нет (цепочки без свежего спроса запрещены),
+        # и окно замера детерминировано.
+        time.sleep(fp.PREFETCH_IDLE_S + 0.5)
+        self.assertTrue(quiesce(), "фон не успокоился")
+        # Два шага вперёд подтверждают ход, затем ход по прогретой группе:
+        # пул префетча должен молчать.
         with mock.patch.object(fp._PREFETCH_POOL, "submit") as sub:
             fp.get_frame_jpeg(path, 2)
-            fp.get_frame_jpeg(path, 3)
-            self.assertTrue(quiesce(), "веер прыжка не завершился")
+            fp.get_frame_jpeg(path, 3)  # второй шаг подтверждает ход
             sub.reset_mock()
             for i in (4, 5, 6):
                 fp.get_frame_jpeg(path, i)

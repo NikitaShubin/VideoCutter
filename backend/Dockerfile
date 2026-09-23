@@ -27,4 +27,7 @@ WORKDIR /srv/videocutter/backend
 
 EXPOSE 8001
 
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8001"]
+# Прод: gthread, workers=1 (общий in-memory GOP-кэш!), потоки — env.
+# Локальная отладка: docker compose run --rm videocutter_backend
+# python manage.py runserver 0.0.0.0:8001
+CMD ["sh", "-c", "gunicorn videocutter_dj.wsgi:application --workers 1 --worker-class gthread --threads ${VC_WEB_THREADS:-32} --bind 0.0.0.0:8001 --timeout ${VC_WEB_TIMEOUT:-120}"]

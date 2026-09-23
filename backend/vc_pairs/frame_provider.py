@@ -201,7 +201,7 @@ class _ByteBudget:
         """Новый байтовый лимит (runtime-перенастройка кэша).
 
         Уже приземлённый кэш под новый лимит подгоняет вызывающий
-        (``_evict_to_limit``); транзитные декоды дорабатывают как есть.
+        (``_evict_global``); транзитные декоды дорабатывают как есть.
         """
         with self._cond:
             self._limit = max(int(nbytes), 1)
@@ -675,8 +675,11 @@ class _Provider:
             d = self._cache.get(key)
             if d is None:
                 return None
-            self._cache.move_to_end(key)
-            return d.get(index)
+            j = d.get(index)
+        # Recency — в глобальном LRU (листовой лок, после _ilock).
+        if j is not None:
+            _touch(self.path, key)
+        return j
 
     def _cache_put(self, key: tuple, frames: Dict[int, bytes],
                    reserved: int) -> None:
@@ -688,22 +691,8 @@ class _Provider:
             self._cache[key] = frames
             self._gop_sizes[key] = actual
         _BUDGET.land_in_cache(reserved, actual)
-        self._evict_to_limit()
-
-    def _evict_to_limit(self) -> None:
-        """Вытеснять старые GOP, пока кэш ≤ CACHE_GOPS и ≤ CACHE_MB."""
-        while True:
-            cached = _BUDGET.cached_bytes()
-            with self._ilock:
-                if len(self._cache) <= CACHE_GOPS and \
-                        cached <= (CACHE_MB << 20):
-                    return
-                if not self._cache:
-                    return
-                key, _ = self._cache.popitem(last=False)
-                size = self._gop_sizes.pop(key, 0)
-            if size:
-                _BUDGET.evict_cached(size)
+        _touch(self.path, key)
+        _evict_global()
 
     # --- декод GOP ---
     @staticmethod
@@ -1087,6 +1076,53 @@ _providers: "Dict[str, _Provider]" = {}
 _providers_lock = threading.Lock()
 
 
+# --- глобальный LRU кэша GOP ---
+# Лимиты CACHE_GOPS/CACHE_MB — машинные (на все провайдеры сразу): иначе
+# N юзеров × лимит бесконтрольно растят RAM, а idle-юзер держит своё вечно
+# (его провайдер ничего не кладёт → ничего не чистит), выжимая активного.
+# Recency — здесь (path, key) -> monotonic; per-provider OrderedDict больше
+# не двигаем (остался обычным dict по сути). Порядок блокировок: _ACCESS
+# — всегда листовой (после _ilock или без локов); _providers_lock -> _ilock.
+_ACCESS: dict = {}
+_ACCESS_LOCK = threading.Lock()
+
+
+def _touch(path: str, key: tuple) -> None:
+    """Отметить обращение к записи кэша (листовой лок)."""
+    with _ACCESS_LOCK:
+        _ACCESS[(path, key)] = time.monotonic()
+
+
+def _evict_global() -> None:
+    """Вытеснять старейшие GOP всех провайдеров, пока кэш в лимитах.
+
+    Висячие указатели (запись тронули после claim, но снесли до pop'а;
+    провайдер закрыт) терпятся: отсутствие ключа — пропуск без учёта.
+    Горячая запись, снесённая гонкой, молча передекодируется по спросу.
+    """
+    while True:
+        cached = _BUDGET.cached_bytes()
+        with _providers_lock:
+            total_gops = sum(len(p._cache) for p in _providers.values())
+        if total_gops <= CACHE_GOPS and cached <= (CACHE_MB << 20):
+            return
+        with _ACCESS_LOCK:
+            if not _ACCESS:
+                return
+            victim = min(_ACCESS, key=lambda r: _ACCESS[r])
+            _ACCESS.pop(victim, None)
+        vpath, vkey = victim
+        with _providers_lock:
+            prov = _providers.get(vpath)
+        if prov is None:
+            continue
+        with prov._ilock:
+            frames = prov._cache.pop(vkey, None)
+            size = prov._gop_sizes.pop(vkey, 0) if frames is not None else 0
+        if size:
+            _BUDGET.evict_cached(size)
+
+
 def _get_provider(path: str) -> _Provider:
     with _providers_lock:
         p = _providers.get(path)
@@ -1222,6 +1258,11 @@ def try_get_metadata(path: str) -> Optional[dict]:
 def close_source(path: str) -> None:
     with _providers_lock:
         _providers.pop(path, None)
+    # Чистим глобальный LRU от записей ушедшего провайдера, иначе
+    # висячие указатели вечно занимают место в _ACCESS.
+    with _ACCESS_LOCK:
+        for rec in [r for r in _ACCESS if r[0] == path]:
+            _ACCESS.pop(rec, None)
 
 
 def _any_waiters() -> bool:
@@ -1274,19 +1315,25 @@ def tuning_info() -> dict:
 
 
 def cache_usage() -> dict:
-    """Фактическое заполнение кэша по всем провайдерам."""
+    """Фактическое заполнение кэша по всем провайдерам + разбивка."""
     with _providers_lock:
-        provs = list(_providers.values())
+        provs = list(_providers.items())
     gops = 0
-    for p in provs:
+    per_source = {}
+    for path, p in provs:
         with p._ilock:
-            gops += len(p._cache)
+            n = len(p._cache)
+            mb = round(sum(p._gop_sizes.values()) / (1 << 20), 1)
+        gops += n
+        if n:
+            per_source[os.path.basename(path)] = {"gops": n, "mb": mb}
     return {
         "gops": gops,
         "gops_cap": CACHE_GOPS,
         "mb": round(_BUDGET.cached_bytes() / (1 << 20), 1),
         "mb_cap": CACHE_MB,
         "sources": len(provs),
+        "per_source": per_source,
     }
 
 
@@ -1316,8 +1363,5 @@ def set_cache_caps(*, gops: Optional[int] = None,
         CACHE_MB = mb
         _BUDGET.set_limit(mb << 20)
         _TUNE_SOURCE["VC_GOP_CACHE_MB"] = "runtime"
-    with _providers_lock:
-        provs = list(_providers.values())
-    for p in provs:
-        p._evict_to_limit()
+    _evict_global()
     return cache_caps()
