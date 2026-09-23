@@ -802,9 +802,9 @@ export function CutEditor({ pairId, onBack }: Props) {
           </span>
           <span
             className="info"
-            title={direction === -1 ? "направление: назад (R — сменить)" : "направление: вперёд (R — сменить)"}
-            aria-label={direction === -1 ? "направление воспроизведения: назад" : "направление воспроизведения: вперёд"}
-          >скорость: {speed}· {direction === -1 ? "◀" : "▶"}</span>
+            title={playing ? (direction === -1 ? "идёт назад (R — сменить)" : "идёт вперёд (R — сменить)") : (direction === -1 ? "пауза (пробел), направление: назад" : "пауза (пробел), направление: вперёд")}
+            aria-label={playing ? (direction === -1 ? "воспроизведение назад" : "воспроизведение вперёд") : (direction === -1 ? "пауза, направление: назад" : "пауза, направление: вперёд")}
+          >{playing ? (direction === -1 ? "◀" : "▶") : (direction === -1 ? "◁" : "▷")}x{speed}</span>
           {pair.pair_warning && (
             <span className="info warn" title={pair.pair_warning}>
               ⚠ {pair.pair_warning}
