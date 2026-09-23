@@ -883,15 +883,6 @@ export function CutEditor({ pairId, onBack }: Props) {
                 : "Экспорт (E)"}
             </span>
           </button>
-          {exportItems !== null && exportItems.length > 0 && !exporting && (
-            <button
-              className="toolbar-help"
-              onClick={() => handleExport(true)}
-              title="Перегнать заново (игнорировать готовые)"
-            >
-              ⟳
-            </button>
-          )}
           <button
             className="toolbar-help"
             onClick={() => setHelpOpen(true)}
@@ -975,6 +966,12 @@ export function CutEditor({ pairId, onBack }: Props) {
         <div className="export-list">
           <h3>
             Фрагменты экспортированы (оригиналы):
+            <button
+              className="export-list-close"
+              onClick={() => handleExport(true)}
+              title="Перегнать заново (игнорировать готовые файлы)"
+              aria-label="Перегнать фрагменты заново"
+            >⟳</button>
             <button
               className="export-list-close"
               onClick={() => setExportItems(null)}
