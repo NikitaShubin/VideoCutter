@@ -159,6 +159,13 @@ _DECODE_POOL = ThreadPoolExecutor(max_workers=DECODE_CORES)
 # в своём (автотюн: ~1/3 декод-воркеров): прогрев идёт, спросу не мешает.
 PREFETCH_WORKERS = _env_or_auto("VC_PREFETCH_WORKERS", _AUTO["prefetch_workers"])
 _PREFETCH_POOL = ThreadPoolExecutor(max_workers=max(1, PREFETCH_WORKERS))
+# Параллельных demand-декодов на один провайдер (честность между задачами:
+# скраб одного юзера (8-wide) не душит одиночный кадр другого в общем FIFO
+# пула; co-waiters одной GOP едут бесплатно на том же декоде).
+# Блокирует HTTP-поток (gthread), не пул: чужие декоды идут своим чередом.
+# HTTP-потоков (VC_WEB_THREADS) должно хватать с запасом поверх суммы кэпов.
+DEMAND_PER_PROVIDER = _env_or_auto(
+    "VC_DEMAND_PER_PROVIDER", max(2, DECODE_CORES // 4))
 # Страховка по памяти: потоков декода не больше, чем DECODE_CORES, т.к. вся
 # работа идёт через пул; транзиент на 1080p-группу ~6 МБ BGR + JPEG группы.
 _HEAVY = threading.BoundedSemaphore(DECODE_CORES)
@@ -569,6 +576,7 @@ class _GopTask:
         self.scale = scale
         self.speculative = False  # префетч: может быть сброшен прыжком
         self.gen = 0  # поколение позиции, при котором задача создана
+        self.holds_demand_slot = False  # держит слот demand-семафора провайдера
 
     def put(self, frame: int, bgr: "numpy.ndarray") -> None:
         jpeg = _Provider._encode(bgr, self.quality, self.scale)
@@ -650,6 +658,7 @@ class _Provider:
         self._gen = 0  # поколение позиции: каждый разрыв обхода (прыжок,
         # смена знака) инвалидирует queued-спекуляцию прошлого места
         self._last_demand = 0.0  # monotonic-время последнего get_frame
+        self._demand_sem = threading.BoundedSemaphore(DEMAND_PER_PROVIDER)
 
     @staticmethod
     def _key(g: int, quality: int, scale: float) -> tuple:
@@ -860,6 +869,11 @@ class _Provider:
         return PREFETCH_AHEAD
 
     def _finish_task(self, key: tuple, task: _GopTask) -> None:
+        # Слот demand-семафора — первым (без локов): декод завершён,
+        # соседи по провайдеру могут стартовать немедленно.
+        if task.holds_demand_slot:
+            task.holds_demand_slot = False
+            self._demand_sem.release()
         with self._ilock:
             self._tasks.pop(key, None)
             self._scheduled.discard(key)
@@ -1020,6 +1034,11 @@ class _Provider:
                         task.speculative = False
                         created = False
         if created:
+            # Слот demand-семафора — ВНЕ _ilock (иначе дедлок: _finish_task
+            # берёт _ilock чтобы слот освободить). Блокирует HTTP-поток,
+            # не пул: чужие провайдеры декодируют своим чередом.
+            self._demand_sem.acquire()
+            task.holds_demand_slot = True
             try:
                 _DECODE_POOL.submit(self._run_pooled, key, task)
             except Exception:
@@ -1027,6 +1046,8 @@ class _Provider:
                 with self._ilock:
                     self._tasks.pop(key, None)
                     self._scheduled.discard(key)
+                task.holds_demand_slot = False
+                self._demand_sem.release()
                 return None
             # Соседние группы прогреваем сразу — параллельно текущему декоду,
             # тогда переход через границу не застанет холодную группу.

@@ -676,3 +676,48 @@ class SpeculationGenTest(SimpleTestCase):
             self.assertGreater(
                 sub.call_count, 0,
                 "цепочки со свежим спросом идут")
+
+class DemandFairnessTest(SimpleTestCase):
+    """Честность demand: зависший провайдер не душит соседний."""
+
+    def test_blocked_provider_does_not_starve_other(self):
+        import threading
+        import unittest.mock as mock
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg не найден")
+        tmpdir = tempfile.TemporaryDirectory(prefix="vcfair_")
+        self.addCleanup(tmpdir.cleanup)
+        paths = [os.path.join(tmpdir.name, f"f{i}.mp4") for i in (1, 2)]
+        for p in paths:
+            _make_clip(p)
+            self.addCleanup(fp.close_source, p)
+        path_a, path_b = paths
+        prov_a, prov_b = _prop(path_a), _prop(path_b)
+        # Семафоры — на провайдер, не общие.
+        self.assertIsNot(prov_a._demand_sem, prov_b._demand_sem)
+        gate = threading.Event()
+        orig = fp._Provider._decode_gop
+
+        def blocking(self_, g, task):
+            if self_.path == path_a:
+                gate.wait(timeout=30)
+            return orig(self_, g, task)
+
+        results = {}
+        with mock.patch.object(fp._Provider, "_decode_gop", blocking):
+            t = threading.Thread(
+                target=lambda: results.setdefault(
+                    "a", fp.get_frame_jpeg(path_a, 1)), daemon=True)
+            t.start()
+            time.sleep(1.0)  # A встал в декоде и держит свой слот
+            tb = threading.Thread(
+                target=lambda: results.setdefault(
+                    "b", fp.get_frame_jpeg(path_b, 1)), daemon=True)
+            tb.start()
+            tb.join(timeout=15)
+            self.assertFalse(tb.is_alive(), "B ждёт чужого декода")
+            self.assertIsNotNone(results["b"][0])
+            gate.set()
+            t.join(timeout=15)
+            self.assertFalse(t.is_alive())
+            self.assertIsNotNone(results["a"][0])

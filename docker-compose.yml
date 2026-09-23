@@ -20,6 +20,11 @@ services:
       # от ncpu/RAM (cgroup, иначе хост): эффективные значения — в логе
       # бэкенда и GET /api/v1/cache -> tuning. Явный VC_* бьёт автотюн:
       # VC_DECODE_CORES / VC_PREFETCH_WORKERS / VC_GOP_CACHE_MB / VC_GOP_CACHE_GOPS.
+      # Честность demand между задачами: VC_DEMAND_PER_PROVIDER (авто: декодеры//4).
+      # Очередь экспортов: VC_EXPORT_WORKERS (авто: max(1,min(4,ncpu//4))).
+      # HTTP-потоков (gthread) должно хватать с запасом: блокировки очередей
+      # занимают поток, не CPU. Формула запаса: threads >> demand_cap + exports.
+      VC_WEB_THREADS: "32"
       # Приоритет экспорта: низкий (только свободные CPU).
       VC_EXPORT_NICE: "19"
       DJANGO_ALLOWED_HOSTS: "*"

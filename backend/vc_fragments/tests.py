@@ -20,7 +20,8 @@ from django.conf import settings
 from django.test import SimpleTestCase
 
 from workspace import WORKSPACE_ROOT, _workspaces
-from vc_fragments.views import EXPORTS, EXPORTS_LOCK, EXPORT_CANCEL
+from vc_fragments.views import EXPORTS, EXPORTS_LOCK, EXPORT_CANCEL, \
+    _EXPORT_QUEUE
 
 HTTP_OK = 200
 HTTP_BAD_REQUEST = 400
@@ -64,6 +65,7 @@ class WorkspaceApiTestBase(SimpleTestCase):
         with EXPORTS_LOCK:
             EXPORTS.clear()
             EXPORT_CANCEL.clear()
+            del _EXPORT_QUEUE[:]
 
         # Списки URL.
         self.ws_list_url = "/api/v1/workspaces/"
@@ -676,6 +678,141 @@ class ExportApiTests(WorkspaceApiTestBase):
         vw.release()
         with self.assertRaises(FFmpegError):
             export_views._verify_cut(self.video, 0, other, 10)
+
+
+class ExportQueueTests(WorkspaceApiTestBase):
+    """Очередь экспортов: слоты, FIFO, отмена queued, 409, force."""
+
+    def _make_ws(self, ws_id):
+        ws_dir = os.path.join(self._tmpdir, ws_id)
+        os.makedirs(ws_dir, exist_ok=True)
+        src = os.path.join(os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        shutil.copy2(src, os.path.join(ws_dir, "visualization.mp4"))
+        with open(os.path.join(ws_dir, "fragments.tsv"), "w") as f:
+            f.write("start\tend\tcomment\n0\t3\tстарт\n")
+        return ws_id
+
+    def _urls(self, ws_id):
+        base = f"/api/v1/pairs/{ws_id}/export"
+        return base, base + "/status", base + "/cancel"
+
+    def _wait_state(self, status_url, want, timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            st = self.client.get(status_url).json().get("state")
+            if st == want:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _gated_exporter(self, gate):
+        class GatedExporter:
+            def __init__(self, *a, **k):
+                pass
+
+            def extract_fragments(self, fragments, progress=None,
+                                  cancelled=None, frame_ts_ranges=None):
+                if progress:
+                    progress(1, len(fragments), fragments[0])
+                gate.wait(timeout=30)
+                return []
+
+        return GatedExporter
+
+    def test_second_export_queued_behind_first(self):
+        import vc_fragments.views as export_views
+        ws_b = self._make_ws("test-ws-b")
+        url_b, st_b, _ = self._urls(ws_b)
+        gate = threading.Event()
+        with mock.patch.object(export_views, "_export_capacity",
+                               return_value=1), \
+                mock.patch.object(export_views, "Exporter",
+                                  self._gated_exporter(gate)):
+            body_a = self.client.post(self.export_url).json()
+            self.assertEqual(body_a["state"], "running")
+            body_b = self.client.post(url_b).json()
+            self.assertEqual(body_b["state"], "queued")
+            self.assertEqual(body_b["position"], 1)
+            st = self.client.get(st_b).json()
+            self.assertEqual(st["state"], "queued")
+            gate.set()
+            self.assertTrue(self._wait_state(self.export_status_url, "done"))
+            self.assertTrue(self._wait_state(st_b, "done"))
+
+    def test_cancel_queued(self):
+        import vc_fragments.views as export_views
+        ws_b = self._make_ws("test-ws-b")
+        url_b, st_b, cancel_b = self._urls(ws_b)
+        gate = threading.Event()
+        with mock.patch.object(export_views, "_export_capacity",
+                               return_value=1), \
+                mock.patch.object(export_views, "Exporter",
+                                  self._gated_exporter(gate)):
+            self.client.post(self.export_url)
+            self.client.post(url_b)
+            resp = self.client.post(cancel_b)
+            self.assertEqual(resp.status_code, HTTP_OK)
+            self.assertEqual(resp.json()["state"], "cancelled")
+            gate.set()
+            self.assertTrue(self._wait_state(self.export_status_url, "done"))
+            # Снятый с очереди не стартовал.
+            self.assertEqual(self.client.get(st_b).json()["state"],
+                             "cancelled")
+
+    def test_double_post_conflict(self):
+        import vc_fragments.views as export_views
+        gate = threading.Event()
+        with mock.patch.object(export_views, "_export_capacity",
+                               return_value=1), \
+                mock.patch.object(export_views, "Exporter",
+                                  self._gated_exporter(gate)):
+            self.client.post(self.export_url)
+            resp = self.client.post(self.export_url)
+            self.assertEqual(resp.status_code, HTTP_CONFLICT)
+            gate.set()
+            self.assertTrue(self._wait_state(self.export_status_url, "done"))
+
+    def test_force_requeues_single(self):
+        import vc_fragments.views as export_views
+        from vc_fragments.views import _EXPORT_QUEUE as _EQ
+        ws_b = self._make_ws("test-ws-b")
+        url_b, st_b, _ = self._urls(ws_b)
+        gate = threading.Event()
+        with mock.patch.object(export_views, "_export_capacity",
+                               return_value=1), \
+                mock.patch.object(export_views, "Exporter",
+                                  self._gated_exporter(gate)):
+            self.client.post(self.export_url)
+            self.client.post(url_b)
+            resp = self.client.post(url_b + "?force=1")
+            self.assertEqual(resp.status_code, HTTP_OK)
+            self.assertEqual(resp.json()["state"], "queued")
+            self.assertEqual(len(_EQ), 1)
+            gate.set()
+            self.assertTrue(self._wait_state(self.export_status_url, "done"))
+            self.assertTrue(self._wait_state(st_b, "done"))
+
+    def test_positions_recompute_after_cancel(self):
+        import vc_fragments.views as export_views
+        ws_b = self._make_ws("test-ws-b")
+        ws_c = self._make_ws("test-ws-c")
+        _, _, cancel_b = self._urls(ws_b)
+        _, st_c, _ = self._urls(ws_c)
+        gate = threading.Event()
+        with mock.patch.object(export_views, "_export_capacity",
+                               return_value=1), \
+                mock.patch.object(export_views, "Exporter",
+                                  self._gated_exporter(gate)):
+            self.client.post(self.export_url)
+            self.client.post(f"/api/v1/pairs/{ws_b}/export")
+            body_c = self.client.post(f"/api/v1/pairs/{ws_c}/export").json()
+            self.assertEqual(body_c["position"], 2)
+            self.client.post(cancel_b)
+            st = self.client.get(st_c).json()
+            self.assertEqual(st["position"], 1)
+            gate.set()
+            self.assertTrue(self._wait_state(self.export_status_url, "done"))
+            self.assertTrue(self._wait_state(st_c, "done"))
 
 
 class SettingsApiTests(WorkspaceApiTestBase):

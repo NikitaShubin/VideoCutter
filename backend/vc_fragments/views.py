@@ -45,6 +45,75 @@ EXPORTS_LOCK = threading.Lock()
 EXPORT_CANCEL: set[str] = set()
 
 
+# --- очередь экспортов (CVAT-style, in-process, без Redis) ---
+def _export_capacity() -> int:
+    """Параллельных экспортов: автотюн от CPU + VC_EXPORT_WORKERS-оверрайд.
+
+    Work-conserving: слот свободен — старт сразу (параллель при idle),
+    нет — FIFO-очередь. Один экспорт ~3-4 ядра (libx264 slow 1080p).
+    Читается динамически (тесты + будущий runtime).
+    """
+    raw = os.environ.get("VC_EXPORT_WORKERS")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return max(1, min(4, (os.cpu_count() or 4) // 4))
+
+
+# FIFO workspace_id ожидающих (под EXPORTS_LOCK). Состояние каждого —
+# в EXPORTS ("queued" + position). POST никогда не блокируется.
+_EXPORT_QUEUE: list = []
+
+
+def _running_count() -> int:
+    """Число бегущих экспортов (вызывать под EXPORTS_LOCK)."""
+    return sum(1 for s in EXPORTS.values() if s.get("state") == "running")
+
+
+def _requeue_positions() -> None:
+    """Пересчитать position очереди (вызывать под EXPORTS_LOCK)."""
+    for pos, ws_id in enumerate(_EXPORT_QUEUE, 1):
+        st = EXPORTS.get(ws_id)
+        if st is not None and st.get("state") == "queued":
+            st["position"] = pos
+
+
+def _run_export_guarded(ws_id: str) -> None:
+    """Обёртка потока экспорта: любой исход освобождает слот следующему."""
+    try:
+        _run_export(ws_id)
+    finally:
+        _promote_exports()
+
+
+def _spawn_export(ws_id: str) -> None:
+    threading.Thread(target=_run_export_guarded, args=(ws_id,),
+                     daemon=True).start()
+
+
+def _promote_exports() -> None:
+    """Занять освободившиеся слоты первыми из очереди.
+
+    Под lock — только решить и пометить; spawn потоков снаружи, чтобы
+    не держать lock на создании потоков.
+    """
+    to_start = []
+    with EXPORTS_LOCK:
+        running = _running_count()
+        while running < _export_capacity() and _EXPORT_QUEUE:
+            nxt = _EXPORT_QUEUE.pop(0)
+            prev = EXPORTS.get(nxt) or {}
+            EXPORTS[nxt] = {"state": "running", "index": 0,
+                            "total": prev.get("total", 1)}
+            to_start.append(nxt)
+            running += 1
+        _requeue_positions()
+    for ws_id in to_start:
+        _spawn_export(ws_id)
+
+
 class _ExportCancelled(Exception):
     """Флаг отмены: экспорт остановлен пользователем между фрагментами."""
 
@@ -444,6 +513,10 @@ def fragment_export(request, pair_id: str):
 
     Нарезки актуальны (хеш границ+видео совпал с готовыми) — сразу done
     с файлами, без прогона. ``?force=1`` — всегда гнать заново.
+    Слоты ограничены (_export_capacity): занято — заявка встаёт в FIFO
+    (state queued + position), слот освобождается финишем любого экспорта.
+    Повторный POST при running/queued — 409 (кроме force: старую заявку
+    снимаем — бегущей шлём cancel, queued выкидываем — и встаём заново).
     """
     ws = get_workspace(pair_id)
     if ws is None:
@@ -453,15 +526,28 @@ def fragment_export(request, pair_id: str):
     if not frags:
         return JsonResponse({"error": "Нет фрагментов для экспорта"}, status=400)
 
+    force = request.GET.get("force") == "1"
     with EXPORTS_LOCK:
         current = EXPORTS.get(pair_id)
-        if current and current["state"] == "running":
-            return JsonResponse(
-                {"error": "Экспорт уже выполняется для этого workspace"},
-                status=409,
-            )
+        if current and current["state"] in ("running", "queued"):
+            if not force:
+                return JsonResponse(
+                    {"error": "Экспорт уже выполняется/ожидает для этого "
+                              "workspace (state: %s)" % current["state"]},
+                    status=409,
+                )
+            # Force поверх активной заявки: бегущей — cancel, queued —
+            # из очереди; ниже встанет свежая (сериализация на workspace:
+            # два потока один ws никогда не режут параллельно).
+            if current["state"] == "running":
+                EXPORT_CANCEL.add(pair_id)
+            else:
+                if pair_id in _EXPORT_QUEUE:
+                    _EXPORT_QUEUE.remove(pair_id)
+                EXPORTS.pop(pair_id, None)
+                _requeue_positions()
 
-    if request.GET.get("force") != "1":
+    if not force:
         done = _current_done(pair_id)
         if done is not None:
             return JsonResponse(done)
@@ -469,11 +555,28 @@ def fragment_export(request, pair_id: str):
     # Несоответствие — сносим прежние наши нарезки и запускаем новое.
     _drop_previous_outputs(ws)
 
+    to_start = []
     with EXPORTS_LOCK:
-        EXPORTS[pair_id] = {"state": "running", "index": 0, "total": len(frags)}
+        # Бегущий force-отменённый предшественник ещё держит слот до выхода
+        # (guard продвинет очередь) — честная сериализация без параллели.
+        if _running_count() < _export_capacity():
+            EXPORTS[pair_id] = {"state": "running", "index": 0,
+                                "total": len(frags)}
+            to_start.append(pair_id)
+            body = {"state": "running", "index": 0, "total": len(frags)}
+        else:
+            if pair_id not in _EXPORT_QUEUE:
+                _EXPORT_QUEUE.append(pair_id)
+            EXPORTS[pair_id] = {
+                "state": "queued",
+                "position": _EXPORT_QUEUE.index(pair_id) + 1,
+                "total": len(frags),
+            }
+            body = dict(EXPORTS[pair_id])
 
-    threading.Thread(target=_run_export, args=(pair_id,), daemon=True).start()
-    return JsonResponse({"state": "running", "index": 0, "total": len(frags)})
+    for ws_id in to_start:
+        _spawn_export(ws_id)
+    return JsonResponse(body)
 
 
 @require_http_methods(["POST"])
@@ -481,7 +584,8 @@ def fragment_export_cancel(request, pair_id: str):
     """Просит фоновый экспорт остановиться (в т.ч. посреди фрагмента, ~0.5с).
 
     Частичные файлы этого запуска зачищаются, состояние — "cancelled".
-    Отмена не бегущего экспорта — 409.
+    Queued-заявка снимается с очереди сразу (тоже "cancelled").
+    Отмена не бегущего/не ждущего экспорта — 409.
     """
     ws = get_workspace(pair_id)
     if ws is None:
@@ -489,6 +593,12 @@ def fragment_export_cancel(request, pair_id: str):
 
     with EXPORTS_LOCK:
         current = EXPORTS.get(pair_id)
+        if current and current["state"] == "queued":
+            if pair_id in _EXPORT_QUEUE:
+                _EXPORT_QUEUE.remove(pair_id)
+            EXPORTS[pair_id] = {"state": "cancelled"}
+            _requeue_positions()
+            return JsonResponse({"state": "cancelled"})
         if not current or current["state"] != "running":
             return JsonResponse(
                 {"error": "Экспорт не выполняется для этого workspace"},
@@ -504,11 +614,17 @@ def fragment_export_status(request, pair_id: str):
     with EXPORTS_LOCK:
         state = EXPORTS.get(pair_id)
     if state and state.get("state") != "done":
-        # Бегущий/упавший/отменённый — как есть (память).
+        # Бегущий/упавший/отменённый/ждущий — как есть (память).
         if state["state"] == "error":
             return JsonResponse({"state": "error", "error": state.get("error", "Ошибка экспорта")})
         if state["state"] in ("cancelled", "cancelling"):
             return JsonResponse({"state": state["state"]})
+        if state["state"] == "queued":
+            return JsonResponse({
+                "state": "queued",
+                "position": state.get("position", 1),
+                "total": state.get("total", 1),
+            })
         return JsonResponse({
             "state": "running",
             "index": state.get("index", 0),
