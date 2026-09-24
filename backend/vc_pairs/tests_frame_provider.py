@@ -55,6 +55,19 @@ def _wait_cache(prov, key, timeout=15.0) -> bool:
     return False
 
 
+def _wait_scheduled(prov, key, timeout=30.0) -> bool:
+    """Ждать, пока GOP появится хоть где-то в работе (задача, очередь,
+    кэш): фиксирует ФАКТ запуска веера, а не скорость декода."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with prov._ilock:
+            if key in prov._cache or key in prov._tasks \
+                    or key in prov._scheduled:
+                return True
+        time.sleep(0.05)
+    return False
+
+
 class GopIndexTest(SimpleTestCase):
     """Чистые юнит-тесты геометрии GOP без медиа."""
 
@@ -486,8 +499,37 @@ class CacheCapsTest(SimpleTestCase):
             self.assertEqual(prov._fanout_depth_live(0), 1)
             self.assertEqual(prov._fanout_depth_live(1), 0)
 
+    def test_landing_forward_capped_to_near_neighbor(self):
+        # Посадка: назад — глубоко, вперёд — только g+1. Иначе каждый
+        # прыжок/открытие — лишние полные декоды и фриз demand-стрима.
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/land.mp4")
+        idx = mock.Mock()
+        idx.bounds = list(range(0, 200, 10))
+        idx.total = 200
+        submitted = []
+
+        def fake_submit(fn, key, task):
+            submitted.append(key[0])
+            return mock.Mock()
+
+        pool = mock.Mock()
+        pool.submit.side_effect = fake_submit
+        with mock.patch.object(prov, "_ensure_index", return_value=idx), \
+                mock.patch.object(fp, "_PREFETCH_POOL", pool):
+            prov._prefetch(10, fp.JPEG_QUALITY, fp.FRAME_SCALE, 0)
+        fwd = sorted(g for g in submitted if g > 10)
+        bwd = sorted(g for g in submitted if g < 10)
+        self.assertEqual(fwd, [11])
+        self.assertEqual(bwd, [7, 8, 9])
+
     def test_landing_warms_both_sides(self):
-        """Посадка (направления нет) греет веер вперёд и назад."""
+        """Посадка (направления нет) греет веер вперёд и назад.
+
+        Ждём именно ПЛАНИРОВАНИЯ соседей (ключи в _tasks/_scheduled/_cache),
+        а не их полного декода: на гружёной машине декод тянется, а факт
+        запуска веера — детерминирован окончанием demand-задачи.
+        """
         if shutil.which("ffmpeg") is None:
             raise unittest.SkipTest("ffmpeg не найден")
         tmpdir = tempfile.TemporaryDirectory(prefix="vcland_")
@@ -499,8 +541,10 @@ class CacheCapsTest(SimpleTestCase):
         fp.get_frame_jpeg(path, 50)  # первое касание: gop2, direction 0
         key1 = prov._key(1, fp.JPEG_QUALITY, fp.FRAME_SCALE)
         key3 = prov._key(3, fp.JPEG_QUALITY, fp.FRAME_SCALE)
-        self.assertTrue(_wait_cache(prov, key1), "назад от посадки не прогрето")
-        self.assertTrue(_wait_cache(prov, key3), "вперёд от посадки не прогрето")
+        self.assertTrue(
+            _wait_scheduled(prov, key1), "назад от посадки не запланировано")
+        self.assertTrue(
+            _wait_scheduled(prov, key3), "вперёд от посадки не запланировано")
 
     def test_forward_walk_skips_prefetch(self):
         """Подтверждённый ход вперёд не разбрасывает спекулятивные декоды."""
@@ -526,6 +570,37 @@ class CacheCapsTest(SimpleTestCase):
                 time.sleep(0.05)
             return False
 
+        def quiesce_global():
+            # Тишина по ВСЕМ провайдерам и очередям пулов, дважды подряд:
+            # хвосты _finish_task (уже снятые с _tasks) и чужие фоновые
+            # задачи тоже должны осесть, иначе их chained-сабмиты падают
+            # в окно замера (флейк под нагрузкой).
+            deadline = time.monotonic() + 30.0
+            quiet_since = None
+            while time.monotonic() < deadline:
+                busy = False
+                with fp._providers_lock:
+                    provs = list(fp._providers.values())
+                for p in provs:
+                    with p._ilock:
+                        if p._tasks:
+                            busy = True
+                            break
+                if not busy and (
+                        fp._DECODE_POOL._work_queue.qsize()
+                        or fp._PREFETCH_POOL._work_queue.qsize()):
+                    busy = True
+                now = time.monotonic()
+                if not busy:
+                    if quiet_since is None:
+                        quiet_since = now
+                    elif now - quiet_since >= 1.0:
+                        return True
+                else:
+                    quiet_since = None
+                time.sleep(0.1)
+            return False
+
         self.assertTrue(quiesce(), "фоновые задачи не завершились")
         # Даём спросу протухнуть (PREFETCH_IDLE_S): иначе долетающие
         # завершения порождают цепочки уже под моком — флейк подсчёта.
@@ -533,17 +608,83 @@ class CacheCapsTest(SimpleTestCase):
         # и окно замера детерминировано.
         time.sleep(fp.PREFETCH_IDLE_S + 0.5)
         self.assertTrue(quiesce(), "фон не успокоился")
-        # Два шага вперёд подтверждают ход, затем ход по прогретой группе:
-        # пул префетча должен молчать.
+        self.assertTrue(quiesce_global(), "глобальный фон не успокоился")
+        # Два шага вперёд подтверждают ход. Веер кадра 2 (direction 0,
+        # посадка) идёт РЕАЛЬНЫМ пулом, без мока: мок глотает исполнение,
+        # и задачи висели бы вечно. Ждём тишины, затем меряем ход
+        # по прогретой группе под моком: пул префетча должен молчать.
+        fp.get_frame_jpeg(path, 2)
+        fp.get_frame_jpeg(path, 3)  # второй шаг подтверждает ход
+        self.assertTrue(quiesce(), "посадочный веер не завершился")
+        self.assertTrue(quiesce_global(), "глобальный фон не успокоился")
         with mock.patch.object(fp._PREFETCH_POOL, "submit") as sub:
-            fp.get_frame_jpeg(path, 2)
-            fp.get_frame_jpeg(path, 3)  # второй шаг подтверждает ход
-            sub.reset_mock()
             for i in (4, 5, 6):
                 fp.get_frame_jpeg(path, i)
             time.sleep(0.3)
             self.assertEqual(sub.call_count, 0,
                              "ход вперёд должен молчать в пуле префетча")
+
+    def test_demand_fanout_deferred_until_landing(self):
+        # Веер demand-задачи не конкурирует с её же декодом: при создании —
+        # тишина, по факту посадки — соседи. Иначе прыжок топил бы
+        # собственный декод (фризы после прыжков/переоткрытий).
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/defer.mp4")
+        idx = mock.Mock()
+        idx.bounds = list(range(0, 200, 10))
+        idx.total = 200
+        dsubmitted, psubmitted = [], []
+        dpool, ppool = mock.Mock(), mock.Mock()
+        dpool.submit.side_effect = lambda fn, key, task: dsubmitted.append(key[0])
+        ppool.submit.side_effect = lambda fn, key, task: psubmitted.append(key[0])
+        with mock.patch.object(prov, "_ensure_index", return_value=idx), \
+                mock.patch.object(fp, "_DECODE_POOL", dpool), \
+                mock.patch.object(fp, "_PREFETCH_POOL", ppool), \
+                mock.patch.object(fp, "_demand_fresh", return_value=False):
+            task = prov._task_for(5, fp.JPEG_QUALITY, fp.FRAME_SCALE, 0)
+            self.assertIsNotNone(task)
+            self.assertEqual(dsubmitted, [5])  # demand ушёл сразу
+            self.assertEqual(psubmitted, [])  # веер ждёт посадки
+            self.assertIsNotNone(task.fanout_pending)
+            task.frames = {50: b"x"}
+            task.mark_done()
+            prov._finish_task(
+                prov._key(5, fp.JPEG_QUALITY, fp.FRAME_SCALE), task)
+            # Посадка: веер поехал (назад глубоко, вперёд только g+1).
+            # Chained притушен моком — меряем именно отложенный веер.
+            self.assertIn(6, psubmitted)
+            self.assertTrue(set(psubmitted) <= {2, 3, 4, 6})
+            for g in psubmitted:
+                self.assertLess(g, 10)
+
+    def test_confirmed_forward_fanout_depth_is_zero(self):
+        # Инвариант без таймингов: живой предел глубины для хода вперёд — 0
+        # при любом спросе (иначе спекуляция душит demand-стрим).
+        prov = fp._Provider("/nonexistent/fwd.mp4")
+        self.assertEqual(prov._fanout_depth_live(1), 0)
+
+    def test_prefetch_pauses_while_demand_unfinished(self):
+        # Незавершённый demand-декод: весь CPU ему, соседи ждут.
+        # Готово — веер идёт как раньше.
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/gated.mp4")
+        idx = mock.Mock()
+        idx.bounds = list(range(0, 200, 10))
+        idx.total = 200
+        demand = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        demand.speculative = False
+        key = prov._key(5, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        submitted = []
+        pool = mock.Mock()
+        pool.submit.side_effect = lambda fn, k, t: submitted.append(k[0])
+        with mock.patch.object(prov, "_ensure_index", return_value=idx), \
+                mock.patch.object(fp, "_PREFETCH_POOL", pool):
+            prov._tasks[key] = demand
+            prov._prefetch(5, fp.JPEG_QUALITY, fp.FRAME_SCALE, 1)
+            self.assertEqual(submitted, [])
+            demand.mark_done()
+            prov._prefetch(5, fp.JPEG_QUALITY, fp.FRAME_SCALE, 1)
+            self.assertTrue(len(submitted) > 0)
 
     def test_auto_tune_grid(self):
         # (ncpu, ram_mb) -> (decode, prefetch, cache_mb, cache_gops).
@@ -791,3 +932,295 @@ class DemandFairnessTest(SimpleTestCase):
             t.join(timeout=15)
             self.assertFalse(t.is_alive())
             self.assertIsNotNone(results["a"][0])
+
+    def test_run_pooled_releases_slot_on_early_failure(self):
+        # Падение _ensure_index до внутреннего try _decode_gop (напр.
+        # отмена при удалении): исключение не уходит из пула, слот
+        # возвращён, задача снята с учёта.
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.speculative = False
+        key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        prov._tasks[key] = task
+        before = prov._demand_sem._value
+        with mock.patch.object(
+                prov, "_ensure_index", side_effect=ValueError("boom")), \
+                mock.patch.object(fp._Provider, "_prefetch"):
+            prov._run_pooled(key, task)  # не должно бросать
+        self.assertEqual(prov._demand_sem._value, before)
+        with prov._ilock:
+            self.assertNotIn(key, prov._tasks)
+
+    def test_task_for_falls_back_when_slots_exhausted(self):        # Все слоты заняты: _task_for не висит вечно, а отдаёт None
+        # (get_frame уйдёт в медленный _read_one вместо вечного виса).
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        prov._demand_sem = mock.Mock()
+        prov._demand_sem.acquire.return_value = False
+        t0 = time.monotonic()
+        got = prov._task_for(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertIsNone(got)
+        prov._demand_sem.acquire.assert_called_with(
+            timeout=fp.DEMAND_SLOT_TIMEOUT)
+
+    def test_ensure_index_does_not_hold_ilock_during_build(self):
+        # Сборка индекса (минуты на гигабайтах) идёт вне _ilock: иначе
+        # встают кэш-хиты, финализация задач и debug-снапшот провайдера.
+        import threading
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/clip.mp4")
+        entered = threading.Event()
+        release = threading.Event()
+        errors = []
+
+        def slow_build(path):
+            entered.set()
+            self.assertTrue(release.wait(timeout=30))
+            raise RuntimeError("sentinel")
+
+        def run():
+            try:
+                prov._ensure_index()
+            except Exception as e:  # noqa: BLE001 — собираем итог потока
+                errors.append(e)
+
+        with mock.patch.object(fp, "_build_index", side_effect=slow_build):
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            self.assertTrue(entered.wait(timeout=30))
+            # Строитель внутри _build_index, а _ilock свободен:
+            self.assertTrue(prov._ilock.acquire(timeout=5),
+                            "_ilock held during index build")
+            prov._ilock.release()
+            release.set()
+            t.join(timeout=30)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], RuntimeError)
+
+    def test_cache_put_merges_partial_landings(self):
+        # Частичные покрытия одной GOP складываются, байты не дублируются.
+        prov = fp._Provider("/nonexistent/merge.mp4")
+        key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        prov._cache_put(key, {1: b"a", 2: b"bb"}, 100)
+        prov._cache_put(key, {2: b"bb", 3: b"ccc"}, 100)
+        with prov._ilock:
+            self.assertEqual(sorted(prov._cache[key].keys()), [1, 2, 3])
+            self.assertEqual(prov._gop_sizes[key], 6)
+
+    def test_abandoned_progress_is_monotonic(self):
+        # Брошенная задача + свежая докачка = накопление, не замена:
+        # медленный GOP больше не начинается с нуля при каждом кадре.
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/mono.mp4")
+        key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        with mock.patch.object(fp._Provider, "_prefetch"):
+            t1 = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+            t1.frames = {0: b"a", 1: b"bb"}
+            t1.abandoned = True
+            t1.mark_done()
+            prov._finish_task(key, t1)
+            t2 = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+            t2.frames = {1: b"bb", 2: b"ccc"}
+            t2.mark_done()
+            prov._finish_task(key, t2)
+        with prov._ilock:
+            self.assertEqual(sorted(prov._cache[key].keys()), [0, 1, 2])
+            self.assertEqual(prov._gop_sizes[key], 6)
+
+
+class IndexThrottleTest(SimpleTestCase):
+    """Гейт фоновой сборки: живой спрос тормозит новые сегменты."""
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg не найден — тесты GOP-движка скипаются")
+        super().setUpClass()
+        cls.tmpdir = tempfile.TemporaryDirectory(prefix="vcthrottle_")
+        cls.clip = os.path.join(cls.tmpdir.name, "clip.mp4")
+        _make_clip(cls.clip)
+
+    @classmethod
+    def tearDownClass(cls):
+        fp.close_source(cls.clip)
+        cls.tmpdir.cleanup()
+        super().tearDownClass()
+
+    def test_global_demand_hot(self):
+        # Реестр подменяем целиком: чужие провайдеры не влияют.
+        prov = fp._Provider("/nonexistent/x.mp4")
+        with fp._providers_lock:
+            saved = dict(fp._providers)
+            fp._providers.clear()
+            fp._providers["/nonexistent/x.mp4"] = prov
+        try:
+            self.assertFalse(fp._global_demand_hot())
+            prov._note_demand()
+            self.assertTrue(fp._global_demand_hot())
+            with prov._ilock:
+                prov._last_demand = 0.0
+            self.assertFalse(fp._global_demand_hot())
+            task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+            with prov._ilock:
+                prov._tasks[("t",)] = task
+            with task._lock:
+                task.waiters = 1
+            self.assertTrue(fp._global_demand_hot())
+        finally:
+            with fp._providers_lock:
+                fp._providers.clear()
+                fp._providers.update(saved)
+
+    def test_scan_visible_throttled_matches_unthrottled(self):
+        # Троттлинг меняет только темп запусков, не результат.
+        import unittest.mock as mock
+        tb, _fps, _w, _h, _total, kf_us = fp._scan_packets(self.clip)
+        full = fp._scan_visible(self.clip, float(tb), kf_us, 4)
+        self.assertTrue(len(full) > 0)
+        calls = []
+
+        def hot():
+            calls.append(1)
+            return len(calls) <= 4
+
+        with mock.patch.object(fp, "_global_demand_hot", side_effect=hot):
+            throttled = fp._scan_visible(self.clip, float(tb), kf_us, 4)
+        self.assertEqual(throttled, full)
+        self.assertGreater(len(calls), 4)
+
+
+class DecodeCancelTests(SimpleTestCase):
+    """Отмена in-flight декодов при удалении (поколения путей)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg не найден — тесты GOP-движка скипаются")
+        super().setUpClass()
+        cls.tmpdir = tempfile.TemporaryDirectory(prefix="vccancel_")
+        cls.clip = os.path.join(cls.tmpdir.name, "clip.mp4")
+        _make_clip(cls.clip)
+
+    @classmethod
+    def tearDownClass(cls):
+        fp.close_source(cls.clip)
+        cls.tmpdir.cleanup()
+        super().tearDownClass()
+
+    def _unique_copy(self) -> str:
+        """Отдельный файл на тест: поколение отмены изолировано."""
+        fd, path = tempfile.mkstemp(suffix=".mp4", prefix="vccancel_one_")
+        os.close(fd)
+        shutil.copy2(self.clip, path)
+        self.addCleanup(fp.close_source, path)
+        self.addCleanup(
+            lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_cancel_generation_bump(self):
+        path = self._unique_copy()
+        self.assertEqual(fp._cancel_gen(path), 0)
+        fp.cancel_path(path)
+        self.assertEqual(fp._cancel_gen(path), 1)
+        fp.cancel_path(path)
+        self.assertEqual(fp._cancel_gen(path), 2)
+        fp.cancel_path("")  # пустой путь — no-op, не падает
+        fp.cancel_path(None)  # type: ignore[arg-type]
+
+    def test_scan_after_cancel_runs_fine(self):
+        """Задача, стартовавшая ПОСЛЕ отмены, легитимна (перезаливка
+        под тем же именем не должна умирать от чужого флага)."""
+        path = self._unique_copy()
+        fp.cancel_path(path)
+        tb, fps, width, height, packet_total, kf_us = fp._scan_packets(path)
+        self.assertGreater(packet_total, 0)
+        self.assertGreater(len(kf_us), 0)
+
+    def test_decode_range_aborts_midflight(self):
+        """Отмена посреди декода: фейковый медленный demux, bump в полёте."""
+        import threading
+        import unittest.mock as mock
+
+        path = self._unique_copy()
+
+        class FakeStream:
+            time_base = 0.04
+
+            def decode(self, pkt):
+                return []
+
+        entered = threading.Event()
+
+        def slow_demux(stream):
+            for _ in range(5000):
+                entered.set()
+                time.sleep(0.001)
+                yield mock.Mock(pts=0)
+
+        class FakeCont:
+            def __init__(self, *a, **k):
+                self.streams = mock.Mock()
+                self.streams.video = [FakeStream()]
+
+            def seek(self, *a, **k):
+                pass
+
+            def demux(self, stream):
+                return slow_demux(stream)
+
+            def close(self):
+                pass
+
+        errors = []
+
+        def run():
+            try:
+                fp._decode_range(path, 0.04, None, None)
+            except Exception as e:  # noqa: BLE001 — собираем итог потока
+                errors.append(e)
+
+        with mock.patch.object(fp.av, "open", return_value=FakeCont()):
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            self.assertTrue(entered.wait(timeout=15))
+            time.sleep(0.05)
+            fp.cancel_path(path)
+            t.join(timeout=15)
+        self.assertFalse(t.is_alive(), "декод не прервался отменой")
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], fp._DecodeCancelled)
+
+    def test_bg_build_cancelled_records_no_failure(self):
+        """Отменённая сборка: ни broken-записи, ни отравления кэша;
+        повтор после отмены идёт штатно (перезаливка)."""
+        import unittest.mock as mock
+
+        path = self._unique_copy()
+        key = os.path.abspath(path)
+
+        def boom(self):
+            raise fp._DecodeCancelled(path)
+
+        with mock.patch.object(fp._Provider, "_ensure_index", boom):
+            fp._bg_index_build(key)  # синхронно, как поток
+        self.assertIsNone(fp.index_error(path))
+        with fp._INDEX_CACHE_LOCK:
+            self.assertFalse(
+                any(k[0] == key for k in fp._INDEX_CACHE),
+                "отменённая сборка не должна попадать в кэш",
+            )
+        fp._bg_index_build(key)  # настоящий прогон: восстановление
+        self.assertIsNone(fp.index_error(path))
+
+    def test_finish_task_cancelled_skips_cache(self):
+        path = self._unique_copy()
+        prov = fp._Provider(path)
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.reserved = 1234
+        task.fail(fp._DecodeCancelled(path))
+        prov._finish_task(
+            (0, fp.JPEG_QUALITY, round(fp.FRAME_SCALE, 2)), task)
+        self.assertEqual(prov._cache, {})
