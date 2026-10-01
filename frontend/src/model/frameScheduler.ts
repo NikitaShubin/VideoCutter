@@ -14,6 +14,32 @@ export interface PlayStep {
   stop: boolean;
 }
 
+/** Таймаут висящей загрузки кадра: дольше — считаем протухшей и даём
+ * pump перевыпустить запрос. Без этого забитый cap + дедупликация
+ * вешают экран навсегда (браузерные загрузки без таймаута + медленный
+ * сервер = фриз с самовосстановлением через минуты). */
+export const FRAME_LOAD_TIMEOUT_MS = 15000;
+
+/** Снимает протухшие записи inflight/issuedAt. Возвращает снятые кадры. */
+export function sweepStaleInflight(
+  inflight: Set<number>,
+  issuedAt: Map<number, number>,
+  nowMs: number,
+  timeoutMs: number = FRAME_LOAD_TIMEOUT_MS,
+): number[] {
+  const expired: number[] = [];
+  for (const [t, t0] of issuedAt) {
+    if (nowMs - t0 > timeoutMs) {
+      expired.push(t);
+    }
+  }
+  for (const t of expired) {
+    inflight.delete(t);
+    issuedAt.delete(t);
+  }
+  return expired;
+}
+
 export class FrameScheduler {
   private currentGen = 0;
   private shown = -1;

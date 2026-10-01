@@ -19,6 +19,7 @@ import {
   pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
+  sweepStaleInflight,
   timelineFrame,
 } from "../model/frameScheduler";
 import { paintStatusbar } from "../model/statusbar";
@@ -39,6 +40,8 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [preserveAspect, setPreserveAspect] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [exportItems, setExportItems] = useState<ExportItem[] | null>(null);
+  const [waitingIndex, setWaitingIndex] = useState(false);
+  const [waitPct, setWaitPct] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [message, setMessage] = useState("");
@@ -46,6 +49,13 @@ export function CutEditor({ pairId, onBack }: Props) {
   // Настройки просмотра: масштаб (0.05..1.0) и качество JPEG (30..95).
   const [scale, setScale] = useState(0.75);
   const [quality, setQuality] = useState(78);
+  // Применяемые параметры просмотра: обновляются с debounce после
+  // ползунков. Иначе каждый тик слайдера — новый ключ кэша (GOP, q, s),
+  // полный передекод групп и убийство хитрейта: шкала 30–95 даёт до
+  // 65 вариантов на GOP. Ползунок двигается мгновенно, кадры — только
+  // по применённым (см. эффект ниже).
+  const [viewScale, setViewScale] = useState(0.75);
+  const [viewQuality, setViewQuality] = useState(78);
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
@@ -122,10 +132,24 @@ export function CutEditor({ pairId, onBack }: Props) {
       setLoadError("Задача не найдена или ответ сервера неполный.");
       return;
     }
+    if (p.broken) {
+      setLoadError(p.error || "Задача битая.");
+      return;
+    }
+    if (p.indexing) {
+      // Гонка: открыли раньше готовности (кнопка списка обычно блокирует,
+      // но создание ждёт опросом) — ждём здесь, не падаем.
+      setWaitingIndex(true);
+      setWaitPct(p.indexing_progress ?? null);
+      return;
+    }
+    setWaitingIndex(false);
     setLoadError("");
     setPair(p);
     setScale(p.scale ?? 0.75);
     setQuality(p.quality ?? 78);
+    setViewScale(p.scale ?? 0.75);
+    setViewQuality(p.quality ?? 78);
     // Возвращаемся на кадр, где пользователь завершил редактирование
     // (сохранён в fragments.tsv); при отсутствии/выходе за диапазон — 0.
     const saved = p.total_frames > 0
@@ -152,6 +176,38 @@ export function CutEditor({ pairId, onBack }: Props) {
       .then(loadPairInto)
       .catch((e: Error) => setLoadError(e.message));
   }, [pairId, loadPairInto]);
+
+  // Ожидание готовности индекса (редкая гонка открытия): опрос detail,
+  // по готовности — обычная загрузка, битая — текст ошибки.
+  useEffect(() => {
+    if (!waitingIndex) return;
+    let alive = true;
+    const id = window.setInterval(() => {
+      getPair(pairId)
+        .then((p) => {
+          if (!alive) return;
+          if (p.broken) {
+            setWaitingIndex(false);
+            setLoadError(p.error || "Задача битая.");
+            return;
+          }
+          setWaitPct(p.indexing_progress ?? null);
+          if (!p.indexing) {
+            setWaitingIndex(false);
+            loadPairInto(p);
+          }
+        })
+        .catch((e: Error) => {
+          if (!alive) return;
+          setWaitingIndex(false);
+          setLoadError(e.message);
+        });
+    }, 2000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [waitingIndex, pairId, loadPairInto]);
 
   // Воспроизведение — flat-out: следующий шаг сразу после показа текущего,
   // без искусственных пауз. Темп задаёт только железо (декод/сеть/рендер):
@@ -235,11 +291,11 @@ export function CutEditor({ pairId, onBack }: Props) {
     (idx: number) => {
       if (!pair) return;
       const el = imageRef.current;
-      if (el) el.src = frameUrl(pair.id, idx, "visualization", ver, scale, quality);
+      if (el) el.src = frameUrl(pair.id, idx, "visualization", ver, viewScale, viewQuality);
       schedRef.current?.show(idx);
       setShownFrame(idx);
     },
-    [pair, ver, scale, quality],
+    [pair, ver, viewScale, viewQuality],
   );
 
   // Единая точка загрузки/показа кадра. Вызывается реактивно (смена позиции
@@ -251,6 +307,12 @@ export function CutEditor({ pairId, onBack }: Props) {
     const pos = position;
     const shown = shownFrame;
     if (pos === shown) return;
+
+    // Протухшие загрузки (ответа нет дольше таймаута): снимаем блок,
+    // pump перевыпустит запрос. Иначе забитый cap + дедупликация
+    // вешают экран до прихода самого медленного ответа (минуты).
+    sweepStaleInflight(
+      inflightRef.current, issueT0Ref.current, performance.now());
 
     const target = chase
       ? pos
@@ -313,8 +375,8 @@ export function CutEditor({ pairId, onBack }: Props) {
       // иначе воспроизведение залипнет на битом кадре.
       if (!myChase && gen === sched.generation) setShownFrame(pos);
     };
-    img.src = frameUrl(pair.id, target, "visualization", ver, scale, quality);
-  }, [pair, position, shownFrame, showFrame, scale, quality]);
+    img.src = frameUrl(pair.id, target, "visualization", ver, viewScale, viewQuality);
+  }, [pair, position, shownFrame, showFrame, viewScale, viewQuality]);
 
   const pumpRef = useRef<() => void>(() => {});
   pumpRef.current = pump;
@@ -345,15 +407,22 @@ export function CutEditor({ pairId, onBack }: Props) {
     return () => window.clearInterval(id);
   }, []);
 
-  // Ползунки качества/масштаба: сохраняем на сервер с debounce и перечитываем
-  // текущий кадр под новые настройки (URL кадра меняется → браузер берёт свежий).
+  // Ползунки качества/масштаба: сохраняем на сервер с debounce и только
+  // тогда же ПРИМЕНЯЕМ к просмотру (viewScale/viewQuality). Иначе каждый
+  // тик слайдера плодил бы ключи кэша (GOP, q, s) с полным передекодом.
+  // In-flight запросы старых вариантов убиваем эпохой (их onload — в пустоту),
+  // планировщик сбрасываем, текущий кадр перечитываем уже новым эффектом
+  // (pump пересоздаётся от view*-зависимостей).
   useEffect(() => {
     if (!pair) return;
     const id = window.setTimeout(() => {
       setPairSettings(pairId, quality, scale).catch(() => {});
+      setViewScale(scale);
+      setViewQuality(quality);
+      epochRef.current++;
+      inflightRef.current.clear();
       schedRef.current = new FrameScheduler(MAX_CACHE);
       setShownFrame(-1);
-      pumpRef.current();
     }, 400);
     return () => window.clearTimeout(id);
   }, [pair, pairId, quality, scale]);
@@ -800,7 +869,13 @@ export function CutEditor({ pairId, onBack }: Props) {
   }
 
   if (!pair) {
-    return <div className="loading">Загрузка видео-пары…</div>;
+    return (
+      <div className="loading">
+        {waitingIndex
+          ? `Индексируется…${waitPct != null ? ` ${Math.round(waitPct * 100)}%` : ""}`
+          : "Загрузка видео-пары…"}
+      </div>
+    );
   }
 
   const sel = modelRef.current?.selectedFrames() ?? 0;

@@ -8,12 +8,14 @@
 
 import assert from "node:assert/strict";
 import {
+  FRAME_LOAD_TIMEOUT_MS,
   FrameScheduler,
   nextPlayPosition,
   overlayStart,
   pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
+  sweepStaleInflight,
   timelineFrame,
   timelinePix,
 } from "../frontend/src/model/frameScheduler.ts";
@@ -433,6 +435,23 @@ check("overlayStart: тёмная зона «после текущего» — �
   // первый и последний кадры: зона в пределах полосы
   assert.equal(overlayStart(0, width, total), 1);
   assert.equal(overlayStart(704, width, total), width - 1);
+});
+
+// --- протухшие загрузки: снятие блока cap + дедупликации ---
+check("sweepStaleInflight: старое снимает, свежее держит", () => {
+  const inflight = new Set([7, 8, 9]);
+  const issuedAt = new Map([[7, 1000], [8, 15000], [9, 20000]]);
+  const expired = sweepStaleInflight(inflight, issuedAt, 25000);
+  assert.deepEqual(expired, [7]);
+  assert.deepEqual([...inflight], [8, 9]);
+  assert.deepEqual([...issuedAt.keys()], [8, 9]);
+});
+
+check("sweepStaleInflight: пусто и всё свежее — ничего не трогает", () => {
+  const inflight = new Set([3]);
+  const issuedAt = new Map([[3, 5000]]);
+  assert.deepEqual(sweepStaleInflight(inflight, issuedAt, 5000), []);
+  assert.deepEqual([...inflight], [3]);
 });
 
 console.log(`ok: ${passed} проверок`);

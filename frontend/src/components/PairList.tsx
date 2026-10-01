@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   assignWorkspaceVideo,
   bumpWorkspaceNonce,
@@ -7,15 +7,25 @@ import {
   renameWorkspace,
   setWorkspaceVideo,
   swapVideos,
-  uploadWorkspace,
 } from "../api";
 import { VIDEO_ACCEPT, type VideoPair } from "../types";
+import {
+  uploadLabel,
+  type UploadJob,
+} from "../model/uploads";
 import { StatusbarPreview } from "./StatusbarPreview";
 
 interface Props {
   pairs: VideoPair[] | null;
   onSelect: (id: string) => void;
   onChanged: () => void;
+  uploads: UploadJob[];
+  onStartUpload: (name: string, files: { source?: File; preview?: File }) => void;
+  onCancelUpload: (key: string) => void;
+  onDismissUpload: (key: string) => void;
+  onRenameUpload: (key: string, name: string) => void;
+  onUpdateJob: (key: string, patch: Partial<UploadJob>) => void;
+  onRemoveJob: (key: string) => void;
 }
 
 function fileStem(filename: string): string {
@@ -57,15 +67,24 @@ function sortPairs(pairs: VideoPair[], mode: SortMode): VideoPair[] {
   }
 }
 
-export function PairList({ pairs, onSelect, onChanged }: Props) {
+export function PairList({
+  pairs,
+  onSelect,
+  onChanged,
+  uploads,
+  onStartUpload,
+  onCancelUpload,
+  onDismissUpload,
+  onRenameUpload,
+  onUpdateJob,
+  onRemoveJob,
+}: Props) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [source, setSource] = useState<File | null>(null);
   const [preview, setPreview] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState<number | null>(null);
-  const [error, setError] = useState("");
+  const [formError, setFormError] = useState("");
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editBusy, setEditBusy] = useState(false);
@@ -107,36 +126,81 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
     setNameTouched(false);
     setSource(null);
     setPreview(null);
-    setProgress(null);
-    setError("");
+    setFormError("");
   };
 
-  const submit = async (e: React.FormEvent) => {
+  const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const first = source ?? preview;
     if (!first) {
-      setError("Выберите хотя бы один видеофайл");
+      setFormError("Выберите хотя бы один видеофайл");
       return;
     }
-    setBusy(true);
-    setError("");
-    setProgress(0);
-    try {
-      const created = await uploadWorkspace(
-        name.trim() || fileStem(first.name),
-        { source: source ?? undefined, preview: preview ?? undefined },
-        setProgress,
-      );
-      reset();
-      onChanged();
-      onSelect(created.id); // сразу открываем на редактирование
-    } catch (err) {
-      setError((err as Error).message);
-      setProgress(null);
-    } finally {
-      setBusy(false);
-    }
+    // Форма только стартует заливку и закрывается: прогресс живёт
+    // строкой списка (менеджер в App переживает смену экранов),
+    // отмена — ведром на строке.
+    onStartUpload(name.trim() || fileStem(first.name), {
+      source: source ?? undefined,
+      preview: preview ?? undefined,
+    });
+    reset();
   };
+
+  // Синхронизация заливок с серверными записями. Job живёт до
+  // готовности записи (без автооткрытия — угон экрана запрещён):
+  // готова без rename — снять job (встаёт серверная строка);
+  // broken — снять job (ошибку показывает серверная broken-строка);
+  // pendingRename — PATCH по готовой записи (rename только вне
+  // валидации/индекса, иначе гонка путей). PATCH идёт один за раз.
+  const renamingRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!pairs) return;
+    uploads.forEach((u) => {
+      if (!u.serverId || renamingRef.current.has(u.key)) return;
+      const entry = pairs.find((p) => p.id === u.serverId);
+      if (!entry) return;
+      if (entry.broken) {
+        onRemoveJob(u.key);
+        return;
+      }
+      if (!entry.indexing) {
+        if (u.pendingRename) {
+          renamingRef.current.add(u.key);
+          renameWorkspace(entry.id, u.pendingRename)
+            .then((updated) => {
+              renamingRef.current.delete(u.key);
+              onUpdateJob(u.key, {
+                serverId: updated.id,
+                pendingRename: null,
+                name: updated.id,
+              });
+              onChanged();
+            })
+            .catch((e: Error) => {
+              renamingRef.current.delete(u.key);
+              onUpdateJob(u.key, { pendingRename: null, error: e.message });
+            });
+        } else {
+          onRemoveJob(u.key);
+        }
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairs, uploads]);
+
+  const renameUpload = (u: UploadJob) => {
+    const v = window.prompt("Новое имя задачи", u.name);
+    if (v === null) return;
+    const t = v.trim();
+    if (!t || t === u.name) return;
+    onRenameUpload(u.key, t);
+  };
+
+  // Серверный дубликат подавляется, пока жив job (иначе две строки
+  // об одном: клиентская морфирует фазами, серверная встанет после).
+  const shownPairs = (visible ?? []).filter(
+    (p) => !uploads.some((u) => u.serverId !== null && u.serverId === p.id),
+  );
 
   const remove = async (p: VideoPair) => {
     const ok = window.confirm(
@@ -227,7 +291,13 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
 
   // ─── Форма редактирования одной задачи ───────────────────────────────────
 
-  const renderEdit = (p: VideoPair) => (
+  const renderEdit = (p: VideoPair) => {
+    // Переименование во время индексации/валидации — гонка абсолютных
+    // путей (движок и фоновая проверка держат старый каталог): кнопка
+    // блокируется до готовности, как и открытие задачи.
+    const live = pairs?.find((x) => x.id === p.id);
+    const renameLocked = live?.indexing ?? p.indexing;
+    return (
     <div className="pair-edit">
       <div className="pair-edit-row">
         <span className="pair-edit-label">Имя</span>
@@ -240,7 +310,8 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
         <button
           className="pair-edit-btn-text"
           onClick={() => doRename(p.id)}
-          disabled={editBusy || editName.trim() === p.id}
+          disabled={editBusy || editName.trim() === p.id || renameLocked}
+          title={renameLocked ? "Дождитесь готовности задачи" : "Переименовать"}
         >
           Переименовать
         </button>
@@ -350,6 +421,9 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
           <div className="pair-edit-progress-bar" style={{ width: `${Math.round(editProgress * 100)}%` }} />
         </div>
       )}
+      {editProgress !== null && editBusy && editProgress >= 1 && (
+        <div className="pair-edit-verifying">Проверка видео…</div>
+      )}
       {editError && <div className="pair-edit-error">{editError}</div>}
 
       <div className="pair-edit-row">
@@ -361,7 +435,10 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
         </button>
       </div>
     </div>
-  );
+    );
+  };
+
+  // ─── Render ──────────────────────────────────────────────────────────────
 
   // ─── Render ──────────────────────────────────────────────────────────────
 
@@ -431,31 +508,99 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
             Задача будет называться: «
             {name.trim() || (firstFile ? fileStem(firstFile.name) : "—")}»
           </div>
-          {progress !== null && (
-            <div className="upload-progress">
-              <div
-                className="upload-progress-bar"
-                style={{ width: `${Math.round(progress * 100)}%` }}
-              />
-            </div>
-          )}
-          {error && <div className="upload-error">{error}</div>}
-          <button type="submit" disabled={busy || (!source && !preview)}>
-            {progress !== null && busy
-              ? progress >= 1
-                ? "Проверка видео…"
-                : `Загрузка ${Math.round(progress * 100)}%`
-              : "Загрузить"}
+          {formError && <div className="upload-error">{formError}</div>}
+          <button type="submit" disabled={!source && !preview}>
+            Загрузить
           </button>
         </form>
       )}
 
       <ul>
         {pairs === null && <li className="loading">Загрузка списка…</li>}
-        {visible !== null && visible.length === 0 && (
-          <li className="empty">Пока нет задач.</li>
-        )}
-        {(visible ?? []).map((p) =>
+        {uploads.map((u) => {
+          const entry =
+            u.serverId && pairs
+              ? pairs.find((p) => p.id === u.serverId) ?? null
+              : null;
+          const meta = u.error
+            ? `⚠ ${u.error}`
+            : entry && entry.indexing
+              ? entry.indexing_progress != null
+                ? `Индексируется… ${Math.round(entry.indexing_progress * 100)}%`
+                : "Индексируется…"
+              : uploadLabel(u);
+          // Канва — слои фаз: фон = цвет завершённой предыдущей фазы
+          // (или тёмный), заливка = цвет текущей. Преемственность видна
+          // буквально: каждый этап ложится поверх предыдущего.
+          // upload #0077ff → receipt #00bebe → indexing #8b5cf6.
+          const layers =
+            entry && entry.indexing
+              ? {
+                base: "#00bebe",
+                fill: "#8b5cf6",
+                frac: entry.indexing_progress ?? 0,
+              }
+              : u.progress < 1
+                ? { base: "#14141f", fill: "#0077ff", frac: u.progress }
+                : {
+                  base: "#0077ff",
+                  fill: "#00bebe",
+                  frac: u.serverTotal
+                    ? Math.min(
+                      1,
+                      (u.serverReceived ?? 0) / Math.max(1, u.serverTotal),
+                    )
+                    : 0,
+                };
+          return (
+            <li key={u.key}>
+              <div className="pair-row">
+                <div className="pair-open" aria-disabled="true">
+                  <StatusbarPreview
+                    className="pair-bg"
+                    progress={layers}
+                  />
+                  <span className="pair-label">{u.name}</span>
+                  <span className="pair-meta">{meta}</span>
+                </div>
+                <div className="pair-actions">
+                  {u.error ? (
+                    <button
+                      className="pair-edit-btn"
+                      title="Убрать из списка"
+                      onClick={() => onDismissUpload(u.key)}
+                    >
+                      ✕
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        className="pair-edit-btn"
+                        title="Переименовать задачу"
+                        onClick={() => renameUpload(u)}
+                      >
+                        ✎
+                      </button>
+                      <button
+                        className="pair-delete"
+                        title="Отменить создание задачи"
+                        onClick={() => onCancelUpload(u.key)}
+                      >
+                        🗑
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </li>
+          );
+        })}
+        {visible !== null &&
+          visible.length === 0 &&
+          uploads.length === 0 && (
+            <li className="empty">Пока нет задач.</li>
+          )}
+        {shownPairs.map((p) =>
           p.broken ? (
             <li key={p.id} className="broken">
               <div className="pair-row">
@@ -477,12 +622,23 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
           ) : (
           <li key={p.id} className={editingId === p.id ? "editing" : undefined}>
             <div className="pair-row">
-              <button className="pair-open" onClick={() => onSelect(p.id)}>
+              <button
+                className="pair-open"
+                onClick={() => onSelect(p.id)}
+                disabled={p.indexing}
+                title={p.indexing ? "Индексируется — подождите готовности" : `Открыть ${p.id}`}
+              >
                 <StatusbarPreview
                   className="pair-bg"
                   totalFrames={p.total_frames}
                   fragments={p.fragments}
                   position={p.position}
+                  scheme={p.indexing ? "indexing" : undefined}
+                  progress={p.indexing ? {
+                    base: "#14141f",
+                    fill: "#8b5cf6",
+                    frac: p.indexing_progress ?? 0,
+                  } : undefined}
                 />
                 <span className="pair-label">{p.id}</span>
                 <span className="pair-meta">
@@ -491,7 +647,9 @@ export function PairList({ pairs, onSelect, onChanged }: Props) {
                     ? ` → ${p.preview_name}`
                     : ""}
                   {p.indexing
-                    ? " · ⏳ Индексируется…"
+                    ? (p.indexing_progress != null
+                      ? ` · Индексируется… ${Math.round(p.indexing_progress * 100)}%`
+                      : " · ⏳ Индексируется…")
                     : ` · ${p.total_frames} кадров · ${p.width}×${p.height}`}
                 </span>
                 {p.pair_warning && (

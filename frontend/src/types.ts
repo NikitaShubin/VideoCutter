@@ -26,6 +26,8 @@ export interface VideoPair {
   quality: number;
   scale: number;
   indexing: boolean;
+  /** Доля готовности индекса 0..1 (null — сборка ещё не отметилась). */
+  indexing_progress: number | null;
   broken: boolean;
   error: string;
   created_at: string | null;

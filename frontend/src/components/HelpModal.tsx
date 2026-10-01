@@ -147,6 +147,9 @@ export function HelpModal({ open, onClose }: Props) {
           <h3>Таймлайн</h3>
           <div className="help-legend">
             <span><i className="help-swatch" style={{ background: "#00ff00" }} /> фон — вся последовательность кадров</span>
+            <span><i className="help-swatch" style={{ background: "#0077ff" }} /> синий фон — отправка файла</span>
+            <span><i className="help-swatch" style={{ background: "#00bebe" }} /> бирюза — приём сервером (ложится поверх синего)</span>
+            <span><i className="help-swatch" style={{ background: "#8b5cf6" }} /> фиолет — проверка/индексация поверх предыдущего (не разметка)</span>
             <span><i className="help-swatch" style={{ background: "#ff0000" }} /> фрагмент</span>
             <span><i className="help-swatch" style={{ background: "rgba(0,0,0,0.5)" }} /> затемнение — кадры после текущего</span>
             <span><i className="help-swatch" style={{ background: "#ffffff" }} /> маркер текущего кадра</span>

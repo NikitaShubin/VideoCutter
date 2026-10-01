@@ -40,10 +40,18 @@ export interface WorkspaceUploadFiles {
   preview?: File;
 }
 
+export interface UploadOptions {
+  /** AbortSignal отмены (ведро на строке во время заливки). */
+  signal?: AbortSignal;
+  /** Client-uuid приёма (hex32): сервер считает байты, статус — опросом. */
+  uploadId?: string;
+}
+
 export function uploadWorkspace(
   name: string,
   files: WorkspaceUploadFiles,
   onProgress?: (fraction: number) => void,
+  opts: UploadOptions = {},
 ): Promise<VideoPair> {
   const file = files.source ?? files.preview;
   return new Promise((resolve, reject) => {
@@ -57,7 +65,17 @@ export function uploadWorkspace(
     if (name) form.append("name", name);
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${BASE}/workspaces/`);
+    const url = opts.uploadId
+      ? `${BASE}/workspaces/?upload_id=${encodeURIComponent(opts.uploadId)}`
+      : `${BASE}/workspaces/`;
+    xhr.open("POST", url);
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        reject(new DOMException("Отменено", "AbortError"));
+        return;
+      }
+      opts.signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    }
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     };
@@ -76,8 +94,22 @@ export function uploadWorkspace(
       }
     };
     xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
+    xhr.onabort = () => reject(new DOMException("Отменено", "AbortError"));
     xhr.send(form);
   });
+}
+
+export interface UploadReceipt {
+  received: number;
+  total: number;
+}
+
+export async function getUploadStatus(uploadId: string): Promise<UploadReceipt | null> {
+  // 404 = неизвестно/готово — считать готовым (бар не врёт назад).
+  const res = await fetch(
+    `${BASE}/uploads/${encodeURIComponent(uploadId)}/status`);
+  if (!res.ok) return null;
+  return res.json() as Promise<UploadReceipt>;
 }
 
 // Добавляет/заменяет файл роли (источник/превью). При ``existing`` заодно

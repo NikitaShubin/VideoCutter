@@ -89,4 +89,60 @@ check("один кадр (total=1) не падает и красит курсо�
   assert.equal(ops.find((o) => o.fill === "#ff0000").w, 1);
 });
 
+check("scheme creation заменены стадийными: фон свой, остальное как timeline", () => {
+  const expected = { upload: "#0077ff", receipt: "#00bebe", indexing: "#8b5cf6" };
+  for (const [scheme, fill] of Object.entries(expected)) {
+    const ops = statusbarOps({ ...base, scheme });
+    assert.equal(ops[0].fill, fill);
+    assert.deepEqual({ x: ops[0].x, y: ops[0].y, w: ops[0].w, h: ops[0].h }, { x: 0, y: 0, w: W, h: H });
+    // Фрагменты, затемнение и маркер — те же, что в timeline.
+    assert.equal(ops.filter((o) => o.fill === "#ff0000").length, 2);
+    const cur = ops[ops.length - 1];
+    assert.equal(cur.fill, "#ffffff");
+  }
+});
+
+check("scheme по умолчанию — timeline (редактор не меняется)", () => {
+  const ops = statusbarOps({ ...base });
+  assert.equal(ops[0].fill, "#00ff00");
+});
+
+check("progress: слои base/fill/затемнение/маркер, доля clamp'ится", () => {
+  const ops = statusbarOps({
+    width: W, height: H,
+    progress: { base: "#0077ff", fill: "#00bebe", frac: 0.4 },
+  });
+  // Фон во весь canvas + заливка 40px + затемнение остатка + маркер.
+  assert.equal(ops[0].fill, "#0077ff");
+  assert.deepEqual({ x: ops[0].x, w: ops[0].w }, { x: 0, w: W });
+  assert.equal(ops[1].fill, "#00bebe");
+  assert.equal(ops[1].w, 40);
+  assert.equal(ops[2].fill, "rgba(0,0,0,0.5)");
+  assert.deepEqual({ x: ops[2].x, w: ops[2].w }, { x: 40, w: W - 40 });
+  assert.equal(ops[3].fill, "#ffffff");
+  assert.equal(ops[3].x, 40);
+  assert.equal(ops.length, 4);
+  // Границы: 0 → только фон+затемнение+маркер; >1 → clamp к полному.
+  const zero = statusbarOps({
+    width: W, height: H,
+    progress: { base: "#14141f", fill: "#8b5cf6", frac: 0 },
+  });
+  assert.equal(zero.length, 3);
+  assert.equal(zero[2].x, 0);
+  const over = statusbarOps({
+    width: W, height: H,
+    progress: { base: "#14141f", fill: "#8b5cf6", frac: 2.5 },
+  });
+  assert.equal(over[1].w, W);
+  assert.equal(over.length, 3);
+  assert.equal(over[2].x, W - 1);
+  // Фрагменты/keyPose в режиме прогресса игнорируются.
+  const noisy = statusbarOps({
+    width: W, height: H, totalFrames: T,
+    fragments: [{ start: 0, end: 9 }], position: 5, keyPose: 1,
+    progress: { base: "#14141f", fill: "#8b5cf6", frac: 0.5 },
+  });
+  assert.ok(noisy.every((o) => o.fill !== "#ff0000" && o.fill !== "#0000ff"));
+});
+
 console.log(`ok: ${passed} проверок`);
