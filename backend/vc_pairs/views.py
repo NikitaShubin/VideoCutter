@@ -8,8 +8,10 @@
 HTTP-слой и работа с процессным реестром workspace-ов (кэш Django-процесса).
 """
 
+import errno
 import json
 import os
+import threading
 import time
 
 from django.http import HttpResponse, JsonResponse
@@ -30,6 +32,23 @@ from workspace import (
 
 def _ws_404(name: str) -> JsonResponse:
     return JsonResponse({"error": f"Workspace '{name}' не найден"}, status=404)
+
+
+#: Нет места/доступа при записи видео (507 Insufficient Storage, RFC 4918).
+HTTP_INSUFFICIENT_STORAGE = 507
+
+
+def _storage_message(e: OSError) -> str:
+    """Человеческий текст сбоя записи (без HTTP-обёртки)."""
+    if e.errno == errno.ENOSPC:
+        return "Нет места на диске: освободите место и повторите загрузку"
+    return f"Не удалось сохранить видео: {e}"
+
+
+def _storage_error(e: OSError) -> JsonResponse:
+    """Человеческий ответ вместо голого 500 при сбоях записи на диск."""
+    return JsonResponse(
+        {"error": _storage_message(e)}, status=HTTP_INSUFFICIENT_STORAGE)
 
 
 def _stamp_opened(name: str) -> None:
@@ -78,6 +97,61 @@ def workspace_detail(request, workspace_id: str):
     return _workspace_delete(workspace_id)
 
 
+def _validation_failed(name: str, message: str) -> None:
+    """Провал проверки: broken-запись, только если задача ещё существует.
+
+    Удалённую посреди проверки задачу молча отпускаем (иначе stale-ошибка
+    всплывёт broken-записью у будущей задачи с тем же именем).
+    """
+    if get_workspace(name) is None:
+        scan_workspaces()
+        return
+    ws_module.note_workspace_error(name, message)
+    scan_workspaces()
+
+
+def _validate_workspace_async(name: str) -> None:
+    """Фоновая валидация после создания: индекс строится вне запроса.
+
+    POST уже ответил 202 — минуты demux+decode здесь браузер не ждут.
+    Успех — паспорт задачи; провал — broken-запись с текстом ошибки
+    (задача видна в списке, молча не исчезает).
+    """
+    try:
+        ws = get_workspace(name)
+        if ws is None:
+            return  # удалили раньше, чем проверили
+        roles = {ws.original, ws.visualization}
+        if not any(roles):
+            raise ValueError("видео не распознано (расширение файла не видео)")
+        for path in roles:
+            if path and not frame_provider.get_metadata(path).get("total_frames"):
+                raise ValueError("видео не содержит кадров")
+    except frame_provider._DecodeCancelled:
+        # Путь удалили посреди проверки: тихо, без broken-записи.
+        # Реестр обновляем, чтобы список сразу отразил удаление.
+        scan_workspaces()
+        return
+    except OSError as e:
+        _validation_failed(name, _storage_message(e))
+        return
+    except Exception as e:  # noqa: BLE001 — любой сбой чтения = битый файл
+        _validation_failed(name, f"Не удалось прочитать видео: {e}")
+        return
+
+    # Паспорт задачи: создание — единственное место рождения created_at.
+    # Перечитываем: каталог могли удалить/пересоздать, пока шёл декод.
+    ws = get_workspace(name)
+    if ws is None:
+        return
+    ws_module.clear_workspace_error(name)
+    try:
+        task_meta.save(ws.path, task_meta.init_new())
+    except Exception:  # noqa: BLE001 — паспорт не роняет создание
+        pass
+    scan_workspaces()
+
+
 def _workspace_upload(request) -> JsonResponse:
     """Создаёт workspace из multipart-полей ``source``/``preview`` (или ``file``).
 
@@ -85,6 +159,9 @@ def _workspace_upload(request) -> JsonResponse:
     одно обязательно. Файлы сохраняются с ролевыми именами ``source.<ext>`` /
     ``preview.<ext>`` (расширение сохраняется), оригинальное имя уходит в имя
     workspace. Опц. ``name``.
+
+    Ответ 202: файлы записаны, проверка и индекс — в фоне (запись списка
+    покажет indexing + прогресс); готовность — опросом списка/detail.
     """
     src_file = request.FILES.get("source") or request.FILES.get("file")
     pv_file = request.FILES.get("preview")
@@ -117,34 +194,35 @@ def _workspace_upload(request) -> JsonResponse:
         return JsonResponse({"error": str(e)}, status=409)
     except ws_fs.InvalidWorkspaceError as e:
         return JsonResponse({"error": str(e)}, status=400)
+    except OSError as e:
+        return _storage_error(e)
     finally:
         # Поток записан (или нет): дальше — видимый indexing либо откат.
         ws_module.clear_creating(name)
 
-    # Валидация: каждый файл должен читаться как видео, иначе откат создания.
+    # Дешёвый синхронный гейт: расширение распознано (без чтения
+    # содержимого — только список каталога). Содержимое проверяет фон.
     ws = get_workspace(name)
-    try:
-        if ws is None:
-            raise ValueError("workspace не создан")
-        roles = {ws.original, ws.visualization}
-        if not any(roles):
-            raise ValueError("видео не распознано (расширение файла не видео)")
-        for path in roles:
-            if path and not frame_provider.get_metadata(path).get("total_frames"):
-                raise ValueError("видео не содержит кадров")
-    except Exception as e:  # noqa: BLE001 — любой сбой чтения = битый файл
-        ws_fs.delete_workspace(ws_module.WORKSPACE_ROOT, name)
+    if ws is None or not (ws.original or ws.visualization):
+        try:
+            ws_fs.delete_workspace(ws_module.WORKSPACE_ROOT, name)
+        except Exception:  # noqa: BLE001 — откат best-effort
+            pass
         scan_workspaces()
-        return JsonResponse({"error": f"Не удалось прочитать видео: {e}"}, status=400)
+        return JsonResponse(
+            {"error": "видео не распознано (расширение файла не видео)"},
+            status=400,
+        )
 
-    # Паспорт задачи: создание — единственное место рождения created_at.
-    try:
-        task_meta.save(ws.path, task_meta.init_new())
-    except Exception:  # noqa: BLE001 — паспорт не роняет создание
-        pass
+    # Файлы записаны — дальше фон: валидация и индекс вне запроса
+    # (минуты на гигабайтах браузер не ждёт). Ответ 202 + запись списка.
+    scan_workspaces()
+    threading.Thread(
+        target=_validate_workspace_async, args=(name,), daemon=True,
+    ).start()
 
     entry = next((w for w in list_workspaces() if w["id"] == name), None)
-    return JsonResponse(entry or {"id": name}, status=201)
+    return JsonResponse(entry or {"id": name}, status=202)
 
 
 def _workspace_rename(request, name: str) -> JsonResponse:
@@ -180,6 +258,7 @@ def _workspace_rename(request, name: str) -> JsonResponse:
         with EXPORTS_LOCK:
             if name in EXPORTS:
                 EXPORTS[renamed] = EXPORTS.pop(name)
+        ws_module.rename_workspace_error(name, renamed)
         scan_workspaces()
     else:
         scan_workspaces()
@@ -193,6 +272,13 @@ def _workspace_delete(name: str) -> JsonResponse:
     ws = get_workspace(name)
     if ws is None:
         return _ws_404(name)
+
+    # 1. Останавливаем фоновую работу СНАЧАЛА: in-flight декоды/индекс
+    #    прерываются на ближайшем пакете и закрывают хендлы — иначе rmdir
+    #    падает на FUSE (ENOTEMPTY из-за открытых файлов).
+    for path in {ws.original, ws.visualization}:
+        if path:
+            frame_provider.cancel_path(path)
 
     # Закрываем провайдеры кадров до удаления файлов.
     for path in {ws.original, ws.visualization}:
@@ -226,6 +312,7 @@ def _workspace_delete(name: str) -> JsonResponse:
 
     with EXPORTS_LOCK:
         EXPORTS.pop(name, None)
+    ws_module.clear_workspace_error(name)
 
     scan_workspaces()
     return JsonResponse({"deleted": name})
@@ -260,8 +347,12 @@ def workspace_frame(request, workspace_id: str, index: int):
         return JsonResponse({"error": "Некорректные параметры quality/scale"}, status=400)
 
     t0 = time.monotonic()
-    jpeg, mime, info = frame_provider.get_frame_jpeg(
-        path, int(index), quality=quality, scale=scale, want_info=True)
+    try:
+        jpeg, mime, info = frame_provider.get_frame_jpeg(
+            path, int(index), quality=quality, scale=scale, want_info=True)
+    except frame_provider._DecodeCancelled:
+        # Задача удалена посреди запроса кадра: ресурса уже нет.
+        return JsonResponse({"error": "Видео удалено"}, status=404)
     if jpeg is None:
         meta = ws.metadata()
         return JsonResponse(
@@ -305,6 +396,24 @@ def cache_config(request):
     except (ValueError, TypeError) as e:
         return JsonResponse({"error": str(e)}, status=400)
     return JsonResponse({"caps": caps, "usage": frame_provider.cache_usage()})
+
+
+@require_http_methods(["GET"])
+def upload_status(request, upload_id: str):
+    """Прогресс приёма тела заливки: {received, total} байт.
+
+    Клиент опрашивает, пока его XHR летит: бар серверного приёма
+    продолжает бар отправки. Неизвестно/готово — 404 (считать готовым).
+    """
+    from vc_pairs.upload_handler import get_upload_progress, valid_upload_id
+
+    if not valid_upload_id(upload_id):
+        return JsonResponse({"error": "Некорректный upload_id"}, status=404)
+    progress = get_upload_progress(upload_id)
+    if progress is None:
+        return JsonResponse({"error": "Загрузка не найдена"}, status=404)
+    received, total = progress
+    return JsonResponse({"received": received, "total": total})
 
 
 @require_http_methods(["GET"])
@@ -417,6 +526,9 @@ def _put_role(request, ws, role: str) -> JsonResponse:
         ws_fs.write_stream(upload, tmp)
         if not frame_provider.get_metadata(tmp).get("total_frames"):
             raise ValueError("видео не содержит кадров")
+    except OSError as e:
+        _drop_pending(tmp)
+        return _storage_error(e)
     except Exception as e:  # noqa: BLE001 — любой сбой чтения = битый файл
         _drop_pending(tmp)
         return JsonResponse({"error": f"Не удалось прочитать видео: {e}"}, status=400)
@@ -437,6 +549,9 @@ def _put_role(request, ws, role: str) -> JsonResponse:
     except ws_fs.InvalidWorkspaceError as e:
         _drop_pending(tmp)
         return JsonResponse({"error": str(e)}, status=400)
+    except OSError as e:
+        _drop_pending(tmp)
+        return _storage_error(e)
 
     # Дропаем провайдеры кадров заменённых/удалённых/временных путей.
     for path in {before["source"], before["preview"], tmp, final, promoted}:

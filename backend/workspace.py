@@ -259,6 +259,45 @@ _workspaces: dict[str, Workspace] = {}
 _workspaces_lock = threading.Lock()
 
 
+# Ошибки фоновой валидации задач: имя -> текст. Выставляет асинхронная
+# проверка после создания; список показывает такую задачу broken-записью
+# (а не роняет весь список и не прячет задачу молча). Чистится при успехе,
+# удалении и переименовании (переезд ключа). Чисто память обвязки.
+_WORKSPACE_ERRORS: Dict[str, str] = {}
+_WORKSPACE_ERRORS_LOCK = threading.Lock()
+
+
+def note_workspace_error(name: str, message: str) -> None:
+    """Запомнить ошибку задачи (показывается broken-записью)."""
+    with _WORKSPACE_ERRORS_LOCK:
+        _WORKSPACE_ERRORS[name] = message
+
+
+def clear_workspace_error(name: str) -> None:
+    """Снять ошибку задачи (успех/удаление)."""
+    with _WORKSPACE_ERRORS_LOCK:
+        _WORKSPACE_ERRORS.pop(name, None)
+
+
+def clear_all_workspace_errors() -> None:
+    """Сбросить все ошибки (изоляция тестов)."""
+    with _WORKSPACE_ERRORS_LOCK:
+        _WORKSPACE_ERRORS.clear()
+
+
+def rename_workspace_error(old: str, new: str) -> None:
+    """Переезд ошибки за переименованием задачи."""
+    with _WORKSPACE_ERRORS_LOCK:
+        if old in _WORKSPACE_ERRORS:
+            _WORKSPACE_ERRORS[new] = _WORKSPACE_ERRORS.pop(old)
+
+
+def workspace_error(name: str) -> Optional[str]:
+    """Текст ошибки задачи (None — нет)."""
+    with _WORKSPACE_ERRORS_LOCK:
+        return _WORKSPACE_ERRORS.get(name)
+
+
 # Недозалитые workspace-ы (идёт streaming тела запроса): имя -> отметка
 # времени. Сканнер прячет свежие; зависшие (>30 мин, напр. после падения
 # процесса) показывает как есть — их видно и можно удалить. Следов на
@@ -451,15 +490,36 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
 
     ``fast=True`` — режим списка: без долгого ожидания индекса (записи
     с незавершённой индексацией помечаются ``indexing``).
+
+    Записанная ошибка валидации (см. note_workspace_error) бьёт запись
+    сразу — список превращает её в broken через свой try/except.
     """
+    err = workspace_error(ws.name)
+    if err is not None:
+        raise ValueError(err)
     if fast:
         preview, preview_ready = _fast_role_meta(ws, "preview")
         source, source_ready = _fast_role_meta(ws, "source")
         indexing = not (preview_ready and source_ready)
+        # Прогресс строящегося индекса (минимум по неготовым ролям);
+        # None — сборка ещё не отметилась (показываем пульс без процентов).
+        indexing_progress = None
+        if indexing:
+            vals = []
+            for path, ready in (
+                (ws.original, source_ready),
+                (ws.visualization or ws.original, preview_ready),
+            ):
+                if not ready and path:
+                    p = frame_provider.index_progress(path)
+                    if p is not None:
+                        vals.append(p)
+            indexing_progress = min(vals) if vals else None
     else:
         preview = ws.metadata()  # превью (или исходник, если пары нет)
         source = ws.video_metadata("source")
         indexing = False
+        indexing_progress = None
     both = bool(ws.original and ws.visualization and ws.original != ws.visualization)
     unassigned = ws.unassigned
     quality, scale = ws.load_settings()
@@ -489,6 +549,7 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
         "last_opened_at": last_opened_at,
         "export": _export_state(ws.name),
         "indexing": indexing,
+        "indexing_progress": indexing_progress,
         "broken": False,
         "error": "",
     }
@@ -527,6 +588,7 @@ def _broken_entry(ws: Workspace, err: Exception) -> dict:
         "last_opened_at": last_opened_at,
         "export": _export_state(ws.name),
         "indexing": False,
+        "indexing_progress": None,
         "broken": True,
         "error": f"{type(err).__name__}: {err}"[:300],
     }
@@ -553,9 +615,31 @@ def list_workspaces(fast: bool = True) -> List[dict]:
     return result
 
 
-def get_workspace_detail(name: str) -> Optional[dict]:
-    """Возвращает полный detail workspace (с фрагментами)."""
+def get_workspace_detail(name: str, wait_s: float = 10.0) -> Optional[dict]:
+    """Возвращает полный detail workspace (с фрагментами).
+
+    Мелкие файлы успевают за wait_s — ответ как раньше, полный. Большой
+    строящийся индекс не держит запрос минутами: отдаём fast-запись
+    (indexing, без блокировки), редактор ждёт готовности опросом.
+    Записанная ошибка — broken-запись (не 500).
+    """
     ws = get_workspace(name)
     if ws is None:
         return None
-    return _pair_entry(ws)
+    deadline = time.monotonic() + max(0.0, wait_s)
+    while True:
+        try:
+            fast_entry = _pair_entry(ws, fast=True)
+        except Exception as e:  # noqa: BLE001 — изоляция битых записей
+            logger.warning("workspace %s detail skipped: %r", ws.name, e)
+            return _broken_entry(ws, e)
+        if not fast_entry.get("indexing") or time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    if fast_entry.get("indexing"):
+        return fast_entry
+    try:
+        return _pair_entry(ws)
+    except Exception as e:  # noqa: BLE001 — изоляция битых записей
+        logger.warning("workspace %s detail skipped: %r", ws.name, e)
+        return _broken_entry(ws, e)

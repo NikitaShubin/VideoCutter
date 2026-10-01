@@ -35,6 +35,14 @@ TIME_ZONE = "Europe/Moscow"
 USE_I18N = True
 USE_TZ = True
 
+# Приём загрузок: наш стейджинг-хендлер первым — пишет чанки сразу на ФС
+# workspace-ов (финал — rename без второй копии); дальше штатные.
+FILE_UPLOAD_HANDLERS = [
+    "vc_pairs.upload_handler.StagingUploadHandler",
+    "django.core.files.uploadhandler.MemoryFileUploadHandler",
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+]
+
 # Workspace root: корневая директория со всеми workspace-ами.
 VC_WORKSPACE_ROOT = os.getenv(
     "VC_WORKSPACE_ROOT", os.path.join(BASE_DIR, "workspaces")

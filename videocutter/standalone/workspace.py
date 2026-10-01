@@ -157,6 +157,49 @@ def classify_videos(root: str, name: str) -> dict:
     return {"source": source, "preview": preview, "unassigned": unassigned}
 
 
+def _same_fs(a: str, b: str) -> bool:
+    """Один ли носитель (тогда os.replace бесплатен)."""
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return False
+
+
+def _drop_empty_dir(path: str) -> None:
+    """Убрать опустевший batch-каталог стейджинга (не пустой — не трогаем)."""
+    try:
+        os.rmdir(os.path.dirname(path))
+    except OSError:
+        pass
+
+
+def _place_stream(stream: BinaryIO, path: str) -> None:
+    """Положить поток в файл: staged из intake — мгновенным rename
+    (та же ФС), чужой поток — обычной потоковой копией."""
+    staged = getattr(stream, "staged_path", None)
+    if staged and os.path.isfile(staged):
+        try:
+            if _same_fs(staged, os.path.dirname(path) or "."):
+                os.replace(staged, path)
+                _drop_empty_dir(staged)
+                return
+        except OSError:
+            pass
+        # Чужая ФС: копируем чанками, staged за собой подчищаем.
+        try:
+            stream.seek(0)
+        except Exception:  # noqa: BLE001 — неперематываемый поток читаем с места
+            pass
+        _write_stream(stream, path)
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
+        _drop_empty_dir(staged)
+        return
+    _write_stream(stream, path)
+
+
 def _write_stream(stream: BinaryIO, path: str) -> None:
     with open(path, "wb") as f:
         while True:
@@ -218,7 +261,7 @@ def create_workspace(
 
 def _store_role(dest_dir: str, role: str, stream: BinaryIO, filename: str) -> str:
     target = os.path.join(dest_dir, role_filename(os.path.basename(filename), role))
-    _write_stream(stream, target)
+    _place_stream(stream, target)
     return target
 
 
@@ -238,8 +281,8 @@ def make_upload_temp(root: str, name: str) -> str:
 
 
 def write_stream(stream: BinaryIO, path: str) -> None:
-    """Потоково пишет данные в файл."""
-    _write_stream(stream, path)
+    """Потоково пишет данные в файл (staged из intake — через rename)."""
+    _place_stream(stream, path)
 
 
 def promote_plain_video(root: str, name: str, role: str) -> Optional[str]:

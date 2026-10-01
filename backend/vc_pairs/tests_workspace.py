@@ -7,6 +7,7 @@
 проверяется тонкий HTTP-слой и откат при битом файле.
 """
 
+import errno
 import os
 import shutil
 import time
@@ -18,6 +19,28 @@ from vc_fragments.tests import WorkspaceApiTestBase
 from videocutter.standalone import workspace as ws_fs
 
 HTTP_CREATED = 201
+HTTP_ACCEPTED = 202
+
+
+def _wait_ready(testcase, ws_id, timeout=30):
+    """Опрос detail, пока фоновая валидация после 202 (indexing)."""
+    deadline = time.time() + timeout
+    while True:
+        body = testcase.client.get(f"/api/v1/workspaces/{ws_id}/").json()
+        if not body.get("indexing") or body.get("broken"):
+            return body
+        if time.time() > deadline:
+            testcase.fail(f"workspace {ws_id} never became ready")
+        time.sleep(0.1)
+
+
+def _wait_file(path, timeout=30):
+    """Ждать появления файла (task.json пишет фоновая валидация)."""
+    deadline = time.time() + timeout
+    while not os.path.isfile(path):
+        if time.time() > deadline:
+            raise AssertionError(f"file never appeared: {path}")
+        time.sleep(0.1)
 
 
 class WorkspaceAdminTests(WorkspaceApiTestBase):
@@ -29,9 +52,12 @@ class WorkspaceAdminTests(WorkspaceApiTestBase):
 
     def test_upload_creates_workspace(self):
         resp = self.client.post(self.ws_list_url, {"file": self._video(), "name": "uploaded"})
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         body = resp.json()
         self.assertEqual(body["id"], "uploaded")
+        # Метаданные догоняет фоновая валидация: ждём готовности.
+        body = _wait_ready(self, "uploaded")
+        self.assertFalse(body["broken"])
         self.assertGreater(body["total_frames"], 0)
         self.assertTrue(os.path.isdir(os.path.join(self._tmpdir, "uploaded")))
 
@@ -40,7 +66,7 @@ class WorkspaceAdminTests(WorkspaceApiTestBase):
 
     def test_upload_default_name_from_file(self):
         resp = self.client.post(self.ws_list_url, {"file": self._video("clip42.mp4")})
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         self.assertEqual(resp.json()["id"], "clip42")
 
     def test_upload_missing_file(self):
@@ -53,12 +79,35 @@ class WorkspaceAdminTests(WorkspaceApiTestBase):
         self.assertEqual(resp.status_code, 400)
         self.assertFalse(os.path.exists(os.path.join(self._tmpdir, "bad")))
 
-    def test_upload_rolls_back_invalid_video(self):
-        """Битый «видеофайл» не оставляет частичный workspace."""
+    def test_upload_invalid_video_reports_broken(self):
+        """Битый «видеофайл»: 202, затем broken-запись с текстом (без отката)."""
         bad = SimpleUploadedFile("broken.mp4", b"not a video", content_type="video/mp4")
         resp = self.client.post(self.ws_list_url, {"file": bad, "name": "broken"})
-        self.assertEqual(resp.status_code, 400)
-        self.assertFalse(os.path.exists(os.path.join(self._tmpdir, "broken")))
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
+        body = _wait_ready(self, "broken")
+        self.assertTrue(body["broken"])
+        self.assertTrue(body["error"])
+        # Каталог остаётся (видно в списке как битая задача).
+        self.assertTrue(os.path.isdir(os.path.join(self._tmpdir, "broken")))
+
+    def test_upload_disk_full_returns_507(self):
+        """Кончилось место при записи: 507 с текстом вместо голого 500."""
+        # logging.disable: тестовый harness (py3.14 + Django 4.2) падает
+        # при логгинге любого 5xx-ответа — гасим логи на время проверки.
+        import logging
+        nospace = OSError(errno.ENOSPC, "No space left on device")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch(
+                "vc_pairs.views.ws_fs.create_workspace_pair", side_effect=nospace
+            ):
+                resp = self.client.post(
+                    self.ws_list_url, {"file": self._video(), "name": "big"}
+                )
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 507)
+        self.assertIn("места", resp.json()["error"])
 
     def test_upload_duplicate_name_conflict(self):
         resp = self.client.post(self.ws_list_url, {"file": self._video(), "name": self.ws_id})
@@ -101,7 +150,7 @@ class RoleApiTests(WorkspaceApiTestBase):
         """Один файл — «нейтральный»: source == preview (как --preview в PVC),
         хранится под ролевым именем source.<ext> (расширение сохраняется)."""
         resp = self.client.post(self.ws_list_url, {"file": self._video(), "name": "mix"})
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         body = self.client.get("/api/v1/workspaces/mix/").json()
         self.assertEqual(body["source_name"], "source.mp4")
         self.assertEqual(body["preview_name"], "source.mp4")
@@ -115,7 +164,7 @@ class RoleApiTests(WorkspaceApiTestBase):
             "preview": self._video("result.mp4"),
             "name": "pair",
         })
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         body = self.client.get("/api/v1/workspaces/pair/").json()
         self.assertEqual(body["source_name"], "source.mp4")
         self.assertEqual(body["preview_name"], "preview.mp4")
@@ -131,8 +180,10 @@ class RoleApiTests(WorkspaceApiTestBase):
             "preview": self._video("6_preview.mp4"),
             "name": "unif",
         })
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         ws_dir = os.path.join(self._tmpdir, "unif")
+        # task.json пишет фоновая валидация — ждём файл, затем сверяем состав.
+        _wait_file(os.path.join(ws_dir, "task.json"))
         files = sorted(os.listdir(ws_dir))
         self.assertEqual(files, ["preview.mp4", "source.avi", "task.json"])
         body = self.client.get("/api/v1/workspaces/unif/").json()
@@ -146,7 +197,7 @@ class RoleApiTests(WorkspaceApiTestBase):
             "preview": self._video("same.mp4"),
             "name": "samepair",
         })
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         ws_dir = os.path.join(self._tmpdir, "samepair")
         files = sorted(os.listdir(ws_dir))
         self.assertIn("source.mp4", files)
@@ -158,7 +209,7 @@ class RoleApiTests(WorkspaceApiTestBase):
             "source": self._video("clip.m2ts"),
             "name": "anyfmt",
         })
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         self.assertGreater(self.client.get("/api/v1/workspaces/anyfmt/").json()["total_frames"], 0)
 
     def test_swap_roles(self):
@@ -253,6 +304,33 @@ class RoleApiTests(WorkspaceApiTestBase):
         self.assertEqual(body["preview_name"], "preview.mp4")
         self.assertTrue(os.path.isfile(os.path.join(self._tmpdir, "keep", "preview.mp4")))
 
+    def test_upload_role_disk_full_returns_507(self):
+        """Кончилось место при замене роли: 507, старый файл роли цел."""
+        import logging
+        self.client.post(self.ws_list_url, {
+            "source": self._video("a.mp4"),
+            "preview": self._video("b.mp4"),
+            "name": "keeproom",
+        })
+        nospace = OSError(errno.ENOSPC, "No space left on device")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch(
+                "vc_pairs.views.ws_fs.write_stream", side_effect=nospace
+            ):
+                resp = self._upload_role(
+                    "/api/v1/workspaces/keeproom/video/preview/",
+                    file=self._video("c.mp4"),
+                )
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 507)
+        self.assertIn("места", resp.json()["error"])
+        body = self.client.get("/api/v1/workspaces/keeproom/").json()
+        self.assertEqual(body["preview_name"], "preview.mp4")
+        self.assertTrue(
+            os.path.isfile(os.path.join(self._tmpdir, "keeproom", "preview.mp4")))
+
     def test_upload_role_unknown_role(self):
         resp = self._upload_role("/api/v1/workspaces/x/video/bogus/", file=self._video())
         self.assertEqual(resp.status_code, 400)
@@ -264,7 +342,7 @@ class RoleApiTests(WorkspaceApiTestBase):
             "source": self._video("clip.avi"),
             "name": "oners",
         })
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         body = self.client.get("/api/v1/workspaces/oners/").json()
         self.assertEqual(body["source_name"], "source.avi")
         self.assertEqual(body["preview_name"], "source.avi")
@@ -276,7 +354,7 @@ class RoleApiTests(WorkspaceApiTestBase):
             "preview": self._video("cam.webm"),
             "name": "onepv",
         })
-        self.assertEqual(resp.status_code, HTTP_CREATED)
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
         body = self.client.get("/api/v1/workspaces/onepv/").json()
         self.assertEqual(body["preview_name"], "preview.webm")
         self.assertEqual(body["source_name"], "preview.webm")
@@ -492,15 +570,55 @@ class ListRobustnessTests(WorkspaceApiTestBase):
 class DeleteRobustnessTests(WorkspaceApiTestBase):
     """Удаление: причина в ответе, отмена фона экспорта (F7)."""
 
+    def test_delete_during_validation_succeeds(self):
+        """DELETE во время фоновой валидации: 200, каталог ушёл, валидация
+        тихо вышла (без broken-записи — показывать нечего и некому)."""
+        import threading
+
+        import workspace as ws_module
+        import vc_pairs.views as views
+        from vc_pairs import frame_provider as fp_module
+
+        entered = threading.Event()
+        release = threading.Event()
+        real_get_metadata = fp_module.get_metadata
+
+        def blocked(path):
+            entered.set()
+            self.assertTrue(release.wait(timeout=30))
+            return real_get_metadata(path)
+
+        with mock.patch.object(fp_module, "get_metadata", side_effect=blocked):
+            t = threading.Thread(
+                target=views._validate_workspace_async,
+                args=(self.ws_id,), daemon=True)
+            t.start()
+            self.assertTrue(entered.wait(timeout=30))
+            resp = self.client.delete(self.ws_detail_url)
+            self.assertEqual(resp.status_code, 200)
+            self.assertFalse(os.path.exists(self.ws_dir))
+            release.set()
+            t.join(timeout=30)
+        self.assertFalse(t.is_alive(), "валидация не вышла после удаления")
+        self.assertIsNone(ws_module.workspace_error(self.ws_id))
+
     def test_delete_oserror_returns_500_with_reason(self):
+        import logging
+
         import vc_pairs.views as views
 
-        with mock.patch.object(
-            ws_fs, "delete_workspace", side_effect=OSError("busy")
-        ), mock.patch.object(views, "_DELETE_ATTEMPTS", 2), mock.patch.object(
-            views, "_DELETE_RETRY_DELAY", 0
-        ):
-            resp = self.client.delete(self.ws_detail_url)
+        # logging.disable: см. test_upload_disk_full_returns_507 — harness
+        # падает при логгинге 5xx на py3.14 + Django 4.2.
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch.object(
+                ws_fs, "delete_workspace", side_effect=OSError("busy")
+            ), mock.patch.object(views, "_DELETE_ATTEMPTS", 2), mock.patch.object(
+                views, "_DELETE_RETRY_DELAY", 0
+            ):
+                resp = self.client.delete(self.ws_detail_url)
+        finally:
+            logging.disable(logging.NOTSET)
         self.assertEqual(resp.status_code, 500)
         self.assertIn("busy", resp.json()["error"])
 
