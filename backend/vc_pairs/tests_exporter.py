@@ -76,6 +76,130 @@ class ExporterRangeTest(SimpleTestCase):
             exp.extract_fragments([(0, 3)], frame_ts_ranges=[(0, 1), (2, 3)])
 
 
+class ExporterBoundaryTest(SimpleTestCase):
+    """Точность границ нарезки: какие кадры реально попадают в файл.
+
+    Каждый кадр исходника кодирует свой индекс пикселями (левая половина
+    ``(i // 16) * 16``, правая ``(i % 16) * 16``; шаг 16 переживает lossy):
+    выход декодируется покадрово и сверяется с ожидаемым [a, b] попиксельно,
+    а не только счётчиком. Ловит сдвиги границ, которые счёт+первый кадр
+    на статике не видят.
+    """
+
+    N = 120
+    W, H = 64, 64
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg не найден")
+        super().setUpClass()
+        import numpy as np
+
+        cls.tmpdir = tempfile.TemporaryDirectory(prefix="vcbound_")
+        cls.np = np
+        cls.sources = {}
+        for vfr in (False, True):
+            path = os.path.join(cls.tmpdir.name, f"bound_vfr{vfr}.mp4")
+            frames = []
+            for i in range(cls.N):
+                fr = np.zeros((cls.H, cls.W, 3), dtype=np.uint8)
+                fr[:, : cls.W // 2] = (i // 16) * 16
+                fr[:, cls.W // 2:] = (i % 16) * 16
+                frames.append(fr)
+            if vfr:
+                half = cls.N // 2
+                frames = frames[:half] + frames[half::2]
+            raw = b"".join(f.tobytes() for f in frames)
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
+                 "-s", f"{cls.W}x{cls.H}", "-r", "25", "-i", "-",
+                 "-vf", "format=yuv420p", "-c:v", "libx264", "-qp", "0",
+                 "-preset", "ultrafast", "-g", "10", "-bf", "2",
+                 "-vsync", "cfr", path],
+                input=raw, capture_output=True)
+            assert proc.returncode == 0, proc.stderr.decode()[-500:]
+            cls.sources[vfr] = (path, len(frames))
+
+    @classmethod
+    def tearDownClass(cls):
+        from vc_pairs import frame_provider as fp
+        for path, _ in cls.sources.values():
+            fp.close_source(path)
+        cls.tmpdir.cleanup()
+        super().tearDownClass()
+
+    def tearDown(self):
+        from vc_pairs import frame_provider as fp
+        for path, _ in self.sources.values():
+            fp.close_source(path)
+
+    def _infer(self, frame):
+        """Индекс, зашитый в пиксели (None — поле побито beyond допуска)."""
+        import cv2
+
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(float)
+        L = g[:, : self.W // 2].mean()
+        R = g[:, self.W // 2:].mean()
+        Lq = int(round(L / 16.0)) * 16
+        Rq = int(round(R / 16.0)) * 16
+        if abs(L - Lq) > 5 or abs(R - Rq) > 5:
+            return None
+        return (Lq // 16) * 16 + Rq // 16
+
+    def _read_indices(self, path):
+        import cv2
+
+        cap = cv2.VideoCapture(path)
+        try:
+            out = []
+            while True:
+                ok, fr = cap.read()
+                if not ok:
+                    break
+                out.append(self._infer(fr))
+            return out
+        finally:
+            cap.release()
+
+    def _check_range(self, vfr, a, b):
+        from vc_fragments.views import _frame_ts_bounds
+        from vc_pairs import frame_provider as fp
+
+        src, _ = self.sources[vfr]
+        vpts = fp.get_visible_pts(src)
+        self.assertTrue(0 <= a <= b < len(vpts))
+        half = self.N // 2
+        orig_of = (lambda i: i if i < half else half + 2 * (i - half)) \
+            if vfr else (lambda i: i)
+        out = tempfile.mkdtemp()
+        try:
+            created = Exporter(src, out).extract_fragments(
+                [(a, b)],
+                frame_ts_ranges=[_frame_ts_bounds(vpts, a, b)])
+            self.assertEqual(len(created), 1)
+            got = self._read_indices(created[0])
+            self.assertEqual(
+                got, [orig_of(i) for i in range(a, b + 1)],
+                f"vfr={vfr} [{a},{b}]: в нарезке не те кадры: {got}")
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_cfr_boundaries(self):
+        """CFR: середина, одиночные (голова/середина/хвост), целиком."""
+        for a, b in [(5, 8), (0, 0), (60, 60), (119, 119),
+                     (0, 119), (117, 119), (0, 2)]:
+            with self.subTest(fragment=(a, b)):
+                self._check_range(False, a, b)
+
+    def test_vfr_boundaries(self):
+        """VFR через смену темпа: границы точны в видимых индексах."""
+        for a, b in [(5, 8), (0, 0), (40, 40), (89, 89),
+                     (0, 89), (87, 89), (0, 2)]:
+            with self.subTest(fragment=(a, b)):
+                self._check_range(True, a, b)
+
+
 def _ffprobe_count(path: str) -> int:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
