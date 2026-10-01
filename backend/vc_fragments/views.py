@@ -243,7 +243,11 @@ def _frame_small_at(path: str, index: int):
 
 def _verify_cut(src_path: str, start_index: int, cut_path: str,
                 expected_count: int) -> None:
-    """Проверка нарезки: счётчик кадров + контент первого кадра.
+    """Проверка нарезки: счётчик кадров + контент первого И последнего кадра.
+
+    Первого кадра недостаточно: на статике соседние кадры попиксельно
+    одинаковы и сдвиг границ прошёл бы незамеченным (счёт сошёлся бы).
+    Последний кадр при сдвиге всегда чужой.
 
     :raises FFmpegError: несовпадение — молчаливого успеха не будет.
     """
@@ -254,15 +258,24 @@ def _verify_cut(src_path: str, start_index: int, cut_path: str,
         raise FFmpegError(
             f"Кадров в нарезке: {actual}, ожидалось: {expected_count} "
             f"({cut_path})")
-    exp = _frame_small_at(src_path, start_index)
-    got = _frame_small_at(cut_path, 0)
+    _verify_cut_frame(src_path, start_index, cut_path, 0, "первого")
+    if expected_count > 1:
+        _verify_cut_frame(src_path, start_index + expected_count - 1,
+                           cut_path, expected_count - 1, "последнего")
+
+
+def _verify_cut_frame(src_path: str, src_index: int, cut_path: str,
+                       cut_index: int, what: str) -> None:
+    """Сверка одного кадра нарезки с исходником (downscale-gray SSD)."""
+    exp = _frame_small_at(src_path, src_index)
+    got = _frame_small_at(cut_path, cut_index)
     if exp is None or got is None:
         raise FFmpegError(f"Не декодируется кадр для сверки: {cut_path}")
     d = exp - got
     ssd = float((d * d).mean())
     if ssd > VERIFY_SSD_MAX:
         raise FFmpegError(
-            f"Контент не совпал (ssd={ssd:.1f} > {VERIFY_SSD_MAX}): "
+            f"Контент {what} кадра не совпал (ssd={ssd:.1f} > {VERIFY_SSD_MAX}): "
             f"{cut_path}")
 
 

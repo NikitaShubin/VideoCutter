@@ -66,6 +66,10 @@ class WorkspaceApiTestBase(SimpleTestCase):
             EXPORTS.clear()
             EXPORT_CANCEL.clear()
             del _EXPORT_QUEUE[:]
+        # Сброс ошибок фоновой валидации (память процесса).
+        import workspace as _ws_mod
+
+        _ws_mod.clear_all_workspace_errors()
 
         # Списки URL.
         self.ws_list_url = "/api/v1/workspaces/"
@@ -678,6 +682,38 @@ class ExportApiTests(WorkspaceApiTestBase):
         vw.release()
         with self.assertRaises(FFmpegError):
             export_views._verify_cut(self.video, 0, other, 10)
+
+    def test_verify_cut_rejects_last_frame_mismatch(self):
+        """Первый кадр свой, последний чужой: ловит именно сверка хвоста.
+
+        На статике сдвиг границ даёт верные счёт и первый кадр —
+        без проверки последнего он прошёл бы незамеченным.
+        """
+        import cv2
+        import numpy as np
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        cap = cv2.VideoCapture(self.video)
+        frames = []
+        while True:
+            ok, fr = cap.read()
+            if not ok:
+                break
+            frames.append(fr)
+        cap.release()
+        self.assertGreaterEqual(len(frames), 2)
+        h, w = frames[0].shape[:2]
+        frames[-1] = np.full((h, w, 3), 255, dtype=np.uint8)
+        forged = os.path.join(self.ws_dir, "forged.mp4")
+        vw = cv2.VideoWriter(
+            forged, cv2.VideoWriter_fourcc(*"mp4v"), 10, (w, h))
+        for fr in frames:
+            vw.write(fr)
+        vw.release()
+        with self.assertRaises(FFmpegError) as ctx:
+            export_views._verify_cut(self.video, 0, forged, len(frames))
+        self.assertIn("последнего", str(ctx.exception))
 
 
 class ExportQueueTests(WorkspaceApiTestBase):
