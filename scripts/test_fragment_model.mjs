@@ -282,7 +282,7 @@ check("keyFrames и selectedFrames", () => {
   m.add(10, 20);
   m.add(30, 40);
   assert.deepEqual(m.keyFrames(), [10, 20, 30, 40]);
-  assert.equal(m.selectedFrames(), (20 - 10) + (40 - 30));
+  assert.equal(m.selectedFrames(), (20 - 10 + 1) + (40 - 30 + 1));
 });
 
 check("fragmentAt находит фрагмент, содержащий позицию", () => {

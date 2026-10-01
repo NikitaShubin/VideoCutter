@@ -190,6 +190,7 @@ setInitial(fragments: Fragment[]): void {
   }
 
   selectedFrames(): number {
-    return this.fragments.reduce((acc, f) => acc + (f.end - f.start), 0);
+    // Инклюзивные границы [start, end]: в каждом фрагменте end - start + 1.
+    return this.fragments.reduce((acc, f) => acc + (f.end - f.start + 1), 0);
   }
 }
