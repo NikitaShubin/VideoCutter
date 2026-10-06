@@ -9,8 +9,8 @@ import json
 import os
 import subprocess
 import threading
+from typing import Optional
 
-import cv2
 import numpy as np
 from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods
@@ -225,29 +225,56 @@ def _ffprobe_frame_count(path: str):
         return None
 
 
-def _frame_small_at(path: str, index: int):
-    """Кадр даунскейл-gray float32 (None — не декодируется)."""
-    cap = cv2.VideoCapture(path)
+def _decode_thumbs(path: str, frames_wanted: int,
+                   timeout: int = 1500) -> Optional[list]:
+    """Секвентальный декод в gray-миниатюры 64x36 (без seek'ов и счётчиков).
+
+    Seek'и недостоверны на части контейнеров (MPEG-PS: seek приземляется
+    на GOP позже даже у ffmpeg CLI; ASF: чтение после seek падает в cv2),
+    а cv2-сборка не умеет часть кодеков (AV1). Единственный честный путь —
+    декодить с начала и брать нужные ординалы. Миниатюры режут и трафик
+    пайпа (2.3 КБ/кадр), и чувствительность к зерну пересжатия.
+    Возвращает None при обрыве декода.
+    """
+    cmd = ["ffmpeg", "-v", "error", "-i", path,
+           "-frames:v", str(max(0, frames_wanted)),
+           "-vf", "scale=64:36,format=gray",
+           "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
     try:
-        if index > 0:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, index)
-        ok, fr = cap.read()
-        if not ok or fr is None:
-            return None
-        g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
-        return cv2.resize(g, (64, 36),
-                         interpolation=cv2.INTER_AREA).astype(np.float32)
-    finally:
-        cap.release()
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = proc.stdout
+    n = len(raw) // (64 * 36)
+    if n * 64 * 36 != len(raw):
+        return None
+    return [np.frombuffer(raw[i * 2304:(i + 1) * 2304],
+                          dtype=np.uint8).astype(np.float32)
+            for i in range(n)]
+
+
+# Окно поиска тихого сдвига (в кадрах по обе стороны): покрывает
+# наблюдавшиеся +2 (start_time) с запасом; большие уезды всё равно
+# валятся номинальным порогом.
+_VERIFY_SHIFT_WINDOW = 3
 
 
 def _verify_cut(src_path: str, start_index: int, cut_path: str,
                 expected_count: int) -> None:
-    """Проверка нарезки: счётчик кадров + контент первого И последнего кадра.
+    """Полная проверка нарезки: счётчик + КАЖДЫЙ кадр + детект сдвига.
 
-    Первого кадра недостаточно: на статике соседние кадры попиксельно
-    одинаковы и сдвиг границ прошёл бы незамеченным (счёт сошёлся бы).
-    Последний кадр при сдвиге всегда чужой.
+    Эталон — те же ординалы исходника секвентальным декодом (тем же
+    семейством декодеров, что режет экспорт; без seek'ов и cv2). Порог
+    VERIFY_SSD_MAX отделяет совпадения (единицы) от поломок (сотни–тысячи)
+    с запасом: истинное совмещение даёт ssd≈0 даже после CRF-пересжатия,
+    так что превышение — само по себе дефект (не тот диапазон, мусор,
+    битый транскод). Дополнительно ловится тихий сдвиг: если соседний
+    эталон совпал на порядок лучше номинального — границы уехали, хотя
+    счётчик сошёлся (статику ±1 не различить в принципе — там всё
+    одинаково, включая соседей).
 
     :raises FFmpegError: несовпадение — молчаливого успеха не будет.
     """
@@ -258,25 +285,43 @@ def _verify_cut(src_path: str, start_index: int, cut_path: str,
         raise FFmpegError(
             f"Кадров в нарезке: {actual}, ожидалось: {expected_count} "
             f"({cut_path})")
-    _verify_cut_frame(src_path, start_index, cut_path, 0, "первого")
-    if expected_count > 1:
-        _verify_cut_frame(src_path, start_index + expected_count - 1,
-                           cut_path, expected_count - 1, "последнего")
-
-
-def _verify_cut_frame(src_path: str, src_index: int, cut_path: str,
-                       cut_index: int, what: str) -> None:
-    """Сверка одного кадра нарезки с исходником (downscale-gray SSD)."""
-    exp = _frame_small_at(src_path, src_index)
-    got = _frame_small_at(cut_path, cut_index)
-    if exp is None or got is None:
-        raise FFmpegError(f"Не декодируется кадр для сверки: {cut_path}")
-    d = exp - got
-    ssd = float((d * d).mean())
-    if ssd > VERIFY_SSD_MAX:
+    got = _decode_thumbs(cut_path, expected_count)
+    if got is None or len(got) != expected_count:
         raise FFmpegError(
-            f"Контент {what} кадра не совпал (ssd={ssd:.1f} > {VERIFY_SSD_MAX}): "
-            f"{cut_path}")
+            f"Нарезка не декодируется целиком ({cut_path}): "
+            f"прочитано {len(got) if got is not None else 0} "
+            f"из {expected_count}")
+    exp_all = _decode_thumbs(src_path, start_index + expected_count)
+    if exp_all is None or len(exp_all) < start_index + expected_count:
+        raise FFmpegError(
+            f"Не декодируются эталоны 0..{start_index + expected_count - 1} "
+            f"из {src_path}")
+    exp = exp_all[start_index:start_index + expected_count]
+    for i in range(expected_count):
+        d = exp[i] - got[i]
+        nom = float((d * d).mean())
+        if i == 0:
+            what = "первого"
+        elif i == expected_count - 1:
+            what = "последнего"
+        else:
+            what = f"кадра {i + 1}/{expected_count}"
+        if nom > 1.0:
+            # Тихий сдвиг проверяем ДО порога: соседний эталон совпал
+            # на порядок лучше — вырезано не то, хотя счётчик сошёлся.
+            lo = max(0, i - _VERIFY_SHIFT_WINDOW)
+            hi = min(expected_count, i + _VERIFY_SHIFT_WINDOW + 1)
+            best = min(float(((exp[j] - got[i]) ** 2).mean())
+                       for j in range(lo, hi) if j != i)
+            if best <= nom / 10:
+                raise FFmpegError(
+                    f"Похоже на сдвиг границ: {what} кадр нарезки совпал "
+                    f"с соседним эталоном (ssd={best:.1f}), а не со своим "
+                    f"(ssd={nom:.1f}): {cut_path}")
+        if nom > VERIFY_SSD_MAX:
+            raise FFmpegError(
+                f"Контент {what} кадра не совпал "
+                f"(ssd={nom:.1f} > {VERIFY_SSD_MAX}): {cut_path}")
 
 
 def _run_export(ws_id: str) -> None:

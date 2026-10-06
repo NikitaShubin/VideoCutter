@@ -271,3 +271,60 @@ class ExporterVfrTest(SimpleTestCase):
                 _ffprobe_duration(created[0]), expect_dur, delta=0.15)
         finally:
             shutil.rmtree(out, ignore_errors=True)
+
+
+class FullVerifyTest(SimpleTestCase):
+    """Обязательная полная сверка: каждый кадр + детект тихого сдвига."""
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            raise unittest.SkipTest("ffmpeg/ffprobe не найдены")
+        super().setUpClass()
+        cls.tmpdir = tempfile.TemporaryDirectory(prefix="vcfull_")
+        cls.path = os.path.join(cls.tmpdir.name, "dyn.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc2=size=160x120:rate=30:duration=3",
+             "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", cls.path],
+            check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        from vc_pairs import frame_provider as fp
+        fp.close_source(cls.path)
+        cls.tmpdir.cleanup()
+        super().tearDownClass()
+
+    def tearDown(self):
+        from vc_pairs import frame_provider as fp
+        fp.close_source(self.path)
+
+    def _export(self, a, b):
+        from vc_fragments.views import _frame_ts_bounds
+        from vc_pairs import frame_provider as fp
+
+        vpts = fp.get_visible_pts(self.path)
+        out = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, out, True)
+        created = Exporter(self.path, out).extract_fragments(
+            [(a, b)], frame_ts_ranges=[_frame_ts_bounds(vpts, a, b)])
+        return created[0]
+
+    def test_full_verify_passes_exact_cut(self):
+        """Точная нарезка проходит полную сверку молча."""
+        import vc_fragments.views as export_views
+
+        cut = self._export(10, 19)
+        export_views._verify_cut(self.path, 10, cut, 10)
+
+    def test_full_verify_catches_shift(self):
+        """Срез [12,21], заявленный как [10,19]: именно сдвиг, не контент."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        cut = self._export(12, 21)
+        with self.assertRaises(FFmpegError) as ctx:
+            export_views._verify_cut(self.path, 10, cut, 10)
+        self.assertIn("сдвиг", str(ctx.exception))
