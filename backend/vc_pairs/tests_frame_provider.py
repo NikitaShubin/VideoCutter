@@ -168,8 +168,9 @@ class FrameProviderTest(SimpleTestCase):
         """Сегментный скан побитово равен однопроходному."""
         tb, fps, w, h, total, kf, _off = fp._scan_packets(self.path)
         self.assertGreater(len(kf), 1, "в клипе нет нескольких GOP")
-        v1 = fp._scan_visible(self.path, float(tb), kf, 1)
-        v4 = fp._scan_visible(self.path, float(tb), kf, 4)
+        v1, mono1 = fp._scan_visible(self.path, float(tb), kf, 1)
+        v4, mono4 = fp._scan_visible(self.path, float(tb), kf, 4)
+        self.assertTrue(mono1 and mono4)
         self.assertEqual(v1, v4)
         self.assertEqual(len(v1), total)
         idx = _prop(self.path)._ensure_index()

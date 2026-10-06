@@ -347,14 +347,26 @@ def _run_export(ws_id: str) -> None:
 
         # Секундные диапазоны из индекса: отбор по t неуязвим к сбоям
         # счётчика n на аномальных файлах; границы — точные метки кадров.
+        # Исключение — файлы без PTS у пакетов (AVI+B-кадры): метки там
+        # гадаются каждым декодером по-своему (системный ±1), зато порядок
+        # выдачи единодушен — отбираем по счётчику n (ординалы UI).
         vpts = frame_provider.get_visible_pts(ws.original)
+        by_count = frame_provider.index_pts_unreliable(ws.original)
         frame_ts_ranges = []
-        for (start, end) in fragments:
-            if not 0 <= start <= end < len(vpts):
-                raise FFmpegError(
-                    f"Фрагмент [{start}, {end}] вне диапазона "
-                    f"[0, {len(vpts)})")
-            frame_ts_ranges.append(_frame_ts_bounds(vpts, start, end))
+        if not by_count:
+            for (start, end) in fragments:
+                if not 0 <= start <= end < len(vpts):
+                    raise FFmpegError(
+                        f"Фрагмент [{start}, {end}] вне диапазона "
+                        f"[0, {len(vpts)})")
+                frame_ts_ranges.append(_frame_ts_bounds(vpts, start, end))
+        else:
+            for (start, end) in fragments:
+                if not 0 <= start <= end < len(vpts):
+                    raise FFmpegError(
+                        f"Фрагмент [{start}, {end}] вне диапазона "
+                        f"[0, {len(vpts)})")
+            frame_ts_ranges = None
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
             with EXPORTS_LOCK:
                 if ws_id in EXPORT_CANCEL:

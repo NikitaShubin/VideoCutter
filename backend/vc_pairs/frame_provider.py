@@ -255,9 +255,9 @@ _INDEX_CACHE_LOCK = threading.Lock()
 _INDEX_CACHE_MAX = int(os.environ.get("VC_INDEX_CACHE") or 16)
 
 
-# Версия формата дискового кэша индексов: v2 = нормализованная шкала
-# (start_offset_us) + канонический порядок + проверенная посадка seek'а.
-_INDEX_CACHE_VERSION = 2
+# Версия формата дискового кэша индексов: v3 = v2 + флаг недостоверных
+# меток (pts_unreliable): перестройка один раз, дальше — чтение.
+_INDEX_CACHE_VERSION = 3
 
 
 def _frame_cache_dir() -> str:
@@ -338,7 +338,7 @@ def _cache_load(path: str, size, mtime_ns):
                 array.array("q", data["kf_pts"]),
                 data.get("tb"), data.get("fps"),
                 data.get("width"), data.get("height"),
-                int(offset))
+                int(offset), data.get("pts_unreliable"))
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -360,7 +360,8 @@ def _stream_params(path: str):
 
 def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us,
                 tb=None, fps: float = 0.0, width: int = 0,
-                height: int = 0, start_offset_us: int = 0) -> None:
+                height: int = 0, start_offset_us: int = 0,
+                pts_unreliable: bool = False) -> None:
     """Best-effort запись кэша (атомарно через .tmp)."""
     if size is None:
         return
@@ -380,6 +381,7 @@ def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us,
                 "width": width,
                 "height": height,
                 "start_offset_us": int(start_offset_us),
+                "pts_unreliable": bool(pts_unreliable),
                 "v": _INDEX_CACHE_VERSION,
             }, f, separators=(",", ":"))
         os.replace(cp + ".tmp", cp)
@@ -577,21 +579,23 @@ def _demux_landed(cont, stream, tick, tb, fallbacks):
 
 
 def _decode_range(path: str, tb: float, start_us, end_us,
-                  fallback_us=None) -> list:
+                  keep_from_us=None, fallback_us=None) -> list:
     """Декодить диапазон [start_us, end_us) в список видимых PTS (мкс).
 
-    start_us=None — с начала файла; end_us=None — до конца (с хвостом
-    декодера). Границы — строго по ключевым кадрам (даёт фаза 1), кадры
-    чужого диапазона отсекаются по PTS (старт seek может встать раньше,
-    задержанные B-кадры — позже). N=1 без отсечений побитово повторяет
-    старый однопроходный скан. Предположение: закрытые GOP (open-GOP
-    leading-кадры прошлого GOP не воспроизводятся — на камерных H.264
-    и x264-умолчаниях их нет, равенство проверяется тестом и замером).
+    start_us=None — с начала файла (без seek'а); end_us=None — до конца
+    (с хвостом декодера). keep_from_us — нижняя граница хранения
+    (по умолчанию = start_us): при перекрытии сегментов seek идёт раньше
+    (за leading B-кадрами open-GOP и их референсами), а хранится только
+    своё — дубли перекрытия снимает слияние sort+dedupe. Границы —
+    строго по ключевым кадрам (даёт фаза 1). N=1 без перекрытия побитово
+    повторяет старый однопроходный скан.
     """
     out = []
     cont = av.open(path)
     cancel_key = os.path.abspath(path)
     cancel_gen = _cancel_gen(path)
+    if keep_from_us is None:
+        keep_from_us = start_us
     try:
         stream = cont.streams.video[0]
         tick = int((start_us / 1e6) / tb + 0.5) \
@@ -612,7 +616,7 @@ def _decode_range(path: str, tb: float, start_us, end_us,
                 for fr in stream.decode(pkt):
                     ts = (fr.pts or 0) * float(fr.time_base or tb)
                     us = round(ts * 1e6)
-                    if start_us is not None and us < start_us:
+                    if keep_from_us is not None and us < keep_from_us:
                         continue
                     if end_us is not None and us >= end_us:
                         continue
@@ -625,7 +629,7 @@ def _decode_range(path: str, tb: float, start_us, end_us,
             for fr in stream.decode(None):
                 ts = (fr.pts or 0) * float(fr.time_base or tb)
                 us = round(ts * 1e6)
-                if start_us is not None and us < start_us:
+                if keep_from_us is not None and us < keep_from_us:
                     continue
                 if end_us is not None and us >= end_us:
                     continue
@@ -637,8 +641,18 @@ def _decode_range(path: str, tb: float, start_us, end_us,
     return out
 
 
-def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None) -> list:
+def _is_mono(part) -> bool:
+    """Выход декодера строго растёт (иначе метки недостоверны)."""
+    return all(b > a for a, b in zip(part, part[1:]))
+
+
+def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None):
     """Фаза 2: видимые PTS N сегментами (по группам ключевых кадров).
+
+    Возвращает (список PTS, mono_ok): mono_ok=False — выход декодера
+    немонотонен (значения меток недостоверны, напр. AVI+B-кадры без PTS:
+    порядок выдачи при этом истинный). Слияние — sort+dedupe (дубли
+    перекрытий побитово равны).
 
     ``progress`` (опц.) — callable(доля 0..1) по готовым сегментам.
     Порядок кадров сохраняется (части раскладываются по индексам запусков).
@@ -648,20 +662,26 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None) -> lis
         out = _decode_range(path, float(tb), None, None)
         if progress is not None:
             progress(1.0)
-        return out
+        return out, _is_mono(out)
     # Делим ключевые кадры на непрерывные группы (остаток — первым).
-    # Каждому запуску — fallback на предыдущий ключевой: посадка seek'а
-    # проверяется (_demux_landed), при промахе откатываемся на GOP назад
-    # (и далее до старта файла), ранние кадры отсекает фильтр по PTS.
+    # Каждый запуск seek'ится на ОДИН ключевой раньше своей границы
+    # и хранит оттуда же: leading B-кадры open-GOP (presentation раньше
+    # своего I, в потоке — позже) иначе не декодируются ни в одном
+    # сегменте (сосед уже оборвал demux на пакете этого I). Перекрытие
+    # даёт дубли whole-GOP — их снимает sort+dedupe при слиянии (pts
+    # дублей побитово равны: та же картинка). Посадка каждого seek'а
+    # по-прежнему проверяется (_demux_landed с fallback ещё раньше).
     per, rem = divmod(len(kf_us), n_seg)
     launches = []
     lo = 0
     for k in range(n_seg):
         hi = lo + per + (1 if k < rem else 0)
-        start = kf_us[lo] if lo > 0 else None
+        seek = kf_us[lo - 1] if lo > 0 else None
         end = kf_us[hi] if hi < len(kf_us) else None
-        fb = kf_us[lo - 1] if lo > 0 else None
-        launches.append((start, end, fb))
+        fb = kf_us[lo - 2] if lo > 1 else None
+        # keep = seek: храним с точки посадки (включая leading B-кадры
+        # open-GOP и их референсы); дубли перекрытия снимает слияние.
+        launches.append((seek, end, fb))
         lo = hi
     f_tb = float(tb)
     parts: list = [None] * len(launches)
@@ -675,8 +695,8 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None) -> lis
         done = 0
         while queue or futs:
             while queue and len(futs) < n_seg and not _global_demand_hot():
-                k, (s, e, fb) = queue.pop(0)
-                futs[ex.submit(_decode_range, path, f_tb, s, e, fb)] = k
+                k, (sk, e, fb) = queue.pop(0)
+                futs[ex.submit(_decode_range, path, f_tb, sk, e, sk, fb)] = k
             if not futs:
                 # Запускать не даём (горячий спрос), ждать нечего — пауза.
                 time.sleep(0.5)
@@ -691,7 +711,20 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None) -> lis
     out = []
     for part in parts:
         out.extend(part)
-    return out
+    # Перекрытие соседей даёт дубли (целая GOP передекодирована дважды):
+    # pts дублей побитово равны — та же картинка. Стыки при перекрытии
+    # немонотонны (хвост соседа левее своей головы), поэтому sort.
+    # На здоровых файлах перекрытие пусто по смыслу: дубли — только
+    # точные, итог равен однопроходному (тест single==parallel держит).
+    # Монотонность — ПО ЧАСТЯМ (стыки немонотонны штатно): инверсия
+    # внутри части означает недостоверные метки.
+    mono_ok = all(_is_mono(part) for part in parts if part)
+    out.sort()
+    dedup = []
+    for u in out:
+        if not dedup or u != dedup[-1]:
+            dedup.append(u)
+    return dedup, mono_ok
 
 
 def _build_index(path: str) -> _Index:
@@ -745,9 +778,10 @@ class _Index:
             size = mtime_ns = None
 
         cached = _cache_load(path, size, mtime_ns)
+        pts_unreliable = None  # задаёт свежая ветка; кэш — ниже.
         if cached is not None:
             (packet_total, visible, kf_us, tb_s, fps, width, height,
-             start_offset_us) = cached
+             start_offset_us, cached_unreliable) = cached
             if tb_s is None:
                 # Старый формат кэша (без параметров): доберём лёгким
                 # открытием потока, без декода.
@@ -772,31 +806,46 @@ class _Index:
                 self.fps = fps
                 # Фаза 2 — параллельный декод по сегментам ключевых кадров.
                 n_seg = min(INDEX_WORKERS, len(kf_us)) if kf_us else 1
-                visible = array.array(
-                    "q", _scan_visible(
-                        path, float(tb), kf_us, n_seg,
-                        lambda f: _report_index_progress(key, 0.15 + 0.85 * f)))
-                _cache_save(path, size, mtime_ns, packet_total,
-                            array.array("q", sorted(visible)), kf_us,
-                            tb, fps, width, height, start_offset_us)
+                scanned, mono_ok = _scan_visible(
+                    path, float(tb), kf_us, n_seg,
+                    lambda f: _report_index_progress(key, 0.15 + 0.85 * f))
+                visible = array.array("q", scanned)
+                # Недостоверные метки: пакетов с PTS нет вообще либо выход
+                # декодера немонотонен (гадание по DTS). Порядок выдачи при
+                # этом истинен — сортировка противопоказана, отбор — по n.
+                pts_unreliable = bool(
+                    (packet_total == 0 and len(visible) > 0)
+                    or not mono_ok)
+                _cache_save(path, size, mtime_ns, packet_total, visible, kf_us,
+                            tb, fps, width, height, start_offset_us,
+                            pts_unreliable)
             finally:
                 # Сборка кончилась (успех/ошибка): прогресс больше не нужен.
                 _clear_index_progress(key)
 
         self.packet_total = packet_total
         self.start_offset_us = int(start_offset_us or 0)
-        if not self.fps and len(visible) > 1:
+        if pts_unreliable is None:
+            # Ветка кэша: флаг из записи (v3 — всегда есть); поле
+            # отсутствует только в чужой записи — тогда по пакетному
+            # признаку класса «вообще без PTS».
+            pts_unreliable = (
+                cached_unreliable if cached_unreliable is not None
+                else (self.packet_total == 0 and len(visible) > 0))
+        self.pts_unreliable = bool(pts_unreliable)
+        if self.pts_unreliable:
+            ordered = array.array("q", visible)
+        else:
+            # Канонический порядок: сортировка по PTS. Для упорядоченных
+            # файлов — тождественное преобразование (sha совладает).
+            ordered = array.array("q", sorted(visible))
+        if not self.fps and len(ordered) > 1:
             # Поток без заявленной частоты (напр. Theora avg_rate 0/0):
             # средняя по таймлайну — честная оценка для display.
-            span_s = (visible[-1] - visible[0]) / 1e6
+            span_s = (max(ordered) - min(ordered)) / 1e6
             if span_s > 0:
-                self.fps = (len(visible) - 1) / span_s
-        # Канонический порядок: сортировка по PTS. Декодер обязан отдавать
-        # в порядке показа, но на части файлов (AVI + B-кадры) PyAV сыплет
-        # в порядке декодирования — тогда показ джиттерит, а границы GOP
-        # и экспорта считаются по мусору. Для упорядоченных файлов —
-        # тождественное преобразование (проверяется тестом: sha совладает).
-        self.visible_pts = array.array("q", sorted(visible))
+                self.fps = (len(ordered) - 1) / span_s
+        self.visible_pts = ordered
         self.total = len(visible)
         self.skipped = max(0, self.packet_total - self.total)
         self.bounds: List[int] = _make_bounds(self.visible_pts, kf_us)
@@ -1024,8 +1073,25 @@ class _Provider:
                 try:
                     stream = cont.streams.video[0]
                     demux = _demux_landed(
-                        cont, stream, seek_tick, tb,
-                        [fb_tick] if fb_tick is not None else [])
+                        cont, stream,
+                        None if idx.pts_unreliable else seek_tick, tb,
+                        [] if idx.pts_unreliable else
+                        ([fb_tick] if fb_tick is not None else []))
+                    # Маппинг выхода в индексы: обычно — bisect сырого PTS
+                    # по таймлайну; файлам без PTS у пакетов значения
+                    # недостоверны (порядок выдачи — истина) — кладём по
+                    # счётчику выхода с начала (seek'а нет, demux с нуля).
+                    seq = 0
+
+                    def _map(fr):
+                        nonlocal seq
+                        if idx.pts_unreliable:
+                            vi = start + seq
+                            seq += 1
+                            return vi
+                        fs = (fr.pts or 0) * float(fr.time_base or tb)
+                        return bisect.bisect_left(vpts, round(fs * 1e6))
+
                     done = False
                     # Per-packet декод: битый access unit группы лишь
                     # пропускается, остальные кадры группы не теряются.
@@ -1053,8 +1119,7 @@ class _Provider:
                             break
                         try:
                             for fr in stream.decode(pkt):
-                                fs = (fr.pts or 0) * float(fr.time_base or tb)
-                                vi = bisect.bisect_left(vpts, round(fs * 1e6))
+                                vi = _map(fr)
                                 if vi < start:
                                     continue  # B-кадры предыдущей GOP (display)
                                 if vi >= end:
@@ -1067,8 +1132,7 @@ class _Provider:
                     if not done and self._demand_alive():
                         try:
                             for fr in stream.decode(None):
-                                fs = (fr.pts or 0) * float(fr.time_base or tb)
-                                vi = bisect.bisect_left(vpts, round(fs * 1e6))
+                                vi = _map(fr)
                                 if vi < start:
                                     continue
                                 if vi >= end:
@@ -1453,13 +1517,25 @@ class _Provider:
             try:
                 stream = cont.streams.video[0]
                 demux = _demux_landed(
-                    cont, stream, seek_tick, tb,
-                    [fb_tick] if fb_tick is not None else [])
+                    cont, stream,
+                    None if idx.pts_unreliable else seek_tick, tb,
+                    [] if idx.pts_unreliable else
+                    ([fb_tick] if fb_tick is not None else []))
+                seq = 0
                 for pkt in demux:
                     if _cancelled(cancel_key, cancel_gen):
                         raise _DecodeCancelled(self.path)
                     try:
                         for fr in stream.decode(pkt):
+                            if idx.pts_unreliable:
+                                # Порядок выдачи — истина: n-й выход
+                                # с начала файла — кадр n.
+                                if seq == index:
+                                    return self._encode(
+                                        fr.to_ndarray(format="bgr24"),
+                                        quality, scale)
+                                seq += 1
+                                continue
                             fs = (fr.pts or 0) * float(fr.time_base or tb)
                             if round(fs * 1e6) >= target_us:
                                 return self._encode(
@@ -1586,10 +1662,18 @@ def get_metadata(path: str) -> dict:
     return _get_provider(path).metadata()
 
 
+def index_pts_unreliable(path: str) -> bool:
+    """Метки времени файла недостоверны (пакеты без PTS, напр. AVI+B-кадры).
+
+    Таким файлам отбор экспорта — по счётчику n (ординалы = UI-индексы =
+    порядок выдачи декодера, доказан 1-в-1), а не по меткам: значения
+    гадаются каждым декодером по-своему (системный ±1 кадр).
+    """
+    return bool(_get_provider(path)._ensure_index().pts_unreliable)
+
+
 def get_visible_pts(path: str) -> list:
     """PTS видимых кадров (мкс, display-порядок) — для t-диапазонов экспорта.
-
-    Нормализован к нулю (минус start_time контейнера): именно эту шкалу
     видят ffmpeg-select и OpenCV. Внутри движок работает в сырой шкале
     (см. _Index.start_offset_us) — наружу сырые значения не отдаются,
     иначе границы экспорта уезжают на start_time (тихо или с ошибкой).
