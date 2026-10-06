@@ -42,7 +42,16 @@ class Exporter:
         source_dir, source_basename = os.path.split(source_video_file)
         source_name, source_ext = os.path.splitext(source_basename)
         self.target_prefix = os.path.join(out_dir, source_name)
-        self.target_suffix = source_ext
+        # Контейнеры, чей мультиплексор отвергает H.264 (WebM: только
+        # VP8/VP9/AV1; OGG: только Theora/VP8): молча менять кодек —
+        # значит менять качество и скорость всего пайплайна (CRF/preset
+        # у каждого кодера свои), поэтому сохраняем проверенный
+        # libx264-пайплайн и меняем только расширение на .mp4. Содержимое
+        # нарезок — попиксельно то же, что выбиралось.
+        if source_ext.lower() in (".webm", ".ogv", ".ogg"):
+            self.target_suffix = ".mp4"
+        else:
+            self.target_suffix = source_ext
         self.remove_duplicates = remove_duplicates
         self.crf = crf
         self.preset = preset

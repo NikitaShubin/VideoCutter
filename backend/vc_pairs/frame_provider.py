@@ -767,7 +767,8 @@ class _Index:
                     "q", _scan_visible(
                         path, float(tb), kf_us, n_seg,
                         lambda f: _report_index_progress(key, 0.15 + 0.85 * f)))
-                _cache_save(path, size, mtime_ns, packet_total, visible, kf_us,
+                _cache_save(path, size, mtime_ns, packet_total,
+                            array.array("q", sorted(visible)), kf_us,
                             tb, fps, width, height, start_offset_us)
             finally:
                 # Сборка кончилась (успех/ошибка): прогресс больше не нужен.
@@ -775,10 +776,21 @@ class _Index:
 
         self.packet_total = packet_total
         self.start_offset_us = int(start_offset_us or 0)
-        self.visible_pts = visible  # array('q'), микросекунды, display-порядок
+        if not self.fps and len(visible) > 1:
+            # Поток без заявленной частоты (напр. Theora avg_rate 0/0):
+            # средняя по таймлайну — честная оценка для display.
+            span_s = (visible[-1] - visible[0]) / 1e6
+            if span_s > 0:
+                self.fps = (len(visible) - 1) / span_s
+        # Канонический порядок: сортировка по PTS. Декодер обязан отдавать
+        # в порядке показа, но на части файлов (AVI + B-кадры) PyAV сыплет
+        # в порядке декодирования — тогда показ джиттерит, а границы GOP
+        # и экспорта считаются по мусору. Для упорядоченных файлов —
+        # тождественное преобразование (проверяется тестом: sha совладает).
+        self.visible_pts = array.array("q", sorted(visible))
         self.total = len(visible)
         self.skipped = max(0, self.packet_total - self.total)
-        self.bounds: List[int] = _make_bounds(visible, kf_us)
+        self.bounds: List[int] = _make_bounds(self.visible_pts, kf_us)
 
     def gop_of(self, frame: int) -> Optional[int]:
         """Номер GOP, содержащего кадр, или None (до первого ключевого)."""

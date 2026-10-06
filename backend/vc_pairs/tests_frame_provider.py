@@ -134,6 +134,27 @@ class FrameProviderTest(SimpleTestCase):
     def tearDown(self):
         fp.close_source(self.path)
 
+    def test_visible_pts_sorted_display_order(self):
+        """Таймлайн монотонен (иначе показ джиттерит, границы — мусор)."""
+        idx = _prop(self.path)._ensure_index()
+        v = list(idx.visible_pts)
+        self.assertEqual(v, sorted(v))
+        self.assertEqual(len(set(v)), len(v))
+
+    def test_fps_fallback_from_timeline(self):
+        """Поток без заявленной частоты (Theora 0/0): fps из таймлайна."""
+        theo = os.path.join(self.tmpdir.name, "rate.ogv")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc2=size=96x96:rate=20:duration=2",
+             "-c:v", "libtheora", "-q:v", "5", theo],
+            check=True, capture_output=True)
+        try:
+            meta = fp.get_metadata(theo)
+            self.assertGreater(meta["fps"], 10)
+        finally:
+            fp.close_source(theo)
+
     def test_index_multi_gop(self):
         idx = _prop(self.path)._ensure_index()
         self.assertEqual(idx.total, CLIP_FRAMES)
@@ -145,7 +166,7 @@ class FrameProviderTest(SimpleTestCase):
 
     def test_index_scan_parallel_matches_single(self):
         """Сегментный скан побитово равен однопроходному."""
-        tb, fps, w, h, total, kf = fp._scan_packets(self.path)
+        tb, fps, w, h, total, kf, _off = fp._scan_packets(self.path)
         self.assertGreater(len(kf), 1, "в клипе нет нескольких GOP")
         v1 = fp._scan_visible(self.path, float(tb), kf, 1)
         v4 = fp._scan_visible(self.path, float(tb), kf, 4)
@@ -1077,7 +1098,7 @@ class IndexThrottleTest(SimpleTestCase):
     def test_scan_visible_throttled_matches_unthrottled(self):
         # Троттлинг меняет только темп запусков, не результат.
         import unittest.mock as mock
-        tb, _fps, _w, _h, _total, kf_us = fp._scan_packets(self.clip)
+        tb, _fps, _w, _h, _total, kf_us, _off = fp._scan_packets(self.clip)
         full = fp._scan_visible(self.clip, float(tb), kf_us, 4)
         self.assertTrue(len(full) > 0)
         calls = []
@@ -1135,7 +1156,7 @@ class DecodeCancelTests(SimpleTestCase):
         под тем же именем не должна умирать от чужого флага)."""
         path = self._unique_copy()
         fp.cancel_path(path)
-        tb, fps, width, height, packet_total, kf_us = fp._scan_packets(path)
+        tb, fps, width, height, packet_total, kf_us, _off = fp._scan_packets(path)
         self.assertGreater(packet_total, 0)
         self.assertGreater(len(kf_us), 0)
 

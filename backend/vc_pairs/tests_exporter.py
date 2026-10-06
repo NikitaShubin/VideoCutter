@@ -75,6 +75,21 @@ class ExporterRangeTest(SimpleTestCase):
         with self.assertRaises(FFmpegError):
             exp.extract_fragments([(0, 3)], frame_ts_ranges=[(0, 1), (2, 3)])
 
+    def test_target_suffix_fallback_mp4(self):
+        """Контейнеры без H.264 (webm/ogv): суффикс .mp4, пайплайн тот же."""
+        from videocutter.core.exporter import Exporter
+
+        self.assertTrue(
+            Exporter("a.webm", "/tmp").target_suffix == ".mp4")
+        self.assertTrue(
+            Exporter("a.ogv", "/tmp").target_suffix == ".mp4")
+        self.assertTrue(
+            Exporter("a.mp4", "/tmp").target_suffix == ".mp4")
+        self.assertTrue(
+            Exporter("a.mpg", "/tmp").target_suffix == ".mpg")
+        self.assertTrue(
+            Exporter("a.avi", "/tmp").target_suffix == ".avi")
+
 
 class ExporterBoundaryTest(SimpleTestCase):
     """Точность границ нарезки: какие кадры реально попадают в файл.
@@ -269,6 +284,72 @@ class ExporterVfrTest(SimpleTestCase):
             expect_dur = (vpts[b] - vpts[a]) / 1e6
             self.assertAlmostEqual(
                 _ffprobe_duration(created[0]), expect_dur, delta=0.15)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+
+class StartOffsetTest(SimpleTestCase):
+    """Ненулевой start_time: шкала индекса нормализована, экспорт точен.
+
+    Регресс класса «тихий сдвиг» (MPEG-PS/FLV): сырой PTS идёт от
+    start_time, а ffmpeg-select считает от нуля. Без нормализации все
+    границы уезжали бы на start_time (ошибка сверки или молча чужие
+    кадры — по статике/динамике).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            raise unittest.SkipTest("ffmpeg/ffprobe не найдены")
+        super().setUpClass()
+        cls.tmpdir = tempfile.TemporaryDirectory(prefix="vcoff_")
+        base = os.path.join(cls.tmpdir.name, "base.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc2=size=160x120:rate=25:duration=3",
+             "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", base],
+            check=True, capture_output=True)
+        cls.path = os.path.join(cls.tmpdir.name, "offset.mpg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", base, "-output_ts_offset", "0.55",
+             "-c:v", "mpeg2video", "-q:v", "2", "-pix_fmt", "yuv420p",
+             cls.path],
+            check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        from vc_pairs import frame_provider as fp
+        fp.close_source(cls.path)
+        cls.tmpdir.cleanup()
+        super().tearDownClass()
+
+    def tearDown(self):
+        from vc_pairs import frame_provider as fp
+        fp.close_source(self.path)
+
+    def test_visible_pts_start_at_zero(self):
+        """Индекс в шкале ffmpeg (от нуля), а не в сыром PTS."""
+        from vc_pairs import frame_provider as fp
+
+        vpts = fp.get_visible_pts(self.path)
+        self.assertLess(vpts[0], 50000, f"шкала не нормализована: {vpts[0]}")
+
+    def test_export_on_offset_file_verifies(self):
+        """Экспорт середины со сдвинутого файла проходит полную сверку."""
+        import vc_fragments.views as export_views
+        from vc_fragments.views import _frame_ts_bounds
+        from vc_pairs import frame_provider as fp
+
+        vpts = fp.get_visible_pts(self.path)
+        a, b = 2, min(12, len(vpts) - 1)
+        self.assertLess(a, b)
+        out = tempfile.mkdtemp()
+        try:
+            created = Exporter(self.path, out).extract_fragments(
+                [(a, b)], frame_ts_ranges=[_frame_ts_bounds(vpts, a, b)])
+            self.assertEqual(len(created), 1)
+            export_views._verify_cut(self.path, a, created[0], b - a + 1)
         finally:
             shutil.rmtree(out, ignore_errors=True)
 
