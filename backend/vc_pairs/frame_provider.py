@@ -255,6 +255,11 @@ _INDEX_CACHE_LOCK = threading.Lock()
 _INDEX_CACHE_MAX = int(os.environ.get("VC_INDEX_CACHE") or 16)
 
 
+# Версия формата дискового кэша индексов: v2 = нормализованная шкала
+# (start_offset_us) + канонический порядок + проверенная посадка seek'а.
+_INDEX_CACHE_VERSION = 2
+
+
 def _frame_cache_dir() -> str:
     """Каталог дискового кэша индексов (переживает рестарт процесса)."""
     d = os.environ.get("VC_FRAMECACHE_DIR")
@@ -318,7 +323,10 @@ def _cache_load(path: str, size, mtime_ns):
             data = json.load(f)
         if (data.get("path") != os.path.abspath(path)
                 or data.get("size") != size
-                or data.get("mtime_ns") != mtime_ns):
+                or data.get("mtime_ns") != mtime_ns
+                or data.get("v", 1) != _INDEX_CACHE_VERSION):
+            # v<2: до нормализации шкалы/сортировки/посадки seek'а —
+            # такие индексы дырявые/сдвинутые, только пересборка.
             return None
         offset = data.get("start_offset_us")
         if offset is None:
@@ -372,6 +380,7 @@ def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us,
                 "width": width,
                 "height": height,
                 "start_offset_us": int(start_offset_us),
+                "v": _INDEX_CACHE_VERSION,
             }, f, separators=(",", ":"))
         os.replace(cp + ".tmp", cp)
     except OSError:
