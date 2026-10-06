@@ -273,6 +273,41 @@ def _cache_key(path: str) -> str:
     return hashlib.sha1(os.path.abspath(path).encode("utf-8")).hexdigest() + ".json"
 
 
+def _probe_start_offset_us(path: str) -> int:
+    """Сдвиг шкалы PTS файла в мкс (0 — шкала уже от нуля/неизвестна).
+
+    Контейнеры вроде MPEG-PS/FLV хранят сырой PTS от ненулевого start_time,
+    а ffmpeg/OpenCV показывают время минус start_time. Разность шкал
+    сдвигала все границы экспорта (тихо или с ошибкой сверки).
+    Лёгкий open без декода.
+    """
+    try:
+        cont = av.open(path)
+    except Exception:
+        return 0
+    try:
+        streams = cont.streams.video
+        stream = streams[0] if streams else None
+        cst = getattr(cont, "start_time", None)
+        if cst is not None:
+            try:
+                return int(cst)
+            except (TypeError, ValueError):
+                pass
+        if stream is not None:
+            sst = stream.start_time
+            if sst is not None:
+                return round(sst * float(stream.time_base) * 1e6)
+    except Exception:
+        pass
+    finally:
+        try:
+            cont.close()
+        except Exception:
+            pass
+    return 0
+
+
 def _cache_load(path: str, size, mtime_ns):
     """Читает кэш видимых PTS, если он соответствует текущей версии файла."""
     if size is None:
@@ -285,11 +320,17 @@ def _cache_load(path: str, size, mtime_ns):
                 or data.get("size") != size
                 or data.get("mtime_ns") != mtime_ns):
             return None
+        offset = data.get("start_offset_us")
+        if offset is None:
+            # Кэш до нормализации шкалы: сдвиг доберём лёгким open
+            # (пересборка индекса на десятки секунд здесь не нужна).
+            offset = _probe_start_offset_us(path)
         return (int(data["packet_total"]),
                 array.array("q", data["visible_pts"]),
                 array.array("q", data["kf_pts"]),
                 data.get("tb"), data.get("fps"),
-                data.get("width"), data.get("height"))
+                data.get("width"), data.get("height"),
+                int(offset))
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -311,7 +352,7 @@ def _stream_params(path: str):
 
 def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us,
                 tb=None, fps: float = 0.0, width: int = 0,
-                height: int = 0) -> None:
+                height: int = 0, start_offset_us: int = 0) -> None:
     """Best-effort запись кэша (атомарно через .tmp)."""
     if size is None:
         return
@@ -330,6 +371,7 @@ def _cache_save(path: str, size, mtime_ns, packet_total, visible, kf_us,
                 "fps": fps,
                 "width": width,
                 "height": height,
+                "start_offset_us": int(start_offset_us),
             }, f, separators=(",", ":"))
         os.replace(cp + ".tmp", cp)
     except OSError:
@@ -400,9 +442,13 @@ def index_progress(path: str) -> Optional[float]:
 def _scan_packets(path: str, progress=None):
     """Фаза 1 сборки индекса: быстрый demux-скан без декода.
 
-    Возвращает (tb, fps, width, height, packet_total, kf_us). Demux на
-    порядки дешевле декода, поэтому предскан почти бесплатен, а даёт
-    точные границы сегментов (по ключевым кадрам) для фазы 2.
+    Возвращает (tb, fps, width, height, packet_total, kf_us,
+    start_offset_us). Demux на порядки дешевле декода, поэтому предскан
+    почти бесплатен, а даёт точные границы сегментов (по ключевым кадрам)
+    для фазы 2. start_offset_us — сдвиг шкалы сырого PTS (start_time
+    контейнера): движок внутри работает в сырой шкале, наружу
+    (get_visible_pts) отдаёт нормализованную к нулю — ту, что видят
+    ffmpeg-select и OpenCV.
     ``progress`` (опц.) — callable(доля 0..1) по байтам пакетов.
     """
     try:
@@ -441,14 +487,88 @@ def _scan_packets(path: str, progress=None):
             if pkt.is_keyframe:
                 t = pkt.pts * float(pkt.time_base or tb)
                 kf_us.append(round(t * 1e6))
+        # Сдвиг шкалы сырого PTS (start_time): тот же источник, что видит
+        # ffmpeg (минус start_time), — контейнер уже открыт, без +1 open.
+        offset_us = 0
+        try:
+            cst = getattr(cont, "start_time", None)
+            if cst is not None:
+                offset_us = int(cst)
+            elif stream.start_time is not None:
+                offset_us = round(
+                    stream.start_time * float(tb) * 1e6)
+        except Exception:
+            offset_us = 0
     finally:
         cont.close()
     if progress is not None:
         progress(1.0)
-    return tb, fps, width, height, packet_total, kf_us
+    return tb, fps, width, height, packet_total, kf_us, offset_us
 
 
-def _decode_range(path: str, tb: float, start_us, end_us) -> list:
+# Допуск посадки seek'а (с): первый пакет с pts позже цели более чем
+# на это — промах. Корректный backward-seek встаёт на ключевой кадр НЕ
+# позже цели, первый пакет — не позже неё же (B-пакеты — раньше).
+_SEEK_LANDING_EPS_S = 0.005
+
+# Сколько пакетов смотрим без pts, прежде чем сдаться и принять посадку.
+_SEEK_PEEK_PACKETS = 32
+
+
+def _demux_landed(cont, stream, tick, tb, fallbacks):
+    """Demux с проверенной посадкой seek'а (генератор пакетов).
+
+    Файлы со sparse seek-индексом (MPEG-PS/FLV) приземляют seek на GOP
+    позже цели (доказано: +1 GOP и у PyAV, и у ffmpeg CLI) — молча
+    терялись кадры индекса, показа и сингл-рида. Проверяем первый пакет
+    с известным pts: позже цели — значит, пролетели; отступаем на
+    предыдущий ключевой (fallbacks по убыванию, затем старт файла) и
+    перечитываем. На точных файлах цена — peek нескольких пакетов (~0):
+    посадка принимается с первой попытки. Последний fallback (старт
+    файла) принимается всегда — раньше некуда.
+    """
+    tried = [tick]
+    if tick is not None:
+        for fb in fallbacks or []:
+            if fb is not None and fb < tried[-1]:
+                tried.append(fb)
+        if not tried or tried[-1] != 0:
+            # Последний шанс — старт файла (принимается всегда):
+            # раньше начала некуда, дальше только полный промах.
+            tried.append(0)
+    eps_tick = max(1, int(_SEEK_LANDING_EPS_S / tb + 0.5))
+    for step, t in enumerate(tried):
+        last = step == len(tried) - 1
+        if t is not None and t > 0:
+            cont.seek(t, stream=stream, backward=True, any_frame=False)
+        elif t == 0 and step > 0:
+            cont.seek(0, stream=stream, backward=True, any_frame=False)
+        # t is None (первый, старт файла): seek не нужен, demux с начала.
+        buffered = []
+        landed = True
+        gen = cont.demux(stream)
+        for _ in range(_SEEK_PEEK_PACKETS):
+            try:
+                pkt = next(gen)
+            except StopIteration:
+                break
+            buffered.append(pkt)
+            if pkt.pts is None:
+                continue
+            if not last and pkt.pts > t + eps_tick:
+                landed = False
+            break
+        if landed:
+            for pkt in buffered:
+                yield pkt
+            for pkt in gen:
+                yield pkt
+            return
+    return
+
+
+def _decode_range(path: str, tb: float, start_us, end_us,
+                  fallback_us=None) -> list:
     """Декодить диапазон [start_us, end_us) в список видимых PTS (мкс).
 
     start_us=None — с начала файла; end_us=None — до конца (с хвостом
@@ -465,12 +585,14 @@ def _decode_range(path: str, tb: float, start_us, end_us) -> list:
     cancel_gen = _cancel_gen(path)
     try:
         stream = cont.streams.video[0]
-        if start_us is not None:
-            tick = int((start_us / 1e6) / tb + 0.5)
-            cont.seek(tick, stream=stream, backward=True, any_frame=False)
+        tick = int((start_us / 1e6) / tb + 0.5) \
+            if start_us is not None else None
+        fb_tick = int((fallback_us / 1e6) / tb + 0.5) \
+            if fallback_us is not None else None
         end_tick = int((end_us / 1e6) / tb + 0.5) \
             if end_us is not None else None
-        for pkt in cont.demux(stream):
+        for pkt in _demux_landed(cont, stream, tick, tb,
+                                  [fb_tick] if fb_tick is not None else []):
             if pkt.pts is None:
                 continue
             if _cancelled(cancel_key, cancel_gen):
@@ -519,6 +641,9 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None) -> lis
             progress(1.0)
         return out
     # Делим ключевые кадры на непрерывные группы (остаток — первым).
+    # Каждому запуску — fallback на предыдущий ключевой: посадка seek'а
+    # проверяется (_demux_landed), при промахе откатываемся на GOP назад
+    # (и далее до старта файла), ранние кадры отсекает фильтр по PTS.
     per, rem = divmod(len(kf_us), n_seg)
     launches = []
     lo = 0
@@ -526,7 +651,8 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None) -> lis
         hi = lo + per + (1 if k < rem else 0)
         start = kf_us[lo] if lo > 0 else None
         end = kf_us[hi] if hi < len(kf_us) else None
-        launches.append((start, end))
+        fb = kf_us[lo - 1] if lo > 0 else None
+        launches.append((start, end, fb))
         lo = hi
     f_tb = float(tb)
     parts: list = [None] * len(launches)
@@ -540,8 +666,8 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None) -> lis
         done = 0
         while queue or futs:
             while queue and len(futs) < n_seg and not _global_demand_hot():
-                k, (s, e) = queue.pop(0)
-                futs[ex.submit(_decode_range, path, f_tb, s, e)] = k
+                k, (s, e, fb) = queue.pop(0)
+                futs[ex.submit(_decode_range, path, f_tb, s, e, fb)] = k
             if not futs:
                 # Запускать не даём (горячий спрос), ждать нечего — пауза.
                 time.sleep(0.5)
@@ -595,6 +721,11 @@ class _Index:
     (целые микросекунды) — именно по нему строится ``idx -> PTS`` и границы
     GOP. Битый пакет не даёт кадра, но и не сдвигает индексы остальных:
     соседние кадры сохраняют свои номера.
+
+    Шкалы: внутри индекса всё в СЫРЫХ единицах контейнера (как отдаёт
+    PyAV); наружу через get_visible_pts — нормализованные к нулю
+    (минус start_offset_us), как их видят ffmpeg и OpenCV. Движок
+    (seek'и, bisect) трогает только сырые значения.
     """
 
     def __init__(self, path: str) -> None:
@@ -606,7 +737,8 @@ class _Index:
 
         cached = _cache_load(path, size, mtime_ns)
         if cached is not None:
-            packet_total, visible, kf_us, tb_s, fps, width, height = cached
+            (packet_total, visible, kf_us, tb_s, fps, width, height,
+             start_offset_us) = cached
             if tb_s is None:
                 # Старый формат кэша (без параметров): доберём лёгким
                 # открытием потока, без декода.
@@ -621,10 +753,10 @@ class _Index:
             # Фаза 1 — быстрый demux-скан (пакеты + ключевые кадры).
             key = os.path.abspath(path)
             try:
-                tb, fps, width, height, packet_total, kf_us = \
-                    _scan_packets(
-                        path,
-                        lambda f: _report_index_progress(key, 0.15 * f))
+                (tb, fps, width, height, packet_total, kf_us,
+                 start_offset_us) = _scan_packets(
+                     path,
+                     lambda f: _report_index_progress(key, 0.15 * f))
                 self.tb = tb
                 self.width = width
                 self.height = height
@@ -636,12 +768,13 @@ class _Index:
                         path, float(tb), kf_us, n_seg,
                         lambda f: _report_index_progress(key, 0.15 + 0.85 * f)))
                 _cache_save(path, size, mtime_ns, packet_total, visible, kf_us,
-                            tb, fps, width, height)
+                            tb, fps, width, height, start_offset_us)
             finally:
                 # Сборка кончилась (успех/ошибка): прогресс больше не нужен.
                 _clear_index_progress(key)
 
         self.packet_total = packet_total
+        self.start_offset_us = int(start_offset_us or 0)
         self.visible_pts = visible  # array('q'), микросекунды, display-порядок
         self.total = len(visible)
         self.skipped = max(0, self.packet_total - self.total)
@@ -853,6 +986,12 @@ class _Provider:
             tb = float(idx.tb)
             vpts = idx.visible_pts
             seek_tick = int((vpts[start] / 1e6) / tb + 0.5)
+            # Fallback — старт предыдущей GOP: посадка проверяется,
+            # при промахе откатываемся и додекодируем (раннее отсекается
+            # ниже по vi < start).
+            fb_tick = None
+            if g > 0:
+                fb_tick = int((vpts[idx.bounds[g - 1]] / 1e6) / tb + 0.5)
             cancel_key = os.path.abspath(self.path)
             cancel_gen = _cancel_gen(self.path)
             # Резервируем место под BGR-массивы на время декода; при попадании
@@ -863,7 +1002,9 @@ class _Provider:
                 cont = av.open(self.path)
                 try:
                     stream = cont.streams.video[0]
-                    cont.seek(seek_tick, stream=stream, backward=True, any_frame=False)
+                    demux = _demux_landed(
+                        cont, stream, seek_tick, tb,
+                        [fb_tick] if fb_tick is not None else [])
                     done = False
                     # Per-packet декод: битый access unit группы лишь
                     # пропускается, остальные кадры группы не теряются.
@@ -871,7 +1012,7 @@ class _Provider:
                     # бросаем декод, кэшируем частичное; ждуны недодекодированных
                     # кадров получат None. Живой спрос (waiters > 0) не трогаем:
                     # окну attach'а всегда хватает свежего demand-метки входа.
-                    for pkt in cont.demux(stream):
+                    for pkt in demux:
                         if _cancelled(cancel_key, cancel_gen):
                             raise _DecodeCancelled(self.path)
                         if task.orphaned() and self._provider_idle():
@@ -1281,14 +1422,19 @@ class _Provider:
         g = idx.gop_of(index)
         seek_us = vpts[idx.bounds[g]] if g is not None else vpts[0]
         seek_tick = int((seek_us / 1e6) / tb + 0.5)
+        fb_tick = None
+        if g is not None and g > 0:
+            fb_tick = int((vpts[idx.bounds[g - 1]] / 1e6) / tb + 0.5)
         cancel_key = os.path.abspath(self.path)
         cancel_gen = _cancel_gen(self.path)
         try:
             cont = av.open(self.path)
             try:
                 stream = cont.streams.video[0]
-                cont.seek(seek_tick, stream=stream, backward=True, any_frame=False)
-                for pkt in cont.demux(stream):
+                demux = _demux_landed(
+                    cont, stream, seek_tick, tb,
+                    [fb_tick] if fb_tick is not None else [])
+                for pkt in demux:
                     if _cancelled(cancel_key, cancel_gen):
                         raise _DecodeCancelled(self.path)
                     try:
@@ -1422,10 +1568,19 @@ def get_metadata(path: str) -> dict:
 def get_visible_pts(path: str) -> list:
     """PTS видимых кадров (мкс, display-порядок) — для t-диапазонов экспорта.
 
+    Нормализован к нулю (минус start_time контейнера): именно эту шкалу
+    видят ffmpeg-select и OpenCV. Внутри движок работает в сырой шкале
+    (см. _Index.start_offset_us) — наружу сырые значения не отдаются,
+    иначе границы экспорта уезжают на start_time (тихо или с ошибкой).
+
     Блокирует до готовности индекса (к моменту экспорта он уже собран
     валидацией). Возвращает обычный list (копия внутреннего массива).
     """
-    return list(_get_provider(path)._ensure_index().visible_pts)
+    idx = _get_provider(path)._ensure_index()
+    off = idx.start_offset_us
+    if not off:
+        return list(idx.visible_pts)
+    return [v - off for v in idx.visible_pts]
 
 
 logger = logging.getLogger(__name__)
