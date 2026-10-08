@@ -377,3 +377,103 @@ export function cancelExport(pairId: string): Promise<ExportStatus> {
     json<ExportStatus>(r),
   );
 }
+
+// ─── Бэкап/восстановление и обмен разметкой (P3) ────────────────────────────
+// Скачивание — обычной ссылкой <a href download> (GET отдаёт zip потоком).
+// Заливка — через XHR (upload.onprogress), как остальные загрузки.
+
+export function taskBackupUrl(id: string): string {
+  return `${BASE}/workspaces/${encodeURIComponent(id)}/backup`;
+}
+
+export function annotationsUrl(id: string, withMedia = false): string {
+  const base = `${BASE}/pairs/${encodeURIComponent(id)}/annotations`;
+  return withMedia ? `${base}?media=1` : base;
+}
+
+export function projectBackupUrl(id: string): string {
+  return `${BASE}/projects/${encodeURIComponent(id)}/backup`;
+}
+
+/** Ответ POST /backups/import (202): задача — {id, project_id}, проект — {id, tasks}. */
+export interface BackupImportResult {
+  kind: string;
+  id: string;
+  project_id?: string | null;
+  tasks?: string[];
+}
+
+/** Ответ POST .../annotations/import (200): счётчики применённой разметки. */
+export interface AnnotationsImportResult {
+  task_id: string;
+  fragments: number;
+  position: number;
+}
+
+function xhrPostFile<T>(
+  url: string,
+  file: File,
+  onProgress?: (fraction: number) => void,
+): Promise<T> {
+  const form = new FormData();
+  form.append("file", file);
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        /* ignore */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as T);
+      } else {
+        const err = body as { error?: string } | null;
+        reject(new Error(err?.error ?? `HTTP ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
+    xhr.send(form);
+  });
+}
+
+export interface ImportBackupOptions {
+  on_conflict?: "error" | "rename" | "overwrite";
+  project?: string;
+  onProgress?: (fraction: number) => void;
+}
+
+// Восстановление из бэкапа (ответ 202, индексация — в фоне; список опросить).
+// Без on_conflict — default rename: совпадающие имена получают суффикс _1.
+export function importBackup(
+  file: File,
+  opts: ImportBackupOptions = {},
+): Promise<BackupImportResult> {
+  const qs = new URLSearchParams();
+  if (opts.on_conflict) qs.set("on_conflict", opts.on_conflict);
+  if (opts.project) qs.set("project", opts.project);
+  const q = qs.toString();
+  return xhrPostFile<BackupImportResult>(
+    `${BASE}/backups/import${q ? `?${q}` : ""}`,
+    file,
+    opts.onProgress,
+  );
+}
+
+export function importAnnotations(
+  pairId: string,
+  file: File,
+  opts: { force?: boolean; onProgress?: (fraction: number) => void } = {},
+): Promise<AnnotationsImportResult> {
+  const q = opts.force ? "?force=1" : "";
+  return xhrPostFile<AnnotationsImportResult>(
+    `${BASE}/pairs/${encodeURIComponent(pairId)}/annotations/import${q}`,
+    file,
+    opts.onProgress,
+  );
+}

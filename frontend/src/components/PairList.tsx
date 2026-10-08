@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  annotationsUrl,
   attachTask,
   assignWorkspaceVideo,
   bumpWorkspaceNonce,
@@ -7,12 +8,16 @@ import {
   deleteProject,
   deleteWorkspace,
   detachTask,
+  importAnnotations,
+  importBackup,
   listProjects,
+  projectBackupUrl,
   removeWorkspaceVideo,
   renameProject,
   renameWorkspace,
   setWorkspaceVideo,
   swapVideos,
+  taskBackupUrl,
 } from "../api";
 import { VIDEO_ACCEPT, type Project, type VideoPair } from "../types";
 import {
@@ -123,6 +128,9 @@ export function PairList({
   const [showProjects, setShowProjects] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [projError, setProjError] = useState("");
+  // Восстановление из бэкапа: XHR-заливка с прогрессом (default rename —
+  // совпадающие имена получают суффикс _1, ничего не затирается).
+  const [projRestoreProgress, setProjRestoreProgress] = useState<number | null>(null);
 
   const loadProjects = useCallback(() => {
     listProjects()
@@ -421,6 +429,41 @@ export function PairList({
     onChanged();
   };
 
+  // Импорт разметки из архива annotations (только fragments.tsv; видео
+  // задачи не трогается). Прогресс — в тот же бар формы, ошибка — туда же.
+  const doImportAnnotations = (id: string, file: File) => {
+    setEditBusy(true);
+    setEditError("");
+    setEditProgress(0);
+    importAnnotations(id, file, { onProgress: setEditProgress })
+      .then(() => {
+        onChanged();
+        setEditProgress(null);
+      })
+      .catch((e: Error) => {
+        setEditError(e.message);
+        setEditProgress(null);
+      })
+      .finally(() => setEditBusy(false));
+  };
+
+  // Восстановление задачи/проекта из бэкапа (POST /backups/import, 202 —
+  // файлы записаны, индекс догоняет фоном; список опрашивается сам).
+  const doRestoreBackup = (file: File) => {
+    setProjError("");
+    setProjRestoreProgress(0);
+    importBackup(file, { onProgress: setProjRestoreProgress })
+      .then(() => {
+        setProjRestoreProgress(null);
+        loadProjects();
+        onChanged();
+      })
+      .catch((e: Error) => {
+        setProjError(e.message);
+        setProjRestoreProgress(null);
+      });
+  };
+
   // ─── Форма редактирования одной задачи ───────────────────────────────────
 
   const renderEdit = (p: VideoPair) => {
@@ -581,6 +624,42 @@ export function PairList({
       {editError && <div className="pair-edit-error">{editError}</div>}
 
       <div className="pair-edit-row">
+        <span className="pair-edit-label">Бэкап</span>
+        <a
+          className="role-action"
+          href={taskBackupUrl(p.id)}
+          download
+          title="Скачать полный бэкап задачи (видео + разметка + паспорт)"
+        >
+          ⤓ Бэкап
+        </a>
+        <a
+          className="role-action"
+          href={annotationsUrl(p.id)}
+          download
+          title="Скачать разметку (fragments.tsv + манифест)"
+        >
+          ⤓ Разметка
+        </a>
+        <label
+          className="role-action"
+          title="Применить архив разметки к этой задаче (видео не трогается)"
+        >
+          Импорт разметки…
+          <input
+            type="file"
+            hidden
+            accept=".zip,application/zip"
+            onChange={(e) => {
+              const f = e.target.files?.[0] ?? null;
+              if (f) doImportAnnotations(p.id, f);
+              e.target.value = "";
+            }}
+          />
+        </label>
+      </div>
+
+      <div className="pair-edit-row">
         <button
           className="pair-edit-btn-text"
           onClick={() => { setEditingId(null); onChanged(); }}
@@ -668,7 +747,31 @@ export function PairList({
             >
               Создать проект
             </button>
+            <label
+              className="add-btn"
+              title="Восстановить задачу/проект из zip-бэкапа (совпадающие имена получат суффикс _1)"
+            >
+              Восстановить из бэкапа…
+              <input
+                type="file"
+                hidden
+                accept=".zip,application/zip"
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  if (f) doRestoreBackup(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
           </div>
+          {projRestoreProgress !== null && (
+            <div className="pair-edit-progress">
+              <div
+                className="pair-edit-progress-bar"
+                style={{ width: `${Math.round(projRestoreProgress * 100)}%` }}
+              />
+            </div>
+          )}
           {projError && <div className="pair-edit-error">{projError}</div>}
           <ul className="project-rows">
             {(projects ?? []).map((p) => (
@@ -678,6 +781,14 @@ export function PairList({
                   {p.task_count} задач
                 </span>
                 <div className="pair-actions">
+                  <a
+                    className="pair-edit-btn"
+                    title="Скачать бэкап проекта"
+                    href={projectBackupUrl(p.id)}
+                    download
+                  >
+                    ⤓
+                  </a>
                   <button
                     className="pair-edit-btn"
                     title="Переименовать проект"

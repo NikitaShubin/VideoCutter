@@ -472,7 +472,8 @@ select option {
   flex: 0 0 auto;
 }
 
-.pair-list .pair-actions button {
+.pair-list .pair-actions button,
+.pair-list .pair-actions a.pair-edit-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -480,6 +481,19 @@ select option {
   height: 42px;
   text-align: center;
   background: #3a3a52;
+}
+
+/* Ссылки-кнопки: убрать подчёркивание, цвет как у кнопок. */
+.pair-list .pair-actions a.pair-edit-btn,
+.pair-edit a.role-action {
+  text-decoration: none;
+  color: #e0e0e0;
+}
+
+/* label.add-btn (Восстановить из бэкапа…): ведёт себя как кнопка. */
+label.add-btn {
+  display: inline-flex;
+  align-items: center;
 }
 
 .pair-list .pair-actions .pair-edit-btn:hover,
