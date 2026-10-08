@@ -534,6 +534,28 @@ class TaskImportTests(BackupArchiveMixin, ProjectTestBase):
         self.assertEqual(meta["project_id"],
                          project_meta.DEFAULT_PROJECT_ID)
 
+    def test_import_rename_keeps_original_display_name(self):
+        """Суффикс — папке, исходное имя — показу (дубли разрешены)."""
+        resp = self.import_archive(self.archive)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        meta = _wait_validation(self, self.new_id, self.new_dir)
+        self.assertEqual(meta["name"], self.ws_id)
+        items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
+        self.assertEqual(items[self.new_id]["name"], self.ws_id)
+
+    def test_import_rename_preserves_archived_display_name(self):
+        """Явное отображаемое имя из архива суффиксом не затирается."""
+        self.client.patch(
+            f"/api/v1/workspaces/{self.ws_id}/",
+            data=json.dumps({"name": "Выезд"}),
+            content_type="application/json")
+        archive = self.fetch_zip_url(
+            f"/api/v1/workspaces/{self.ws_id}/backup")
+        resp = self.import_archive(archive)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        meta = _wait_validation(self, self.new_id, self.new_dir)
+        self.assertEqual(meta["name"], "Выезд")
+
     def test_import_error_conflict_409(self):
         resp = self.import_archive(self.archive, "?on_conflict=error")
         self.assertEqual(resp.status_code, 409, resp.content)
@@ -866,6 +888,25 @@ class ProjectBackupTests(BackupArchiveMixin, ProjectTestBase):
                 self, tid, os.path.join(self._tmpdir, tid))
             self.assertEqual(task_meta.load(
                 os.path.join(self._tmpdir, tid))["project_id"], "Архив_1")
+
+    def test_project_import_rename_keeps_task_names(self):
+        """Папки с суффиксами, показ — исходные имена (дубли разрешены)."""
+        second_id = self._make_second_task()
+        archive = self._project_archive()
+        resp = self.import_archive(archive)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        body = resp.json()
+        self.assertEqual(len(body["tasks"]), 2)
+        names = {}
+        for tid in body["tasks"]:
+            meta = _wait_validation(
+                self, tid, os.path.join(self._tmpdir, tid))
+            names[tid] = meta["name"]
+        # Папки новые, отображаемые имена — как у оригиналов.
+        self.assertEqual(sorted(names.keys()),
+                         sorted([f"{self.ws_id}_1", f"{second_id}_1"]))
+        self.assertEqual(sorted(names.values()),
+                         sorted([self.ws_id, second_id]))
 
     def test_project_import_overwrite_reuses_project(self):
         archive = self._project_archive()

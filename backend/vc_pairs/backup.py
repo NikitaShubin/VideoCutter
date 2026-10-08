@@ -440,6 +440,11 @@ def _stage_task(zf: zipfile.ZipFile, names: List[str],
         pid = project_meta.resolve_pid(manifest.get("project_id")) \
             or project_meta.resolve_pid(meta.get("project_id"))
     meta["project_id"] = pid
+    if forced_name is None and target != base and not meta.get("name"):
+        # Конфликт имён: папка получила суффикс, а показываем исходное имя
+        # (дубли отображаемых имён разрешены — как в CVAT и как у проектов,
+        # где у копии id новый, а name из архива).
+        meta["name"] = base
 
     staging = _staging_dir()
     members = ([passport] if passport else []) \
@@ -587,7 +592,7 @@ def _import_project(zf: zipfile.ZipFile, names: List[str],
 
     # Имена задач резолвим ДО создания проекта: конфликт в error-режиме
     # не должен оставить пустой контейнер.
-    plan: List[Tuple[Dict[str, str], str, str, List[str],
+    plan: List[Tuple[Dict[str, str], str, str, str, List[str],
                      Optional[str], Optional[str]]] = []
     for entry in _project_entries(manifest, names):
         raw_name = str(entry.get("task_id") or "task")
@@ -607,14 +612,17 @@ def _import_project(zf: zipfile.ZipFile, names: List[str],
         if not videos:
             raise _Problem(
                 400, f"В бэкапе проекта нет видео ('{entry['dir']}')")
-        plan.append((entry, target, prefix, videos, passport, tsv))
+        plan.append((entry, target, base_name, prefix, videos, passport, tsv))
 
     # Стейджинг всех задач: любой отказ вычищает всё, проект не создан.
     staged: List[Tuple[str, str]] = []  # (target, staging)
     try:
-        for entry, target, prefix, videos, passport, tsv in plan:
+        for entry, target, base_name, prefix, videos, passport, tsv in plan:
             meta = _archived_task_meta(zf, passport)
             meta["project_id"] = pid
+            if target != base_name and not meta.get("name"):
+                # См. _stage_task: суффикс — папке, исходное имя — показу.
+                meta["name"] = base_name
             staging = _staging_dir()
             staged.append((target, staging))
             members = ([passport] if passport else []) \
