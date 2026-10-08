@@ -317,11 +317,16 @@ def _task_members(names: List[str], prefix: str):
 
     Только плоские имена под префиксом: точечные и вложенности (exports/)
     не переносятся — состав папки задаёт бэкап, а не чужой архив.
+    Члены чужих префиксов отбрасываются (слепой срез давал коллизии:
+    ``task_0/task.json`` под префиксом ``task_1/`` превращался в
+    ``task.json`` — задача забирала чужой паспорт и разметку).
     """
     videos: List[str] = []
     passport: Optional[str] = None
     tsv: Optional[str] = None
     for member in names:
+        if prefix and not member.startswith(prefix):
+            continue
         rel = member[len(prefix):] if prefix else member
         if not rel or rel.endswith("/") or rel.startswith(".") or "/" in rel:
             continue
@@ -353,6 +358,8 @@ def _extract(zf: zipfile.ZipFile, staging: str, prefix: str,
              members: List[str]) -> None:
     """Потоково кладёт члены архива в стейджинг (через write_stream харнесса)."""
     for member in members:
+        if prefix and not member.startswith(prefix):
+            continue  # чужой префикс — см. _task_members
         rel = member[len(prefix):] if prefix else member
         with zf.open(member) as src:
             ws_fs.write_stream(src, os.path.join(staging, rel))

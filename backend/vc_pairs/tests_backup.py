@@ -31,6 +31,7 @@ import task_meta
 import workspace
 from vc_fragments.tests import WorkspaceApiTestBase
 from vc_pairs import frame_provider
+from vc_pairs.backup import _task_members
 from vc_pairs.tests_projects import ProjectTestBase, u
 from vc_pairs.tests_workspace import _wait_ready
 from workspace import parse_fragments_tsv_strict
@@ -253,6 +254,43 @@ class BackupFormatTests(SimpleTestCase):
 
     def test_fragment_filename_matches_workspace(self):
         self.assertEqual(fmt.FRAGMENTS_FILE, workspace.FRAGMENTS_FILE)
+
+
+# ─── Юнит: разбор членов задачи по префиксу ──────────────────────────────────
+
+class TaskMembersTests(SimpleTestCase):
+    """_task_members: чужие префиксы отбрасываются, а не переинтерпретируются.
+
+    Регрессия: слепой срез ``member[len(prefix):]`` превращал
+    ``task_0/task.json`` под префиксом ``task_1/`` в ``task.json`` — вторая
+    задача проекта забирала паспорт и разметку первой.
+    """
+
+    NAMES = ["manifest.json", "project.json",
+             "task_0/task.json", "task_0/fragments.tsv",
+             "task_0/visualization.mp4",
+             "task_1/task.json", "task_1/fragments.tsv",
+             "task_1/clip.mp4"]
+
+    def test_prefix_filters_foreign_members(self):
+        videos, passport, tsv = _task_members(self.NAMES, "task_1/")
+        self.assertEqual(videos, ["task_1/clip.mp4"])
+        self.assertEqual(passport, "task_1/task.json")
+        self.assertEqual(tsv, "task_1/fragments.tsv")
+
+    def test_first_prefix_unaffected(self):
+        videos, passport, tsv = _task_members(self.NAMES, "task_0/")
+        self.assertEqual(videos, ["task_0/visualization.mp4"])
+        self.assertEqual(passport, "task_0/task.json")
+        self.assertEqual(tsv, "task_0/fragments.tsv")
+
+    def test_empty_prefix_task_backup(self):
+        names = ["manifest.json", "task.json", "fragments.tsv",
+                 "visualization.mp4"]
+        videos, passport, tsv = _task_members(names, "")
+        self.assertEqual(videos, ["visualization.mp4"])
+        self.assertEqual(passport, "task.json")
+        self.assertEqual(tsv, "fragments.tsv")
 
 
 # ─── Юнит: строгий парсер разметки ───────────────────────────────────────────
@@ -760,6 +798,57 @@ class ProjectBackupTests(BackupArchiveMixin, ProjectTestBase):
         by_id = {p["id"]: p for p in self.client.get(self.projects_url).json()}
         self.assertEqual(by_id["Архив_1"]["task_count"], 1)
         _wait_validation(self, f"{self.ws_id}_1", new_task_dir)
+
+    def _make_second_task(self) -> str:
+        """Вторая задача проекта: другое имя видео, другая разметка."""
+        second_id = "second-ws"
+        second_dir = os.path.join(self._tmpdir, second_id)
+        os.makedirs(second_dir, exist_ok=True)
+        with open(self.video, "rb") as src:
+            video_bytes = src.read()
+        with open(os.path.join(second_dir, "clip.mp4"), "wb") as fh:
+            fh.write(video_bytes)
+        with open(os.path.join(second_dir, "fragments.tsv"), "w") as fh:
+            fh.write("start\tend\tcomment\n1\t2\tвторая\n")
+        self.client.get(self.ws_list_url)  # перескан: подбор новой папки
+        resp = self.json_post(self.tasks_url(self.pid), {"task_id": second_id})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return second_id
+
+    def _dir_snapshot(self, ws_id: str):
+        """Состав папки задачи: {файлы} + байты видео + разметка через API."""
+        path = os.path.join(self._tmpdir, ws_id)
+        videos = {}
+        for name in sorted(os.listdir(path)):
+            full = os.path.join(path, name)
+            if os.path.isfile(full) and name.endswith(".mp4"):
+                with open(full, "rb") as fh:
+                    videos[name] = fh.read()
+        frags = self.client.get(f"/api/v1/pairs/{ws_id}/fragments/").json()
+        return videos, [(f["start"], f["end"]) for f in frags]
+
+    def test_project_roundtrip_two_tasks_keep_identity(self):
+        """Регрессия: вторая задача — копия второй, а не дубль первой."""
+        second_id = self._make_second_task()
+        before = {self.ws_id: self._dir_snapshot(self.ws_id),
+                  second_id: self._dir_snapshot(second_id)}
+        self.assertNotEqual(before[self.ws_id], before[second_id])
+        archive = self._project_archive()
+        resp = self.import_archive(archive)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        body = resp.json()
+        self.assertEqual(body["id"], "Архив_1")
+        self.assertEqual(len(body["tasks"]), 2)
+        after = {tid: self._dir_snapshot(tid) for tid in body["tasks"]}
+        # Каждая восстановленная задача совпадает со своим оригиналом
+        # (сравнение через repr: состав несравнимых dict напрямую).
+        self.assertEqual(sorted(map(repr, after.values())),
+                         sorted(map(repr, before.values())))
+        for tid in body["tasks"]:
+            _wait_validation(
+                self, tid, os.path.join(self._tmpdir, tid))
+            self.assertEqual(task_meta.load(
+                os.path.join(self._tmpdir, tid))["project_id"], "Архив_1")
 
     def test_project_import_overwrite_reuses_project(self):
         archive = self._project_archive()
