@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import time
 import zipfile
 from unittest import mock
@@ -423,9 +424,13 @@ class TaskBackupGetTests(BackupArchiveMixin, WorkspaceApiTestBase):
             self.assertEqual(manifest["format"], fmt.FORMAT_NAME)
             self.assertEqual(manifest["kind"], fmt.KIND_BACKUP)
             self.assertEqual(manifest["resource"], fmt.RESOURCE_TASK)
-            self.assertEqual(manifest["task_id"], self.ws_id)
+            # Канонический слепок: id экземпляра не пишется (назначается при
+            # восстановлении), только отображаемые имена.
+            self.assertEqual(manifest["name"], self.ws_id)
+            self.assertNotIn("task_id", manifest)
+            self.assertNotIn("project_id", manifest)
             # Первый скан внутри бэкапа: миграция привязала к default.
-            self.assertEqual(manifest["project_id"],
+            self.assertEqual(manifest["project"],
                              project_meta.DEFAULT_PROJECT_ID)
             self.assertEqual(manifest["media"]["total_frames"], 10)
             self.assertEqual(manifest["media"]["roles"]["preview"],
@@ -497,6 +502,58 @@ class TaskBackupGetTests(BackupArchiveMixin, WorkspaceApiTestBase):
 
 # ─── POST: импорт задачи ─────────────────────────────────────────────────────
 
+def _canonical(data: bytes) -> bytes:
+    """Архив с вырезанным created_at — для побайтового сравнения."""
+    with zipfile.ZipFile(io.BytesIO(data)) as src:
+        members = {n: src.read(n) for n in src.namelist()}
+    manifest = json.loads(members[fmt.MANIFEST_NAME].decode("utf-8"))
+    manifest.pop("created_at", None)
+    members[fmt.MANIFEST_NAME] = json.dumps(
+        manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    return build_zip(members)
+
+
+class CanonicalExportTests(BackupArchiveMixin, WorkspaceApiTestBase):
+    """Один и тот же контент — одинаковый бэкап, независимо от папки/id."""
+
+    def setUp(self):
+        super().setUp()
+        frame_provider.get_metadata(self.video)
+        # Второй слепок того же содержимого: другая папка (другой id),
+        # то же отображаемое имя — бэкак обязан совпасть побайтово.
+        self.twin_dir = os.path.join(self._tmpdir, "twin")
+        os.makedirs(self.twin_dir)
+        shutil.copy2(self.video, os.path.join(self.twin_dir, "visualization.mp4"))
+        shutil.copy2(os.path.join(self.ws_dir, "fragments.tsv"),
+                     os.path.join(self.twin_dir, "fragments.tsv"))
+        for ws_id in (self.ws_id, "twin"):
+            resp = self.client.patch(
+                f"/api/v1/workspaces/{ws_id}/",
+                data=json.dumps({"name": "Выезд"}),
+                content_type="application/json")
+            self.assertEqual(resp.status_code, 200, resp.content)
+        self.client.get(self.ws_list_url)  # скан, чтобы папка попала в реестр
+
+    def _backup(self, ws_id: str) -> bytes:
+        return self.fetch_zip_url(f"/api/v1/workspaces/{ws_id}/backup")
+
+    def test_identical_content_yields_identical_archive(self):
+        a = _canonical(self._backup(self.ws_id))
+        b = _canonical(self._backup("twin"))
+        with zipfile.ZipFile(io.BytesIO(a)) as za, \
+                zipfile.ZipFile(io.BytesIO(b)) as zb:
+            self.assertEqual(za.namelist(), zb.namelist())
+            for name in za.namelist():
+                self.assertEqual(za.read(name), zb.read(name), name)
+
+    def test_manifest_has_no_instance_ids(self):
+        with zipfile.ZipFile(io.BytesIO(self._backup("twin"))) as zf:
+            manifest = json.loads(zf.read(fmt.MANIFEST_NAME).decode("utf-8"))
+        for key in ("task_id", "project_id"):
+            self.assertNotIn(key, manifest)
+        self.assertEqual(manifest["format_version"], "1.1")
+
+
 class TaskImportTests(BackupArchiveMixin, ProjectTestBase):
     """POST backups/import: on_conflict, отказы, стейджинг, членство.
 
@@ -543,8 +600,22 @@ class TaskImportTests(BackupArchiveMixin, ProjectTestBase):
         items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
         self.assertEqual(items[self.new_id]["name"], self.ws_id)
 
+    def test_import_legacy_archive_with_task_id(self):
+        """Архивы формата 1.0 (с task_id) читаются как раньше."""
+        data = build_zip({
+            "manifest.json": manifest_json(task_id="legacy-task"),
+            "task.json": json.dumps({"status": "new",
+                                     "project_id": None}).encode("utf-8"),
+            "fragments.tsv": TSV_FIXTURE,
+            "source.mp4": b"not-a-real-video",
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        self.assertEqual(resp.json()["id"], "legacy-task")
+        self.assertTrue(os.path.isdir(os.path.join(self._tmpdir, "legacy-task")))
+
     def test_import_rename_preserves_archived_display_name(self):
-        """Явное отображаемое имя из архива суффиксом не затирается."""
+        """Явное имя из архива задаёт и папку, и показ (без суффикса)."""
         self.client.patch(
             f"/api/v1/workspaces/{self.ws_id}/",
             data=json.dumps({"name": "Выезд"}),
@@ -553,7 +624,9 @@ class TaskImportTests(BackupArchiveMixin, ProjectTestBase):
             f"/api/v1/workspaces/{self.ws_id}/backup")
         resp = self.import_archive(archive)
         self.assertEqual(resp.status_code, 202, resp.content)
-        meta = _wait_validation(self, self.new_id, self.new_dir)
+        # Папка по имени из архива (не по id оригинала и не с суффиксом).
+        self.assertEqual(resp.json()["id"], "Выезд")
+        meta = _wait_validation(self, "Выезд", self._tmpdir + "/Выезд")
         self.assertEqual(meta["name"], "Выезд")
 
     def test_import_error_conflict_409(self):
@@ -728,7 +801,7 @@ class TaskImportTests(BackupArchiveMixin, ProjectTestBase):
             f"/api/v1/workspaces/{self.ws_id}/backup")
         with zipfile.ZipFile(io.BytesIO(archive)) as zf:
             manifest = json.loads(zf.read(fmt.MANIFEST_NAME))
-        self.assertIsNone(manifest["project_id"])
+        self.assertIsNone(manifest["project"])
         resp = self.import_archive(archive)
         self.assertEqual(resp.status_code, 202, resp.content)
         body = resp.json()
@@ -802,11 +875,14 @@ class ProjectBackupTests(BackupArchiveMixin, ProjectTestBase):
                 [n for n in names if os.path.basename(n).startswith(".")])
             manifest = json.loads(zf.read(fmt.MANIFEST_NAME))
             self.assertEqual(manifest["resource"], fmt.RESOURCE_PROJECT)
-            self.assertEqual(manifest["project_id"], self.pid)
+            # Канонический слепок: без id экземпляра.
+            self.assertEqual(manifest["name"], self.pid)
+            self.assertNotIn("project_id", manifest)
             self.assertEqual(manifest["tasks"],
-                             [{"dir": "task_0", "task_id": self.ws_id}])
+                             [{"dir": "task_0", "name": self.ws_id}])
             project = json.loads(zf.read(project_meta.PROJECT_FILE))
-            self.assertEqual(project["id"], self.pid)
+            self.assertEqual(project["name"], self.pid)
+            self.assertNotIn("id", project)
 
     def test_project_backup_missing_404(self):
         resp = self.client.get("/api/v1/projects/no-such/backup")
@@ -1008,7 +1084,8 @@ class AnnotationsTests(BackupArchiveMixin, WorkspaceApiTestBase):
             self.assertEqual(manifest["format"], fmt.FORMAT_NAME)
             self.assertEqual(manifest["kind"], fmt.KIND_ANNOTATIONS)
             self.assertEqual(manifest["resource"], fmt.RESOURCE_TASK)
-            self.assertEqual(manifest["task_id"], self.ws_id)
+            self.assertEqual(manifest["name"], self.ws_id)
+            self.assertNotIn("task_id", manifest)
             self.assertEqual(manifest["media"]["total_frames"], 10)
             self.assertEqual(manifest["media"]["roles"]["preview"],
                              "visualization.mp4")

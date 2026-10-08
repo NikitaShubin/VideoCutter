@@ -188,16 +188,25 @@ def _write_manifest(zf: zipfile.ZipFile, manifest: Dict[str, object]) -> None:
 
 def _write_task_members(zf: zipfile.ZipFile, ws_path: str,
                         prefix: str = "") -> None:
-    """Кладёт в архив task.json, fragments.tsv и видео папки задачи."""
-    wanted = [name for name in (task_meta.TASK_FILE, ws_module.FRAGMENTS_FILE)
-              if os.path.isfile(os.path.join(ws_path, name))]
-    wanted += video_members(ws_path)
-    for name in wanted:
-        compress = (zipfile.ZIP_STORED
-                    if os.path.splitext(name)[1].lower() in ws_fs.VIDEO_EXTS
-                    else zipfile.ZIP_DEFLATED)
+    """Кладёт в архив task.json (без членства), fragments.tsv и видео.
+
+    Паспорт пишем сами: на диске он может нести project_id экземпляра.
+    """
+    for name in (task_meta.TASK_FILE, ws_module.FRAGMENTS_FILE):
+        if not os.path.isfile(os.path.join(ws_path, name)):
+            continue
+        if name == task_meta.TASK_FILE:
+            meta = task_meta.load(ws_path)
+            meta.pop("project_id", None)
+            zf.writestr(prefix + name,
+                        json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+                        compress_type=zipfile.ZIP_DEFLATED)
+        else:
+            zf.write(os.path.join(ws_path, name), prefix + name,
+                     compress_type=zipfile.ZIP_DEFLATED)
+    for name in video_members(ws_path):
         zf.write(os.path.join(ws_path, name), prefix + name,
-                 compress_type=compress)
+                 compress_type=zipfile.ZIP_STORED)
 
 
 # ─── GET: бэкап задачи и проекта ────────────────────────────────────────────
@@ -212,11 +221,12 @@ def workspace_backup(request, workspace_id: str):
     path = make_temp_zip_path()
     try:
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # Канонический слепок содержимого: id задачи/проекта не пишем
+            # (назначаются при восстановлении, как в CVAT) — только имена.
             manifest = fmt.make_manifest(
                 fmt.KIND_BACKUP, resource=fmt.RESOURCE_TASK,
-                task_id=workspace_id,
-                project_id=project_meta.resolve_pid(
-                    task_meta.load(ws.path).get("project_id")),
+                name=_task_display(ws.path, workspace_id),
+                project=_project_display(ws.path),
                 media=media_fingerprint(ws))
             _write_manifest(zf, manifest)
             _write_task_members(zf, ws.path)
@@ -253,14 +263,18 @@ def project_backup(request, project_id: str):
                     continue  # удалили между снапшотом и сборкой
                 dirname = f"task_{len(entries)}"
                 _write_task_members(zf, ws_path, prefix=f"{dirname}/")
-                entries.append({"dir": dirname, "task_id": name})
+                entries.append({"dir": dirname, "name": _task_display(
+                    ws_path, name)})
+            pmeta = project_meta.load(project_id) or project_meta.defaults()
             manifest = fmt.make_manifest(
                 fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
-                project_id=project_id, tasks=entries)
+                name=pmeta.get("name") or project_id, tasks=entries)
             _write_manifest(zf, manifest)
-            meta = project_meta.load(project_id) or project_meta.defaults()
+            # Паспорт проекта — тоже канонический: без его id.
+            exported = dict(pmeta)
+            exported.pop("id", None)
             zf.writestr(project_meta.PROJECT_FILE,
-                        json.dumps(meta, ensure_ascii=False, indent=2))
+                        json.dumps(exported, ensure_ascii=False, indent=2))
     except OSError as e:
         unlink_quiet(path)
         return _storage_error(e)
@@ -342,6 +356,36 @@ def _task_exists(name: str) -> bool:
     return os.path.isdir(os.path.join(ws_module.WORKSPACE_ROOT, name))
 
 
+#: Паспорт задачи и её отображаемое имя (id в архив не пишем).
+def _task_display(ws_path: str, fallback: str) -> str:
+    """Отображаемое имя задачи (name из task.json, иначе id)."""
+    name = task_meta.load(ws_path).get("name") or ""
+    return name if isinstance(name, str) and name else fallback
+
+
+def _project_display(ws_path: str) -> Optional[str]:
+    """Имя проекта задачи для мягкой ссылки в архиве (id не хранится)."""
+    pid = project_meta.resolve_pid(task_meta.load(ws_path).get("project_id"))
+    if pid is None:
+        return None
+    return project_meta.load(pid).get("name") or pid
+
+
+def _import_base_name(manifest: Dict[str, object],
+                      meta: Dict[str, object]) -> str:
+    """Имя папки новой задачи: legacy task_id → name манифеста → name
+    паспорта → 'task'. Старые архивы (1.0) определяются по task_id."""
+    for raw in (manifest.get("task_id"), manifest.get("name"),
+                meta.get("name")):
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            return ws_fs.sanitize_workspace_name(raw)
+        except ws_fs.InvalidWorkspaceError:
+            return "task"
+    return "task"
+
+
 def _task_members(names: List[str], prefix: str):
     """Члены папки задачи: (видео, task.json|None, fragments.tsv|None).
 
@@ -418,26 +462,26 @@ def _stage_task(zf: zipfile.ZipFile, names: List[str],
         raise _Problem(
             400, "В архиве нет видеофайлов — восстановить задачу не из чего")
 
+    meta = _archived_task_meta(zf, passport)
     if forced_name is not None:
         target = forced_name
+        base = forced_name
     else:
-        raw = str(manifest.get("task_id") or "task")
-        try:
-            base = ws_fs.sanitize_workspace_name(raw)
-        except ws_fs.InvalidWorkspaceError:
-            base = "task"
+        base = _import_base_name(manifest, meta)
         if base.startswith("."):
             raise _Problem(
-                400, f"Имя задачи в архиве начинается с точки: {raw!r}")
+                400, f"Имя задачи в архиве начинается с точки: {base!r}")
         if base == project_meta.PROJECTS_DIRNAME:
             raise _Problem(
                 400, "Имя 'projects' зарезервировано под реестр проектов")
         target = _resolve_target(base, on_conflict, _task_exists, "Задача")
 
-    meta = _archived_task_meta(zf, passport)
+    # Членство: override > legacy id из архива > имя проекта из архива
+    # (новый формат) — резолвится в цели, висячая ссылка = standalone.
     pid = project_override
     if pid is None:
         pid = project_meta.resolve_pid(manifest.get("project_id")) \
+            or project_meta.resolve_pid(manifest.get("project")) \
             or project_meta.resolve_pid(meta.get("project_id"))
     meta["project_id"] = pid
     if forced_name is None and target != base and not meta.get("name"):
@@ -522,7 +566,8 @@ def _import_task(zf: zipfile.ZipFile, names: List[str],
 def _project_entries(manifest: Dict[str, object],
                      names: List[str]) -> List[Dict[str, str]]:
     """Задачи бэкапа проекта: список из манифеста (в т.ч. пустой = пустой
-    проект), иначе — производные по префиксам task_*/ членов архива."""
+    проект), иначе — производные по префиксам task_*/ членов архива.
+    Записи несут ``name`` (1.1) и legacy ``task_id`` (1.0)."""
     raw = manifest.get("tasks")
     if isinstance(raw, list):
         entries = []
@@ -534,7 +579,9 @@ def _project_entries(manifest: Dict[str, object],
                     raise _Problem(400, f"Некорректный префикс задачи: {dirname!r}")
                 entries.append({
                     "dir": dirname,
-                    "task_id": str(item.get("task_id") or dirname),
+                    # legacy 1.0 отдавал task_id; 1.1 — только имя.
+                    "task_id": item.get("task_id"),
+                    "name": item.get("name") or item.get("task_id") or dirname,
                 })
         return entries
 
@@ -542,7 +589,7 @@ def _project_entries(manifest: Dict[str, object],
                    if "/" in n and not n.split("/", 1)[0].startswith(".")})
     if not dirs:
         raise _Problem(400, "В архиве не найдено задач проекта")
-    return [{"dir": d, "task_id": d} for d in dirs]
+    return [{"dir": d, "task_id": d, "name": d} for d in dirs]
 
 
 def _write_project_json(zf: zipfile.ZipFile, names: List[str], pid: str,
@@ -583,7 +630,7 @@ def _import_project(zf: zipfile.ZipFile, names: List[str],
         raise _Problem(
             400, "Видео лежит в корне архива — это бэкап задачи, а не проекта")
 
-    raw = str(manifest.get("project_id") or "project")
+    raw = str(manifest.get("task_id") or manifest.get("name") or "project")
     try:
         base = ws_fs.sanitize_workspace_name(raw)
     except ws_fs.InvalidWorkspaceError:
@@ -595,11 +642,8 @@ def _import_project(zf: zipfile.ZipFile, names: List[str],
     plan: List[Tuple[Dict[str, str], str, str, str, List[str],
                      Optional[str], Optional[str]]] = []
     for entry in _project_entries(manifest, names):
-        raw_name = str(entry.get("task_id") or "task")
-        try:
-            base_name = ws_fs.sanitize_workspace_name(raw_name)
-        except ws_fs.InvalidWorkspaceError:
-            base_name = "task"
+        base_name = _import_base_name(entry, {})
+        raw_name = base_name
         if base_name.startswith("."):
             raise _Problem(
                 400, f"Имя задачи в архиве начинается с точки: {raw_name!r}")

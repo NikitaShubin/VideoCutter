@@ -31,10 +31,9 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 import backup_format as fmt
-import project_meta
-import task_meta
-from vc_pairs.backup import (file_response, make_temp_zip_path,
-                             media_fingerprint, unlink_quiet, video_members)
+from vc_pairs.backup import (_task_display, file_response,
+                             make_temp_zip_path, media_fingerprint,
+                             unlink_quiet, video_members)
 from vc_pairs.views import _storage_error, _ws_404
 from workspace import FRAGMENTS_FILE, get_workspace, parse_fragments_tsv_strict
 
@@ -53,11 +52,10 @@ def annotations_export(request, pair_id: str):
     path = make_temp_zip_path()
     try:
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # Канонический слепок: без id экземпляра (см. backup_format 1.1).
             manifest = fmt.make_manifest(
                 fmt.KIND_ANNOTATIONS, resource=fmt.RESOURCE_TASK,
-                task_id=pair_id,
-                project_id=project_meta.resolve_pid(
-                    task_meta.load(ws.path).get("project_id")),
+                name=_task_display(ws.path, pair_id),
                 media=media_fingerprint(ws))
             zf.writestr(fmt.MANIFEST_NAME,
                         json.dumps(manifest, ensure_ascii=False, indent=2))
