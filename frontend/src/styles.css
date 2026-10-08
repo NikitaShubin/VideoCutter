@@ -267,9 +267,9 @@ body {
   gap: 6px;
 }
 
-/* Дропдаун сортировки: тот же стиль, что у кнопок тулбара
-   (нативный select без правил светится системной темой). */
-.sort-label select {
+/* Нативные select: тот же стиль, что у кнопок (без правил браузер
+   светит системной темой). Глобально: сортировка, проекты, форма. */
+select {
   padding: 8px 10px;
   border: 1px solid #444;
   border-radius: 6px;
@@ -279,20 +279,91 @@ body {
   font: inherit;
 }
 
-.sort-label select:hover {
+select:hover {
   background: #4a4a66;
 }
 
-.sort-label select:focus-visible {
+select:focus-visible {
   outline: 1px solid #6a6a8a;
   outline-offset: 1px;
 }
 
+select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Раскрытый список: option на части браузеров игнорирует фон родителя,
    поэтому красим отдельно. */
-.sort-label select option {
+select option {
   background: #2a2a3e;
   color: #e0e0e0;
+}
+
+/* Панель управления проектами (кнопка «Проекты» в шапке списка). */
+.project-panel {
+  padding: 12px;
+  background: #2a2a3e;
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+}
+
+.project-create {
+  display: flex;
+  gap: 8px;
+}
+
+.project-create input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #1e1e2e;
+  color: #e0e0e0;
+  font: inherit;
+}
+
+.project-create .add-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.project-panel .project-rows {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+}
+
+.project-panel .project-rows li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  background: #22223a;
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+}
+
+.project-panel .project-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e0e0e0;
+}
+
+.project-panel .project-meta {
+  color: #9a9ab0;
+  font-size: 0.85em;
+}
+
+.project-hint {
+  margin-top: 8px;
+  color: #9a9ab0;
+  font-size: 0.85em;
 }
 
 .pair-list ul {
@@ -455,6 +526,13 @@ body {
   border-radius: 4px;
   background: #1e1e2e;
   color: #e0e0e0;
+}
+
+/* Выбор проекта в форме задачи: на всю строку, как input выше. */
+.pair-edit .pair-edit-select {
+  flex: 1;
+  min-width: 120px;
+  padding: 4px 8px;
 }
 
 .pair-edit .role-field {

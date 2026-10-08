@@ -1,14 +1,20 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  attachTask,
   assignWorkspaceVideo,
   bumpWorkspaceNonce,
+  createProject,
+  deleteProject,
   deleteWorkspace,
+  detachTask,
+  listProjects,
   removeWorkspaceVideo,
+  renameProject,
   renameWorkspace,
   setWorkspaceVideo,
   swapVideos,
 } from "../api";
-import { VIDEO_ACCEPT, type VideoPair } from "../types";
+import { VIDEO_ACCEPT, type Project, type VideoPair } from "../types";
 import {
   uploadLabel,
   type UploadJob,
@@ -35,6 +41,19 @@ function fileStem(filename: string): string {
 type SortMode = "updated" | "created" | "opened" | "name";
 
 const SORT_KEY = "vc-sort";
+
+/** Режим фильтра по проекту (localStorage): все / без проекта / id проекта. */
+const PROJ_KEY = "vc-project";
+const PROJ_ALL = "__all__";
+const PROJ_NONE = "__none__";
+
+function readProjectFilter(): string {
+  try {
+    return window.localStorage.getItem(PROJ_KEY) ?? PROJ_ALL;
+  } catch {
+    return PROJ_ALL;
+  }
+}
 
 function readSortMode(): SortMode {
   try {
@@ -90,12 +109,57 @@ export function PairList({
   const [editBusy, setEditBusy] = useState(false);
   const [editProgress, setEditProgress] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
+  const [editProject, setEditProject] = useState("");
   const [editError, setEditError] = useState("");
 
   const firstFile = source ?? preview;
 
   const [sortMode, setSortMode] = useState<SortMode>(readSortMode);
   const visible = pairs === null ? null : sortPairs(pairs, sortMode);
+
+  // ─── Проекты: реестр, фильтр списка, CRUD-панель ─────────────────────────
+  const [projFilter, setProjFilter] = useState<string>(readProjectFilter);
+  const [projects, setProjects] = useState<Project[] | null>(null);
+  const [showProjects, setShowProjects] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [projError, setProjError] = useState("");
+
+  const loadProjects = useCallback(() => {
+    listProjects()
+      .then((items) => {
+        setProjects(items);
+        setProjError("");
+      })
+      .catch((e) => {
+        // Реестр не поднялся — список задач не должен упасть.
+        setProjects((prev) => prev ?? []);
+        setProjError((e as Error).message);
+      });
+  }, []);
+
+  useEffect(() => {
+    loadProjects();
+  }, [loadProjects]);
+
+  const pickProjectFilter = (v: string) => {
+    setProjFilter(v);
+    try {
+      window.localStorage.setItem(PROJ_KEY, v);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const listed =
+    visible === null
+      ? null
+      : visible.filter((p) =>
+          projFilter === PROJ_ALL
+            ? true
+            : projFilter === PROJ_NONE
+              ? p.project_id == null
+              : p.project_id === projFilter,
+        );
 
   // Пока есть индексирующиеся задачи или бегущий экспорт — опрашиваем
   // список (фон сервера). Опрос прекращается, когда всё тихо.
@@ -198,7 +262,7 @@ export function PairList({
 
   // Серверный дубликат подавляется, пока жив job (иначе две строки
   // об одном: клиентская морфирует фазами, серверная встанет после).
-  const shownPairs = (visible ?? []).filter(
+  const shownPairs = (listed ?? []).filter(
     (p) => !uploads.some((u) => u.serverId !== null && u.serverId === p.id),
   );
 
@@ -219,11 +283,79 @@ export function PairList({
     }
   };
 
+  // ─── Управление проектами (панель в шапке списка) ────────────────────────
+
+  const projOp = async (op: () => Promise<unknown>) => {
+    try {
+      await op();
+      setProjError("");
+      loadProjects();
+      return true;
+    } catch (e) {
+      setProjError((e as Error).message);
+      return false;
+    }
+  };
+
+  const addProject = async () => {
+    const pname = newProjectName.trim();
+    if (!pname) return;
+    if (await projOp(() => createProject(pname))) setNewProjectName("");
+  };
+
+  const editProjectName = async (p: Project) => {
+    const v = window.prompt("Новое имя проекта", p.name);
+    if (v === null) return;
+    const t = v.trim();
+    if (!t || t === p.name) return;
+    await projOp(() => renameProject(p.id, t));
+  };
+
+  const removeProject = async (p: Project, mode: "keep" | "cascade") => {
+    const ok =
+      mode === "keep"
+        ? window.confirm(
+            `Удалить проект «${p.name}»?\n` +
+              `Его задачи (${p.task_count}) останутся без проекта.`,
+          )
+        : window.confirm(
+            `⚠ Удалить проект «${p.name}» ВМЕСТЕ с ` +
+              `${p.task_count} задачами?\n` +
+              "Будут стёрты видео, фрагменты и результаты экспорта.",
+          );
+    if (!ok) return;
+    if (await projOp(() => deleteProject(p.id, mode))) {
+      if (projFilter === p.id) pickProjectFilter(PROJ_ALL);
+      onChanged();
+    }
+  };
+
+  // Перевеска из формы задачи: оптимистично двигаем селект, при сбое
+  // откатываем и показываем ошибку формы.
+  const changeProject = async (
+    p: VideoPair,
+    prev: string,
+    next: string,
+  ) => {
+    if (prev === next) return;
+    try {
+      if (next) await attachTask(next, p.id);
+      else if (prev) await detachTask(prev, p.id);
+      setEditError("");
+      loadProjects();
+      onChanged();
+    } catch (e) {
+      setEditProject(prev);
+      setEditError((e as Error).message);
+    }
+  };
+
   // ─── Редактирование задачи (inline в списке) ─────────────────────────────
 
   const openEdit = (p: VideoPair) => {
     setEditingId(p.id);
     setEditName(p.id);
+    setEditProject(p.project_id ?? "");
     setEditBusy(false);
     setEditProgress(null);
     setEditError("");
@@ -315,6 +447,28 @@ export function PairList({
         >
           Переименовать
         </button>
+      </div>
+
+      <div className="pair-edit-row">
+        <span className="pair-edit-label">Проект</span>
+        <select
+          className="pair-edit-select"
+          value={editProject}
+          disabled={editBusy}
+          onChange={(e) => {
+            const prev = editProject;
+            const next = e.target.value;
+            setEditProject(next);
+            void changeProject(p, prev, next);
+          }}
+        >
+          <option value="">— без проекта —</option>
+          {(projects ?? []).map((pr) => (
+            <option key={pr.id} value={pr.id}>
+              {pr.name}
+            </option>
+          ))}
+        </select>
       </div>
 
       <div className="role-field">
@@ -466,6 +620,27 @@ export function PairList({
             <option value="name">По имени</option>
           </select>
         </label>
+        <label className="sort-label">
+          Проект{" "}
+          <select
+            value={projFilter}
+            onChange={(e) => pickProjectFilter(e.target.value)}
+          >
+            <option value={PROJ_ALL}>Все проекты</option>
+            <option value={PROJ_NONE}>Без проекта</option>
+            {(projects ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="add-btn"
+          onClick={() => setShowProjects((v) => !v)}
+        >
+          {showProjects ? "Скрыть проекты" : "Проекты"}
+        </button>
         <button
           className="add-btn"
           onClick={() => (showForm ? reset() : setShowForm(true))}
@@ -473,6 +648,69 @@ export function PairList({
           {showForm ? "Отмена" : "＋ Добавить видео"}
         </button>
       </div>
+
+      {showProjects && (
+        <div className="project-panel">
+          <div className="project-create">
+            <input
+              type="text"
+              value={newProjectName}
+              placeholder="Название нового проекта"
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void addProject();
+              }}
+            />
+            <button
+              className="add-btn"
+              onClick={() => void addProject()}
+              disabled={!newProjectName.trim()}
+            >
+              Создать проект
+            </button>
+          </div>
+          {projError && <div className="pair-edit-error">{projError}</div>}
+          <ul className="project-rows">
+            {(projects ?? []).map((p) => (
+              <li key={p.id}>
+                <span className="project-name">{p.name}</span>
+                <span className="project-meta">
+                  {p.task_count} задач
+                </span>
+                <div className="pair-actions">
+                  <button
+                    className="pair-edit-btn"
+                    title="Переименовать проект"
+                    onClick={() => void editProjectName(p)}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    className="pair-edit-btn"
+                    title="Удалить проект (задачи останутся без проекта)"
+                    onClick={() => void removeProject(p, "keep")}
+                  >
+                    ✕
+                  </button>
+                  <button
+                    className="pair-delete"
+                    title="Удалить проект ВМЕСТЕ с задачами и видео"
+                    onClick={() => void removeProject(p, "cascade")}
+                  >
+                    🗑
+                  </button>
+                </div>
+              </li>
+            ))}
+            {projects !== null && projects.length === 0 && (
+              <li className="empty">Проектов пока нет.</li>
+            )}
+          </ul>
+          <div className="project-hint">
+            Задачи перевешиваются в их форме редактирования (✎ → «Проект»).
+          </div>
+        </div>
+      )}
 
       {showForm && (
         <form className="upload" onSubmit={submit}>
@@ -595,10 +833,14 @@ export function PairList({
             </li>
           );
         })}
-        {visible !== null &&
-          visible.length === 0 &&
+        {listed !== null &&
+          listed.length === 0 &&
           uploads.length === 0 && (
-            <li className="empty">Пока нет задач.</li>
+            <li className="empty">
+              {visible !== null && visible.length > 0
+                ? "В выбранном проекте нет задач."
+                : "Пока нет задач."}
+            </li>
           )}
         {shownPairs.map((p) =>
           p.broken ? (

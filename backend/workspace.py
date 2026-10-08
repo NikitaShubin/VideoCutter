@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import project_meta
 import task_meta
 from vc_pairs import frame_provider
 from videocutter.standalone import workspace as ws_fs
@@ -327,7 +328,12 @@ def _is_creating(name: str) -> bool:
 
 
 def scan_workspaces(root: str | None = None) -> dict[str, Workspace]:
-    """Сканирует root и возвращает {name: Workspace} для всех поддиректорий."""
+    """Сканирует root и возвращает {name: Workspace} для всех поддиректорий.
+
+    Папка реестра проектов (``projects/``) — не задача, в выдачу не идёт;
+    первый проход по установке прогоняет разовую миграцию старых задач
+    в проект ``default`` (см. project_meta.ensure_migrated).
+    """
     root = root or WORKSPACE_ROOT
     result: dict[str, Workspace] = {}
 
@@ -337,12 +343,15 @@ def scan_workspaces(root: str | None = None) -> dict[str, Workspace]:
     for entry in sorted(os.listdir(root)):
         full = os.path.join(root, entry)
         if os.path.isdir(full) and not entry.startswith(".") \
+                and entry != project_meta.PROJECTS_DIRNAME \
                 and not _is_creating(entry):
             result[entry] = Workspace(name=entry, path=full)
 
     with _workspaces_lock:
         _workspaces.clear()
         _workspaces.update(result)
+
+    project_meta.ensure_migrated(root)
 
     return result
 
@@ -430,12 +439,13 @@ def _empty_meta() -> dict:
 
 
 def _task_dates(ws: Workspace):
-    """(created_at, last_opened_at) из task.json (None — нет)."""
+    """(created_at, last_opened_at, project_id) из task.json (None — нет)."""
     try:
         meta = task_meta.load(ws.path)
     except Exception:
-        return None, None
-    return meta.get("created_at"), meta.get("last_opened_at")
+        return None, None, None
+    return (meta.get("created_at"), meta.get("last_opened_at"),
+            project_meta.resolve_pid(meta.get("project_id")))
 
 
 def _export_state(name: str):
@@ -523,9 +533,10 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
     both = bool(ws.original and ws.visualization and ws.original != ws.visualization)
     unassigned = ws.unassigned
     quality, scale = ws.load_settings()
-    created_at, last_opened_at = _task_dates(ws)
+    created_at, last_opened_at, project_id = _task_dates(ws)
     return {
         "id": ws.name,
+        "project_id": project_id,
         "source_name": os.path.basename(ws.original) if ws.original else "",
         "preview_name": os.path.basename(ws.visualization) if ws.visualization else "",
         "unassigned_name": os.path.basename(unassigned[0]) if unassigned else None,
@@ -561,10 +572,11 @@ def _broken_entry(ws: Workspace, err: Exception) -> dict:
     visualization = _safe(
         lambda: os.path.basename(ws.visualization) if ws.visualization else "", "")
     unassigned = _safe(ws.unassigned, [])
-    created_at, last_opened_at = _safe(
-        lambda: _task_dates(ws), (None, None))
+    created_at, last_opened_at, project_id = _safe(
+        lambda: _task_dates(ws), (None, None, None))
     return {
         "id": ws.name,
+        "project_id": project_id,
         "source_name": original,
         "preview_name": visualization,
         "unassigned_name": os.path.basename(unassigned[0]) if unassigned else None,

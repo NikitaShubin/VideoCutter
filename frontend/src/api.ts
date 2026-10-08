@@ -1,5 +1,6 @@
 import type {
   ExportStatus,
+  Project,
   VideoPair,
   VideoPairDetail,
 } from "./types";
@@ -195,6 +196,62 @@ export function renameWorkspace(id: string, name: string): Promise<VideoPair> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   }).then((r) => json<VideoPair>(r));
+}
+
+// ─── Проекты ────────────────────────────────────────────────────────────────
+
+export function listProjects(): Promise<Project[]> {
+  return fetch(`${BASE}/projects/`).then((r) => json<Project[]>(r));
+}
+
+export function createProject(name: string): Promise<Project> {
+  return fetch(`${BASE}/projects/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  }).then((r) => json<Project>(r));
+}
+
+export function renameProject(id: string, name: string): Promise<Project> {
+  return fetch(`${BASE}/projects/${encodeURIComponent(id)}/`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  }).then((r) => json<Project>(r));
+}
+
+/** Как удалить проект: keep — задачи остаются, cascade — вместе с задачами. */
+export function deleteProject(
+  id: string,
+  withTasks: "keep" | "cascade" | "move",
+  to?: string,
+): Promise<{ deleted: string; tasks: Record<string, unknown> }> {
+  const qs = new URLSearchParams({ with_tasks: withTasks });
+  if (to) qs.set("to", to);
+  return fetch(`${BASE}/projects/${encodeURIComponent(id)}/?${qs}`, {
+    method: "DELETE",
+  }).then((r) => json<{ deleted: string; tasks: Record<string, unknown> }>(r));
+}
+
+export function attachTask(
+  projectId: string,
+  taskId: string,
+): Promise<{ task_id: string; project_id: string }> {
+  return fetch(`${BASE}/projects/${encodeURIComponent(projectId)}/tasks/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  }).then((r) => json<{ task_id: string; project_id: string }>(r));
+}
+
+export function detachTask(
+  projectId: string,
+  taskId: string,
+): Promise<{ task_id: string; project_id: null }> {
+  return fetch(
+    `${BASE}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/`,
+    { method: "DELETE" },
+  ).then((r) => json<{ task_id: string; project_id: null }>(r));
 }
 
 // Сохраняет настройки просмотра (ползунки качества/масштаба).

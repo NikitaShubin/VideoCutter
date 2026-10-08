@@ -37,6 +37,10 @@ def defaults() -> Dict[str, Any]:
         "status_changed_by": None,
         "notes": "",
         "subset": None,
+        # Привязка к проекту (см. docs/project-model.md): null = standalone.
+        # Указатель живёт на задаче (как task.project_id в CVAT) — состав
+        # проекта резолвится сканом, список участников нигде не хранится.
+        "project_id": None,
     }
 
 
@@ -72,6 +76,11 @@ def validate(meta: Dict[str, Any]) -> Dict[str, Any]:
     base["assignees"] = _as_str_list(base.get("assignees"))
     if base.get("notes") is None:
         base["notes"] = ""
+    pid = base.get("project_id")
+    if pid is not None:
+        if not isinstance(pid, str):
+            raise ValueError(f"Недопустимый project_id: {pid!r}")
+        base["project_id"] = pid.strip() or None
     return base
 
 

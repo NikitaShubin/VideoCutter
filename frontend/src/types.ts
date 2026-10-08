@@ -32,6 +32,8 @@ export interface VideoPair {
   error: string;
   created_at: string | null;
   last_opened_at: string | null;
+  /** Проект задачи (null — standalone); состав — реестр проектов. */
+  project_id: string | null;
   export: {
     state: string;
     index: number;
@@ -41,6 +43,16 @@ export interface VideoPair {
 }
 
 export interface VideoPairDetail extends VideoPair {}
+
+/** Проект (отдельная сущность, как в CVAT): имя + точка расширения model. */
+export interface Project {
+  id: string;
+  name: string;
+  created_at: string | null;
+  /** Заглушка будущей модели визуализации/AL — только хранение. */
+  model: { id: string | null; kind: string; params: Record<string, unknown> };
+  task_count: number;
+}
 
 export interface ExportItem {
   index: number;

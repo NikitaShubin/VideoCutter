@@ -26,11 +26,13 @@ workspace. Аналог бекапа задачи CVAT (JSON), но только
   "status_changed_at": "iso8601 | null",
   "status_changed_by": "username | null",
   "notes": "string",
-  "subset": "train | val | test | null"
+  "subset": "train | val | test | null",
+  "project_id": "string | null"
 }
 ```
 
-Дефолты: `status=new`, `stage=annotation`, списки/строки пустые, даты null.
+Дефолты: `status=new`, `stage=annotation`, списки/строки пустые, даты
+null, `project_id=null` (standalone; см. `project-model.md`).
 
 ## Правила
 
@@ -54,6 +56,7 @@ workspace. Аналог бекапа задачи CVAT (JSON), но только
 | created/updated, statusChangedBy/At | `created_at`, `status_changed_at/by` |
 | guide для аннотатора | `notes` |
 | subset | `subset` (optional) |
+| project_id (FK на проект) | `project_id` (nullable; модель — `project-model.md`) |
 | labels, consensus, storage, webhooks | не копируем |
 | segment_size/overlap → jobs | точка расширения: позже `segments: [{start, end, assignee, stage, state}]` вложатся сюда же без смены формата |
 

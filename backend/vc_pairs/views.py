@@ -17,6 +17,7 @@ import time
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
+import project_meta
 import task_meta
 import workspace as ws_module
 from videocutter.standalone import workspace as ws_fs
@@ -71,9 +72,18 @@ _DELETE_RETRY_DELAY = 2.0
 
 @require_http_methods(["GET", "POST"])
 def workspace_list(request):
-    """GET — список workspace-ов; POST — создать workspace из загруженного видео."""
+    """GET — список workspace-ов; POST — создать workspace из загруженного видео.
+
+    GET-фильтр ``?project=<pid>`` — только задачи проекта; ``project=none``
+    — standalone (без проекта); без параметра — все задачи.
+    """
     if request.method == "GET":
-        return JsonResponse(list_workspaces(), safe=False)
+        items = list_workspaces()
+        pid = request.GET.get("project")
+        if pid is not None:
+            want = None if pid in ("none", "") else pid
+            items = [w for w in items if w.get("project_id") == want]
+        return JsonResponse(items, safe=False)
     return _workspace_upload(request)
 
 
@@ -146,7 +156,17 @@ def _validate_workspace_async(name: str) -> None:
         return
     ws_module.clear_workspace_error(name)
     try:
-        task_meta.save(ws.path, task_meta.init_new())
+        # Пишем поверх уже накопленного (не затираем): миграция могла
+        # привязать задачу к default, пока шла индексация.
+        meta = task_meta.load(ws.path)
+        if meta.get("created_at") is None:
+            meta["created_at"] = task_meta.now_iso()
+        if meta.get("project_id") is None and project_meta.exists(
+                project_meta.DEFAULT_PROJECT_ID):
+            # Свежая установка: задачи рождаются в default, пока проект
+            # существует; явный detach делает следующие standalone.
+            meta["project_id"] = project_meta.DEFAULT_PROJECT_ID
+        task_meta.save(ws.path, meta)
     except Exception:  # noqa: BLE001 — паспорт не роняет создание
         pass
     scan_workspaces()
@@ -181,6 +201,9 @@ def _workspace_upload(request) -> JsonResponse:
 
     if get_workspace(name) is not None:
         return JsonResponse({"error": f"Workspace '{name}' уже существует"}, status=409)
+    if name == project_meta.PROJECTS_DIRNAME:
+        return JsonResponse(
+            {"error": "Имя зарезервировано под реестр проектов"}, status=400)
 
     ws_module.note_creating(name)
     try:
@@ -233,6 +256,10 @@ def _workspace_rename(request, name: str) -> JsonResponse:
         return JsonResponse({"error": "Некорректный JSON"}, status=400)
 
     new_name = payload.get("name") if isinstance(payload, dict) else None
+    if isinstance(new_name, str) and \
+            new_name.strip() == project_meta.PROJECTS_DIRNAME:
+        return JsonResponse(
+            {"error": "Имя зарезервировано под реестр проектов"}, status=400)
 
     from vc_fragments.views import EXPORTS, EXPORTS_LOCK
 
