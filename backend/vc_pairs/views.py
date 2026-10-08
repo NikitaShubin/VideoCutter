@@ -120,12 +120,16 @@ def _validation_failed(name: str, message: str) -> None:
     scan_workspaces()
 
 
-def _validate_workspace_async(name: str) -> None:
+def _validate_workspace_async(name: str, join_default: bool = True) -> None:
     """Фоновая валидация после создания: индекс строится вне запроса.
 
     POST уже ответил 202 — минуты demux+decode здесь браузер не ждут.
     Успех — паспорт задачи; провал — broken-запись с текстом ошибки
     (задача видна в списке, молча не исчезает).
+
+    ``join_default=False`` — при импорте бэкапа: привязка к проекту уже
+    решена (override / из архива / standalone) и авто-перевес в ``default``
+    не нужен — импорт не должен менять членство молча.
     """
     try:
         ws = get_workspace(name)
@@ -161,7 +165,7 @@ def _validate_workspace_async(name: str) -> None:
         meta = task_meta.load(ws.path)
         if meta.get("created_at") is None:
             meta["created_at"] = task_meta.now_iso()
-        if meta.get("project_id") is None and project_meta.exists(
+        if join_default and meta.get("project_id") is None and project_meta.exists(
                 project_meta.DEFAULT_PROJECT_ID):
             # Свежая установка: задачи рождаются в default, пока проект
             # существует; явный detach делает следующие standalone.

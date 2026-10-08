@@ -8,8 +8,10 @@ Workspace — это папка на диске с видеофайлами и f
 from __future__ import annotations
 
 import csv
+import io
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -252,6 +254,88 @@ class Workspace:
         self._fragments = None
         self._position = None
         self._settings = None
+
+
+#: Control-символы, недопустимые в разметке (таб/перевод строки/CR — свои).
+#: NUL в частности: C-читатели обрывают строку на \x00 — содержимое после
+#: него «исчезает» незаметно; csv-акселератор такое не роняет.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def parse_fragments_tsv_strict(data: bytes, total_frames: int = 0):
+    """Строгой разбор fragments.tsv для импорта разметки.
+
+    ``Workspace._read`` молча пропускает битые строки — для сохранения работы
+    это терпимо, но импорт чужого архива не должен незаметно терять данные:
+    здесь любая ошибка — отказ. Формат и проверки совпадают с PUT /fragments:
+    UTF-8 без control-символов (NUL молча обрывает строки у C-читателей),
+    заголовок start/end, целые start/end в диапазоне
+    ``[0, total_frames)`` (400), пересечения (409), позиция (400).
+
+    Возвращает ``(fragments, position, problem)``: ``problem`` — None при
+    успехе, иначе ``(HTTP-статус, текст)`` и первые два элемента None.
+    ``total_frames`` = 0 — число кадров неизвестно, верхняя граница не
+    проверяется (как в PUT).
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return None, None, (400, f"fragments.tsv не в кодировке UTF-8: {e}")
+
+    bad = _CONTROL_RE.search(text)
+    if bad is not None:
+        return None, None, (
+            400, f"fragments.tsv: недопустимый символ {bad.group()!r} "
+                 f"в разметке")
+
+    frags: List[dict] = []
+    position = 0
+    data_lines: List[str] = []
+    for line in io.StringIO(text):
+        if line.startswith("#"):
+            key, _, value = line[1:].partition("\t")
+            key = key.strip()
+            if key == "position":
+                try:
+                    position = int(value.strip())
+                except ValueError:
+                    return None, None, (400, f"Некорректная строка позиции: {value.strip()!r}")
+            continue
+        data_lines.append(line)
+
+    if data_lines:
+        try:
+            reader = csv.DictReader(data_lines, delimiter="\t")
+            fieldnames = reader.fieldnames or []
+            if "start" not in fieldnames or "end" not in fieldnames:
+                return None, None, (400, "fragments.tsv: нет колонок start/end в заголовке")
+            for row in reader:
+                if None in row:
+                    return None, None, (
+                        400, f"Лишние колонки в строке разметки: {row.get(None)!r}")
+                try:
+                    start, end = int(row["start"]), int(row["end"])
+                except (TypeError, ValueError):
+                    return None, None, (400, f"Нечисловые start/end в строке разметки: {row!r}")
+                if start < 0 or start > end or (total_frames > 0 and end >= total_frames):
+                    return None, None, (
+                        400, f"Фрагмент {start}-{end} вне диапазона [0, {total_frames})")
+                frags.append({
+                    "start": start,
+                    "end": end,
+                    "comment": row.get("comment") or "",
+                })
+        except csv.Error as e:  # NUL/битые кавычки в потоке CSV
+            return None, None, (400, f"fragments.tsv не разбирается как TSV: {e}")
+
+    if position < 0 or (total_frames > 0 and position >= total_frames):
+        return None, None, (400, f"Позиция {position} вне диапазона [0, {total_frames})")
+
+    frags.sort(key=lambda x: (x["start"], x["end"]))
+    for i in range(1, len(frags)):
+        if frags[i]["start"] <= frags[i - 1]["end"]:
+            return None, None, (409, "Фрагменты пересекаются")
+    return frags, position, None
 
 
 # ─── Глобальный реестр workspace-ов (ленивое сканирование) ──────────────────

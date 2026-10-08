@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from django.urls import path
 
-from . import views
+from . import annotations, views
 
 urlpatterns = [
     path("pairs/<str:pair_id>/fragments", views.fragments, name="fragments"),
@@ -10,6 +10,11 @@ urlpatterns = [
     path("pairs/<str:pair_id>/position/", views.pair_position, name="pair-position-slash"),
     path("pairs/<str:pair_id>/settings", views.pair_settings, name="pair-settings"),
     path("pairs/<str:pair_id>/settings/", views.pair_settings, name="pair-settings-slash"),
+    path("pairs/<str:pair_id>/annotations", annotations.annotations_export, name="annotations-export"),
+    path("pairs/<str:pair_id>/annotations/", annotations.annotations_export, name="annotations-export-slash"),
+    # Импорт — до export-маршрутов: порядок читается как «сначала действие».
+    path("pairs/<str:pair_id>/annotations/import", annotations.annotations_import, name="annotations-import"),
+    path("pairs/<str:pair_id>/annotations/import/", annotations.annotations_import, name="annotations-import-slash"),
     path("pairs/<str:pair_id>/export", views.fragment_export, name="fragment-export"),
     path("pairs/<str:pair_id>/export/status", views.fragment_export_status, name="fragment-export-status"),
     # Отмена — до download-маршрута: иначе "cancel" съест <path:path>.
