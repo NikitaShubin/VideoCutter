@@ -188,19 +188,20 @@ def _write_manifest(zf: zipfile.ZipFile, manifest: Dict[str, object]) -> None:
 
 def _write_task_members(zf: zipfile.ZipFile, ws_path: str,
                         prefix: str = "") -> None:
-    """Кладёт в архив task.json (без членства), fragments.tsv и видео.
+    """Кладёт в архив task.json (без экземплярных полей), fragments.tsv и видео.
 
-    Паспорт пишем сами: (а) на диске он может нести project_id экземпляра;
-    (б) имя нормализуем — пустое заменяем именем папки, чтобы слепок задачи
-    и слепок её копии давали одинаковое содержимое (cvat-подход: в архиве
-    данные, а не локальные id).
+    Паспорт пишем сами: с диска он несёт локальные адреса и даты этого
+    экземпляра (project_id, created_at, last_opened_at), а имя пустое — заменяем
+    именем папки. Так слепок задачи и слепок её копии содержат одни данные, и
+    дата рождения копии проставляется заново валидацией (как в CVAT).
     """
     for name in (task_meta.TASK_FILE, ws_module.FRAGMENTS_FILE):
         if not os.path.isfile(os.path.join(ws_path, name)):
             continue
         if name == task_meta.TASK_FILE:
             meta = task_meta.load(ws_path)
-            meta.pop("project_id", None)
+            for key in _TASK_PORTABLE_STRIP:
+                meta.pop(key, None)
             meta["name"] = _task_display(
                 ws_path, os.path.basename(ws_path))
             zf.writestr(prefix + name,
@@ -275,9 +276,10 @@ def project_backup(request, project_id: str):
                 fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
                 name=pmeta.get("name") or project_id, tasks=entries)
             _write_manifest(zf, manifest)
-            # Паспорт проекта — тоже канонический: без его id.
+            # Паспорт проекта — тоже канонический: без его id и дат.
             exported = dict(pmeta)
-            exported.pop("id", None)
+            for key in ("id", "created_at"):
+                exported.pop(key, None)
             zf.writestr(project_meta.PROJECT_FILE,
                         json.dumps(exported, ensure_ascii=False, indent=2))
     except OSError as e:
@@ -389,6 +391,12 @@ def _import_base_name(manifest: Dict[str, object],
         except ws_fs.InvalidWorkspaceError:
             return "task"
     return "task"
+
+
+#: Поля паспорта, которые не переносятся между установками: id/членство —
+#: локальные адреса, даты — свойства этого экземпляра (CVAT при импорте
+#: ставит created_date заново). Всё остальное — данные задачи.
+_TASK_PORTABLE_STRIP = ("project_id", "created_at", "last_opened_at")
 
 
 def _task_members(names: List[str], prefix: str):

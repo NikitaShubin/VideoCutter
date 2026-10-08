@@ -536,19 +536,9 @@ class CanonicalExportTests(BackupArchiveMixin, WorkspaceApiTestBase):
             return {n: zf.read(n) for n in zf.namelist()}
 
     def _comparable(self, members):
-        """Паспорт без полей, которые достраивает система сама.
-
-        ``created_at`` у задачи ставит валидация при создании/импорте —
-        у оригинала, положенного руками, его может не быть. Это единственное
-        законное расхождение слепков; всё остальное — данные.
-        """
-        out = dict(members)
-        if task_meta.TASK_FILE in out:
-            meta = json.loads(out[task_meta.TASK_FILE].decode("utf-8"))
-            meta.pop("created_at", None)
-            out[task_meta.TASK_FILE] = json.dumps(
-                meta, ensure_ascii=False, indent=2).encode("utf-8")
-        return out
+        """Слепки равны как есть: экземплярных полей (id, даты, членство)
+        в паспортах архива нет — они проставляются в цели заново."""
+        return members
 
     def test_identical_content_yields_identical_members(self):
         a = self._members(self._backup(self.ws_id))
@@ -572,6 +562,25 @@ class CanonicalExportTests(BackupArchiveMixin, WorkspaceApiTestBase):
         self.assertEqual(sorted(copy), sorted(original))
         for name, data in original.items():
             self.assertEqual(copy[name], data, name)
+
+    def test_restored_copy_gets_own_birth_date(self):
+        """Дата рождения копии — дата восстановления, а не оригинала."""
+        meta = task_meta.load(self.ws_dir)
+        meta["created_at"] = "2000-01-01T00:00:00+00:00"
+        task_meta.save(self.ws_dir, meta)
+        resp = self.import_archive(self._backup(self.ws_id))
+        copy_id = resp.json()["id"]
+        copy_dir = os.path.join(self._tmpdir, copy_id)
+        copy_meta = _wait_validation(self, copy_id, copy_dir)
+        self.assertNotEqual(copy_meta["created_at"],
+                            "2000-01-01T00:00:00+00:00")
+        self.assertIsNotNone(copy_meta["created_at"])
+        # В архиве паспорт без экземплярных полей.
+        with zipfile.ZipFile(io.BytesIO(self._backup(copy_id))) as zf:
+            archived = json.loads(
+                zf.read(task_meta.TASK_FILE).decode("utf-8"))
+        for key in ("project_id", "created_at", "last_opened_at"):
+            self.assertNotIn(key, archived)
 
     def _wait_indexing_done(self, ws_id: str) -> None:
         deadline = time.time() + 30
