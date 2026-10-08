@@ -181,6 +181,23 @@ export function PairList({
     loadProjects();
   }, [loadProjects]);
 
+  // Состав задач изменился (удаление/создание/переименование, возврат из
+  // редактора) — счётчики task_count протухли: перечитываем реестр. Ключ —
+  // множество id: опросы прогресса индексации его не меняют и лишних
+  // запросов не будят.
+  const idsRef = useRef("");
+  useEffect(() => {
+    if (!pairs) return;
+    const key = pairs
+      .map((p) => p.id)
+      .sort()
+      .join("\0");
+    if (key !== idsRef.current) {
+      idsRef.current = key;
+      loadProjects();
+    }
+  }, [pairs, loadProjects]);
+
   const pickProjectFilter = (v: string) => {
     setProjFilter(v);
     try {
