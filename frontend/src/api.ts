@@ -477,3 +477,56 @@ export function importAnnotations(
     opts.onProgress,
   );
 }
+
+// Скачивание файла с откликом: бэкапы/разметка собираются на сервере
+// синхронно целиком до первого байта — голая ссылка висела бы мёртвой
+// всё время сборки. Сначала спиннер (заголовков ещё нет), затем % по
+// Content-Length. Замечание: файл держится в памяти — для локального
+// контура с умеренными объёмами приемлемо.
+export function downloadFile(
+  url: string,
+  filename: string,
+  onProgress?: (fraction: number | null) => void,
+  headers?: Record<string, string>,
+): Promise<void> {
+  const fail = async (res: Response): Promise<never> => {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      if (body.error) detail = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  };
+  const save = (blob: Blob) => {
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(href), 5000);
+  };
+  return fetch(url, headers ? { headers } : undefined).then(async (res) => {
+    if (!res.ok) return fail(res);
+    const total = Number(res.headers.get("Content-Length")) || 0;
+    if (!res.body || !total) {
+      onProgress?.(null);
+      save(await res.blob());
+      return;
+    }
+    const reader = res.body.getReader();
+    const chunks: BlobPart[] = [];
+    let loaded = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      onProgress?.(loaded / total);
+    }
+    save(new Blob(chunks));
+  });
+}

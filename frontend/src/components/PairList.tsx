@@ -8,6 +8,7 @@ import {
   deleteProject,
   deleteWorkspace,
   detachTask,
+  downloadFile,
   importAnnotations,
   importBackup,
   listProjects,
@@ -155,6 +156,9 @@ export function PairList({
   // Восстановление из бэкапа: XHR-заливка с прогрессом (default rename —
   // совпадающие имена получают суффикс _1, ничего не затирается).
   const [projRestoreProgress, setProjRestoreProgress] = useState<number | null>(null);
+  // Скачивание бэкапа проекта: id строки со спиннером (архив собирается
+  // синхронно — без отклика кнопка выглядит мёртвой).
+  const [dlKey, setDlKey] = useState<string | null>(null);
 
   const loadProjects = useCallback(() => {
     listProjects()
@@ -505,6 +509,31 @@ export function PairList({
       });
   };
 
+  // Скачивание бэкапа проекта с откликом (сборка — на сервере, синхронно).
+  const doDownloadProject = (p: Project) => {
+    if (dlKey !== null) return;
+    setDlKey(p.id);
+    setProjError("");
+    downloadFile(projectBackupUrl(p.id), `${p.id}-backup.zip`)
+      .catch((e: Error) => setProjError(e.message))
+      .finally(() => setDlKey(null));
+  };
+
+  // Скачивание бэкапа/разметки задачи: прогресс — в бар формы.
+  const doDownloadTask = (id: string, kind: "backup" | "annotations") => {
+    if (editBusy) return;
+    setEditBusy(true);
+    setEditError("");
+    setEditProgress(0);
+    const url = kind === "backup" ? taskBackupUrl(id) : annotationsUrl(id);
+    downloadFile(url, `${id}-${kind}.zip`, (f) => setEditProgress(f ?? 0))
+      .catch((e: Error) => setEditError(e.message))
+      .finally(() => {
+        setEditBusy(false);
+        setEditProgress(null);
+      });
+  };
+
   // ─── Форма редактирования одной задачи ───────────────────────────────────
 
   const renderEdit = (p: VideoPair) => {
@@ -666,22 +695,22 @@ export function PairList({
 
       <div className="pair-edit-row">
         <span className="pair-edit-label">Бэкап</span>
-        <a
+        <button
           className="role-action"
-          href={taskBackupUrl(p.id)}
-          download
+          disabled={editBusy}
+          onClick={() => doDownloadTask(p.id, "backup")}
           title="Скачать полный бэкап задачи (видео + разметка + паспорт)"
         >
           ⤓ Бэкап
-        </a>
-        <a
+        </button>
+        <button
           className="role-action"
-          href={annotationsUrl(p.id)}
-          download
+          disabled={editBusy}
+          onClick={() => doDownloadTask(p.id, "annotations")}
           title="Скачать разметку (fragments.tsv + манифест)"
         >
           ⤓ Разметка
-        </a>
+        </button>
         <label
           className="role-action"
           title="Применить архив разметки к этой задаче (видео не трогается)"
@@ -861,14 +890,14 @@ export function PairList({
                   </span>
                 </button>
                 <div className="pair-actions">
-                  <a
+                  <button
                     className="pair-edit-btn"
                     title="Скачать бэкап проекта"
-                    href={projectBackupUrl(p.id)}
-                    download
+                    disabled={dlKey !== null}
+                    onClick={() => doDownloadProject(p)}
                   >
-                    ⤓
-                  </a>
+                    {dlKey === p.id ? <span className="btn-spin" /> : "⤓"}
+                  </button>
                   <button
                     className="pair-edit-btn"
                     title="Переименовать проект"

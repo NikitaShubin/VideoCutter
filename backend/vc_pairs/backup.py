@@ -64,12 +64,42 @@ class _Problem(Exception):
 
 # ─── Временный архив и отдача файла ─────────────────────────────────────────
 
+#: Префикс временных zip бэкапа/разметки (тот же корень, dot-имя).
+_BACKUP_PREFIX = ".backup-"
+#: Сирота .backup-* (kill -9 посреди сборки/отдачи: TempFile.close не
+#: сработал) чистится через сутки — штатные пути (успех/обрыв/ошибка)
+#: файл уже удаляют, sweep только для погибших без закрытия.
+_STALE_BACKUP_S = 24 * 3600
+
+def _sweep_stale_backups() -> None:
+    """Чистит осиротевшие временные архивы (падение без закрытия отдачи)."""
+    root = ws_module.WORKSPACE_ROOT
+    if not os.path.isdir(root):
+        return
+    now = time.time()
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.startswith(_BACKUP_PREFIX):
+            continue
+        full = os.path.join(root, entry)
+        try:
+            if os.path.isfile(full) \
+                    and now - os.path.getmtime(full) > _STALE_BACKUP_S:
+                os.remove(full)
+        except OSError:
+            pass  # конкурентное удаление — не наша забота
+
+
 def make_temp_zip_path() -> str:
     """Временный файл архива в корне workspace-ов (тот же диск, dot-имя)."""
     root = ws_module.WORKSPACE_ROOT
     os.makedirs(root, exist_ok=True)
-    fd, path = tempfile.mkstemp(prefix=".backup-", suffix=".zip", dir=root)
+    fd, path = tempfile.mkstemp(prefix=_BACKUP_PREFIX, suffix=".zip", dir=root)
     os.close(fd)
+    _sweep_stale_backups()
     return path
 
 

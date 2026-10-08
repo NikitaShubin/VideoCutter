@@ -477,6 +477,23 @@ class TaskBackupGetTests(BackupArchiveMixin, WorkspaceApiTestBase):
             [e for e in os.listdir(self._tmpdir) if e.startswith(".backup-")],
             [])
 
+    def test_backup_sweeps_stale_temp_archives(self):
+        """Сирота .backup-* (падение без закрытия) чистится при сборке."""
+        stale = os.path.join(self._tmpdir, ".backup-dead.zip")
+        fresh = os.path.join(self._tmpdir, ".backup-live.zip")
+        for path in (stale, fresh):
+            with open(path, "wb") as fh:
+                fh.write(b"orphan")
+        old = time.time() - 48 * 3600
+        os.utime(stale, (old, old))
+        resp = self.client.get(self.backup_url)
+        self.assertEqual(resp.status_code, 200)
+        fetch_zip(resp)
+        left = {e for e in os.listdir(self._tmpdir)
+                if e.startswith(".backup-")}
+        self.assertNotIn(".backup-dead.zip", left)
+        self.assertIn(".backup-live.zip", left)
+
 
 # ─── POST: импорт задачи ─────────────────────────────────────────────────────
 

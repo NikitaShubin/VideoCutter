@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   annotationsUrl,
   cancelExport,
+  downloadFile,
   frameUrl,
   getExportStatus,
   getPair,
@@ -50,6 +51,11 @@ export function CutEditor({ pairId, onBack }: Props) {
   // Импорт разметки: заливка архива с прогрессом (видео не трогается).
   const [annBusy, setAnnBusy] = useState(false);
   const [annProgress, setAnnProgress] = useState<number | null>(null);
+  // Скачивание разметки/бэкапа: спиннер на сборке, затем %.
+  const [dlState, setDlState] = useState<{
+    key: "ann" | "bak";
+    frac: number | null;
+  } | null>(null);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
   // Настройки просмотра: масштаб (0.05..1.0) и качество JPEG (30..95).
@@ -859,6 +865,20 @@ export function CutEditor({ pairId, onBack }: Props) {
       });
   };
 
+  // Скачивание архива с откликом: сборка на сервере синхронна, голая
+  // ссылка висела бы мёртвой всё время подготовки.
+  const handleDownload = (
+    key: "ann" | "bak",
+    url: string,
+    filename: string,
+  ) => {
+    if (dlState !== null || annBusy) return;
+    setDlState({ key, frac: null });
+    downloadFile(url, filename, (f) => setDlState({ key, frac: f }))
+      .catch((e: Error) => flash(`Ошибка скачивания: ${e.message}`))
+      .finally(() => setDlState(null));
+  };
+
   // Подхват состояния экспорта при входе: Esc во время экспорта сервер не
   // останавливает, прогресс/отмена продолжают работать после возврата.
   // Готовый список файлов НЕ показываем автоматически — только по нажатию
@@ -985,14 +1005,29 @@ export function CutEditor({ pairId, onBack }: Props) {
                 : "Экспорт (E)"}
             </span>
           </button>
-          <a
+          <button
             className="toolbar-btn"
-            href={annotationsUrl(pairId)}
-            download
+            disabled={dlState !== null || annBusy}
+            onClick={() =>
+              handleDownload(
+                "ann",
+                annotationsUrl(pairId),
+                `${pairId}-annotations.zip`,
+              )
+            }
             title="Скачать разметку задачи (fragments.tsv + манифест)"
           >
-            ⤓ Разметка
-          </a>
+            {dlState?.key === "ann" ? (
+              <>
+                <span className="btn-spin" />
+                {dlState.frac !== null
+                  ? ` ${Math.round(dlState.frac * 100)}%`
+                  : ""}
+              </>
+            ) : (
+              "⤓ Разметка"
+            )}
+          </button>
           <label
             className="toolbar-btn"
             title="Применить архив разметки к этой задаче (видео не трогается)"
@@ -1011,14 +1046,29 @@ export function CutEditor({ pairId, onBack }: Props) {
               }}
             />
           </label>
-          <a
+          <button
             className="toolbar-btn"
-            href={taskBackupUrl(pairId)}
-            download
+            disabled={dlState !== null || annBusy}
+            onClick={() =>
+              handleDownload(
+                "bak",
+                taskBackupUrl(pairId),
+                `${pairId}-backup.zip`,
+              )
+            }
             title="Скачать полный бэкап задачи (видео + разметка + паспорт)"
           >
-            ⤓ Бэкап
-          </a>
+            {dlState?.key === "bak" ? (
+              <>
+                <span className="btn-spin" />
+                {dlState.frac !== null
+                  ? ` ${Math.round(dlState.frac * 100)}%`
+                  : ""}
+              </>
+            ) : (
+              "⤓ Бэкап"
+            )}
+          </button>
           <button
             className="toolbar-help"
             onClick={() => setHelpOpen(true)}

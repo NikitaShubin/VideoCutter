@@ -730,11 +730,13 @@ select option {
   cursor: default;
 }
 
-/* Ссылки/лейблы-кнопки тулбара (обмен разметкой и бэкапом): та же геометрия. */
+/* Ссылки/лейблы/кнопки тулбара (обмен разметкой и бэкапом): та же геометрия. */
 .editor-toolbar a.toolbar-btn,
-.editor-toolbar label.toolbar-btn {
+.editor-toolbar label.toolbar-btn,
+.editor-toolbar button.toolbar-btn {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   padding: 4px 10px;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -748,8 +750,27 @@ select option {
 }
 
 .editor-toolbar a.toolbar-btn:hover,
-.editor-toolbar label.toolbar-btn:hover {
+.editor-toolbar label.toolbar-btn:hover,
+.editor-toolbar button.toolbar-btn:hover:not(:disabled) {
   background: var(--btn-hover);
+}
+
+.editor-toolbar button.toolbar-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+/* Мини-спиннер в кнопке: сборка архива на сервере (заголовков ещё нет). */
+.btn-spin {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: frame-spin 0.8s linear infinite;
+  vertical-align: -2px;
 }
 
 /* Кнопка-«статусбар» экспорта: заполняется пропорционально прогрессу. */
