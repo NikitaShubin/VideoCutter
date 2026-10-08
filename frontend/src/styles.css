@@ -1,3 +1,35 @@
+/* VideoCutter — единый стиль списка и редактора.
+ *
+ * Токены палитры/радиусов — в :root; «труба» геометрии: ни один flex-ряд
+ * не запрещает перенос (нигде нет nowrap-контейнеров с нескжимаемыми
+ * детьми), все текстовые контролы — с min-width: 0. Точечные фиксы
+ * переполнения запрещены: чинится система, а не симптом.
+ */
+
+:root {
+  --bg: #1e1e2e;
+  --panel: #2a2a3e;
+  --panel-2: #22223a;
+  --inset: #14141f;
+  --btn: #3a3a52;
+  --btn-hover: #4a4a66;
+  --line: #444;
+  --edge: #3a3a52;
+  --text: #e0e0e0;
+  --muted: #9a9ab0;
+  --faint: #6a6a80;
+  --accent: #7fb2ff;
+  --green: #2e8b57;
+  --green-bright: #00c853;
+  --tl-green: #2ecc40;
+  --red: #ff8080;
+  --red-deep: #6a2a2a;
+  --warn: #ffcf7a;
+  --r: 10px;
+  --r-s: 6px;
+  --page-w: 780px;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -5,9 +37,594 @@
 body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  background: #1e1e2e;
-  color: #e0e0e0;
+  background: var(--bg);
+  color: var(--text);
 }
+
+img,
+canvas,
+video {
+  max-width: 100%;
+}
+
+/* Видимый фокус у всех интерактивных элементов — клавиатурная эргономика. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ─── Кнопки ─────────────────────────────────────────────────────────────── */
+
+.btn,
+.add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn:hover,
+.add-btn:hover {
+  background: var(--btn-hover);
+}
+
+.btn:disabled,
+.add-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+
+.btn.primary:hover {
+  background: #359a63;
+}
+
+/* label-кнопка (файловый input внутри): ведёт себя как кнопка. */
+label.btn,
+label.add-btn {
+  cursor: pointer;
+}
+
+/* ─── Поля форм ──────────────────────────────────────────────────────────── */
+
+input[type="text"],
+input[type="search"] {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--inset);
+  color: var(--text);
+  font: inherit;
+}
+
+/* Нативные select: тот же стиль, что у кнопок (без правил браузер
+   светит системной темой). */
+select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--btn);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+
+select:hover {
+  background: var(--btn-hover);
+}
+
+select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Раскрытый список: option на части браузеров игнорирует фон родителя,
+   поэтому красим отдельно. */
+select option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* ─── Страница списка: колонка секций-карточек ───────────────────────────── */
+
+.pair-list {
+  max-width: var(--page-w);
+  margin: 24px auto 48px;
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Шапка: строка заголовка + строка инструментов. Обе переносятся —
+   кнопка «Добавить видео» физически не может выйти за рамку. */
+.pair-list-head {
+  padding: 16px 20px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: var(--r);
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.title-row h2 {
+  margin: 0;
+  margin-right: auto;
+  font-size: 1.25em;
+}
+
+.list-count {
+  font-size: 0.65em;
+  font-weight: 400;
+  color: var(--muted);
+  vertical-align: middle;
+}
+
+.title-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--edge);
+}
+
+.toolbar-row .search {
+  flex: 1 1 200px;
+}
+
+.toolbar-row .field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.9em;
+  min-width: 0;
+}
+
+/* ─── Секции: проекты, форма загрузки ────────────────────────────────────── */
+
+.project-panel,
+.upload {
+  padding: 16px 20px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: var(--r);
+}
+
+.project-panel h3,
+.upload h3 {
+  margin: 0 0 12px;
+  font-size: 1em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.project-create {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-create input {
+  flex: 1 1 200px;
+}
+
+.project-panel .project-rows {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+}
+
+.project-panel .project-rows li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-s);
+}
+
+.project-panel .project-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.project-panel .project-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.project-hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+/* Форма загрузки: секции ролей + имя + итог, всё тянется по ширине. */
+.upload label {
+  display: block;
+  margin-bottom: 12px;
+  color: #b0b0c0;
+}
+
+.upload input[type="file"],
+.upload input[type="text"] {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.upload-role span {
+  font-size: 0.9em;
+}
+
+.name-preview {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.upload-progress {
+  height: 8px;
+  margin: 8px 0;
+  border-radius: 4px;
+  background: var(--inset);
+  overflow: hidden;
+}
+
+.upload-progress-bar {
+  height: 100%;
+  background: var(--green);
+  transition: width 0.15s linear;
+}
+
+.upload-error {
+  margin: 8px 0;
+  color: var(--red);
+}
+
+.upload button[type="submit"] {
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--r-s);
+  background: var(--green);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.upload button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ─── Строки задач ───────────────────────────────────────────────────────── */
+
+.pair-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pair-list li {
+  margin-bottom: 0;
+}
+
+.pair-list .pair-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+/* Кнопка-строка и её div-двойник (строка заливки): полный сброс + рамка. */
+.pair-list button.pair-open,
+.pair-list div.pair-open {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  position: relative;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.pair-list div.pair-open {
+  cursor: default;
+}
+
+.pair-list .pair-open .pair-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Один полупрозрачный фон на всю строку (а не под каждой строкой текста):
+ * приглушает яркость статус-бара целиком — силуэт фрагментов остаётся
+ * узнаваемым, а светлый текст читается без отдельных «чипов». Приглушение
+ * не трогает отрисовку (statusbar.ts), это чистый CSS-слой. */
+.pair-list .pair-open::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.7);
+  transition: background 0.15s ease;
+}
+
+.pair-list button.pair-open:hover::before {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.pair-list .pair-open .pair-label,
+.pair-list .pair-open .pair-meta {
+  position: relative;
+  z-index: 2;
+}
+
+.pair-list .pair-open .pair-label {
+  display: inline-block;
+  margin: 10px 12px 2px;
+  padding: 2px 8px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.pair-list .pair-open .pair-meta {
+  display: block;
+  margin: 0 12px 8px;
+  padding: 1px 8px;
+  font-size: 0.85em;
+  color: #d8d8e8;
+  overflow-wrap: anywhere;
+}
+
+.pair-list .pair-open .pair-warn {
+  position: relative;
+  z-index: 2;
+  display: block;
+  margin: 0 12px 8px;
+  padding: 1px 8px;
+  font-size: 0.8em;
+  color: var(--warn);
+}
+
+/* Квадратные кнопки действий задачи: «изменить» и «удалить» рядом.
+ * Селектор — по классам, а не по тегу: ссылки-кнопки (⤓) получают
+ * ту же геометрию. */
+.pair-list .pair-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.pair-list .pair-actions .pair-edit-btn,
+.pair-list .pair-actions .pair-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.pair-list .pair-actions .pair-edit-btn:hover,
+.pair-list .pair-actions .pair-edit-btn:focus {
+  background: #33507a;
+  border-color: #4a6a9a;
+}
+
+.pair-list .pair-actions .pair-delete:hover {
+  background: var(--red-deep);
+  border-color: #8a3a3a;
+}
+
+/* ─── Панель inline-редактирования задачи ────────────────────────────────── */
+
+.pair-list .pair-edit {
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-s);
+}
+
+.pair-edit-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.pair-edit-row:last-child {
+  margin-bottom: 0;
+}
+
+.pair-edit .pair-edit-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.pair-edit input[type="text"] {
+  flex: 1 1 160px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.pair-edit .pair-edit-select {
+  flex: 1 1 160px;
+}
+
+.pair-edit .role-field {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 0.9em;
+}
+
+.pair-edit .role-field.unassigned {
+  border-left: 3px solid #8a6d3b;
+  padding-left: 8px;
+}
+
+.pair-edit .role-name {
+  flex: 1 1 120px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.pair-edit .role-action {
+  flex: 0 0 auto;
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85em;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.pair-edit .role-action:hover {
+  background: var(--btn-hover);
+}
+
+.pair-edit .role-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.pair-edit .pair-edit-btn-text {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.pair-edit .pair-edit-btn-text:hover {
+  background: var(--btn-hover);
+}
+
+.pair-edit .pair-edit-btn-text:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.pair-edit-progress {
+  height: 8px;
+  margin: 6px 0;
+  border-radius: 4px;
+  background: var(--inset);
+  overflow: hidden;
+}
+
+.pair-edit-progress-bar {
+  height: 100%;
+  background: var(--green);
+  transition: width 0.15s linear;
+}
+
+.pair-edit-error {
+  margin: 6px 0;
+  color: var(--red);
+  font-size: 0.9em;
+}
+
+.pair-edit-verifying {
+  margin: 6px 0;
+  color: #d8d8e8;
+  font-size: 0.9em;
+}
+
+.pair-list li.empty {
+  display: block;
+  color: var(--faint);
+  padding: 12px;
+  text-align: center;
+}
+
+.pair-list li.broken .pair-row {
+  align-items: center;
+}
+
+/* ─── Редактор ───────────────────────────────────────────────────────────── */
 
 .editor {
   display: flex;
@@ -37,21 +654,22 @@ body {
   gap: 12px;
   flex-wrap: wrap;
   padding: 6px 10px;
-  background: #2a2a3e;
-  border-radius: 6px;
+  background: var(--panel);
+  border-radius: var(--r-s);
 }
 
 .editor-toolbar button {
   padding: 4px 10px;
-  border: 1px solid #444;
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: #3a3a52;
-  color: #e0e0e0;
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
   cursor: pointer;
 }
 
 .editor-toolbar button:hover {
-  background: #4a4a66;
+  background: var(--btn-hover);
 }
 
 .editor-toolbar button:disabled {
@@ -69,7 +687,7 @@ body {
 .toolbar-export .toolbar-export-progress {
   position: absolute;
   inset: 0 auto 0 0;
-  background: #00c853;
+  background: var(--green-bright);
   opacity: 0.35;
   transition: width 0.3s ease;
 }
@@ -83,12 +701,12 @@ body {
 }
 
 .info {
-  color: #9a9ab0;
+  color: var(--muted);
   font-size: 0.85em;
 }
 
 .info.warn {
-  color: #ffcf7a;
+  color: var(--warn);
 }
 
 /* Ползунки качества/масштаба в тулбаре редактора. */
@@ -98,7 +716,7 @@ body {
   flex-wrap: wrap;
   gap: 12px;
   font-size: 0.85em;
-  color: #9a9ab0;
+  color: var(--muted);
 }
 
 .view-settings .view-slider {
@@ -109,13 +727,13 @@ body {
 
 .view-settings .view-slider input[type="range"] {
   width: 120px;
-  accent-color: #7fb2ff;
+  accent-color: var(--accent);
 }
 
 .view-settings .view-slider b {
   display: inline-block;
   min-width: 34px;
-  color: #e0e0e0;
+  color: var(--text);
 }
 
 .video-area {
@@ -126,7 +744,7 @@ body {
   align-items: center;
   justify-content: center;
   background: #000;
-  border-radius: 6px;
+  border-radius: var(--r-s);
   overflow: hidden;
 }
 
@@ -164,7 +782,7 @@ body {
   height: 20px;
   border-radius: 4px;
   cursor: pointer;
-  background: #2ecc40;
+  background: var(--tl-green);
 }
 
 .editor-comment {
@@ -174,7 +792,7 @@ body {
   max-width: 60%;
   padding: 6px 10px;
   background: rgba(0, 0, 0, 0.65);
-  border-radius: 6px;
+  border-radius: var(--r-s);
   font-size: 0.9em;
 }
 
@@ -188,9 +806,9 @@ body {
   max-width: 50vw;
   min-height: 56px;
   resize: vertical;
-  background: #1e1e2e;
-  color: #e0e0e0;
-  border: 1px solid #444;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
   border-radius: 4px;
   padding: 6px;
   font: inherit;
@@ -200,7 +818,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  color: #6a6a80;
+  color: var(--faint);
   font-size: 0.8em;
 }
 
@@ -209,8 +827,8 @@ body {
   top: 12px;
   right: 12px;
   padding: 8px 14px;
-  background: #2e8b57;
-  border-radius: 6px;
+  background: var(--green);
+  border-radius: var(--r-s);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
@@ -222,493 +840,18 @@ body {
 .loading {
   padding: 24px;
   text-align: center;
-  color: #9a9ab0;
-}
-
-/* Список пар */
-.pair-list,
-.upload {
-  max-width: 720px;
-  margin: 40px auto;
-  padding: 24px;
-  background: #2a2a3e;
-  border-radius: 10px;
-}
-
-.pair-list h2,
-.upload h2 {
-  margin-top: 0;
-}
-
-.pair-list-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.add-btn {
-  flex: 0 0 auto;
-  padding: 8px 14px;
-  border: 1px solid #444;
-  border-radius: 6px;
-  background: #3a3a52;
-  color: #e0e0e0;
-  cursor: pointer;
-}
-
-.add-btn:hover {
-  background: #4a4a66;
-}
-
-.sort-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* Нативные select: тот же стиль, что у кнопок (без правил браузер
-   светит системной темой). Глобально: сортировка, проекты, форма. */
-select {
-  padding: 8px 10px;
-  border: 1px solid #444;
-  border-radius: 6px;
-  background: #3a3a52;
-  color: #e0e0e0;
-  cursor: pointer;
-  font: inherit;
-}
-
-select:hover {
-  background: #4a4a66;
-}
-
-select:focus-visible {
-  outline: 1px solid #6a6a8a;
-  outline-offset: 1px;
-}
-
-select:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-/* Раскрытый список: option на части браузеров игнорирует фон родителя,
-   поэтому красим отдельно. */
-select option {
-  background: #2a2a3e;
-  color: #e0e0e0;
-}
-
-/* Панель управления проектами (кнопка «Проекты» в шапке списка). */
-.project-panel {
-  padding: 12px;
-  background: #2a2a3e;
-  border: 1px solid #3a3a52;
-  border-radius: 6px;
-}
-
-.project-create {
-  display: flex;
-  gap: 8px;
-}
-
-.project-create input {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid #444;
-  border-radius: 6px;
-  background: #1e1e2e;
-  color: #e0e0e0;
-  font: inherit;
-}
-
-.project-create .add-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.project-panel .project-rows {
-  list-style: none;
-  padding: 0;
-  margin: 10px 0 0;
-}
-
-.project-panel .project-rows li {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
-  margin-bottom: 6px;
-  background: #22223a;
-  border: 1px solid #3a3a52;
-  border-radius: 6px;
-}
-
-.project-panel .project-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #e0e0e0;
-}
-
-.project-panel .project-meta {
-  color: #9a9ab0;
-  font-size: 0.85em;
-}
-
-.project-hint {
-  margin-top: 8px;
-  color: #9a9ab0;
-  font-size: 0.85em;
-}
-
-.pair-list ul {
-  list-style: none;
-  padding: 0;
-}
-
-.pair-list li {
-  margin-bottom: 6px;
-}
-
-.pair-list .pair-row {
-  display: flex;
-  gap: 6px;
-  align-items: stretch;
-}
-
-.pair-list li button {
-  text-align: left;
-  padding: 0;
-  border: 1px solid #444;
-  border-radius: 6px;
-  cursor: pointer;
-  color: #e0e0e0;
-}
-
-/* Строка заливки — div, а не button (открывать нечего): та же рамка. */
-.pair-list li div.pair-open {
-  text-align: left;
-  padding: 0;
-  border: 1px solid #444;
-  border-radius: 6px;
-  cursor: default;
-  color: #e0e0e0;
-}
-
-.pair-list .pair-open {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  min-height: 40px;
-}
-
-.pair-list .pair-open .pair-bg {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-/* Один полупрозрачный фон на всю строку (а не под каждой строкой текста):
- * приглушает яркость статус-бара целиком — силуэт фрагментов остаётся
- * узнаваемым, а светлый текст читается без отдельных «чипов». Приглушение
- * не трогает отрисовку (statusbar.ts), это чистый CSS-слой. */
-.pair-list .pair-open::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  background: rgba(0, 0, 0, 0.7);
-  transition: background 0.15s ease;
-}
-
-.pair-list .pair-open:hover::before {
-  background: rgba(0, 0, 0, 0.5);
-}
-
-.pair-list .pair-open .pair-label,
-.pair-list .pair-open .pair-meta {
-  position: relative;
-  z-index: 2;
-}
-
-.pair-list .pair-open .pair-label {
-  display: inline-block;
-  margin: 10px 12px 2px;
-  padding: 2px 8px;
-  font-weight: 600;
-}
-
-.pair-list .pair-open .pair-meta {
-  display: block;
-  margin: 0 12px 8px;
-  padding: 1px 8px;
-  font-size: 0.85em;
-  color: #d8d8e8;
-}
-
-.pair-list .pair-open .pair-warn {
-  position: relative;
-  z-index: 2;
-  display: block;
-  margin: 0 12px 8px;
-  padding: 1px 8px;
-  font-size: 0.8em;
-  color: #ffcf7a;
-}
-
-/* Квадратные кнопки действий задачи: «изменить» и «удалить» рядом. */
-.pair-list .pair-actions {
-  display: flex;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-.pair-list .pair-actions button,
-.pair-list .pair-actions a.pair-edit-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 42px;
-  height: 42px;
-  text-align: center;
-  background: #3a3a52;
-}
-
-/* Ссылки-кнопки: убрать подчёркивание, цвет как у кнопок. */
-.pair-list .pair-actions a.pair-edit-btn,
-.pair-edit a.role-action {
-  text-decoration: none;
-  color: #e0e0e0;
-}
-
-/* label.add-btn (Восстановить из бэкапа…): ведёт себя как кнопка. */
-label.add-btn {
-  display: inline-flex;
-  align-items: center;
-}
-
-.pair-list .pair-actions .pair-edit-btn:hover,
-.pair-list .pair-actions .pair-edit-btn:focus {
-  background: #33507a;
-  border-color: #4a6a9a;
-}
-
-.pair-list .pair-delete:hover {
-  background: #6a2a2a;
-  border-color: #8a3a3a;
-}
-
-/* Панель inline-редактирования задачи в списке. */
-.pair-list .pair-edit {
-  margin-top: 6px;
-  padding: 10px 12px;
-  background: #22223a;
-  border: 1px solid #3a3a52;
-  border-radius: 6px;
-}
-
-.pair-edit-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.pair-edit-row:last-child {
-  margin-bottom: 0;
-}
-
-.pair-edit .pair-edit-label {
-  flex: 0 0 auto;
-  color: #9a9ab0;
-  font-size: 0.85em;
-}
-
-.pair-edit input[type="text"] {
-  flex: 1;
-  padding: 4px 8px;
-  border: 1px solid #444;
-  border-radius: 4px;
-  background: #1e1e2e;
-  color: #e0e0e0;
-}
-
-/* Выбор проекта в форме задачи: на всю строку, как input выше. */
-.pair-edit .pair-edit-select {
-  flex: 1;
-  min-width: 120px;
-  padding: 4px 8px;
-}
-
-.pair-edit .role-field {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-  flex-wrap: wrap;
-}
-
-.pair-edit .role-field b {
-  width: 90px;
-  color: #c9c9dd;
-}
-
-.pair-edit .role-field .role-name {
-  flex: 1;
-  min-width: 80px;
-  color: #e0e0e0;
-  font-size: 0.9em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pair-edit .role-field.unassigned {
-  border-left: 3px solid #8a6d3b;
-  padding-left: 8px;
-}
-
-.pair-edit .role-action {
-  flex: 0 0 auto;
-  display: inline-block;
-  padding: 3px 10px;
-  border: 1px solid #444;
-  border-radius: 4px;
-  background: #3a3a52;
-  color: #e0e0e0;
-  cursor: pointer;
-  font: inherit;
-  font-size: 0.85em;
-  text-align: center;
-}
-
-.pair-edit .role-action:hover {
-  background: #4a4a66;
-}
-
-.pair-edit .role-action:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.pair-edit .pair-edit-btn-text {
-  padding: 4px 12px;
-  border: 1px solid #444;
-  border-radius: 4px;
-  background: #3a3a52;
-  color: #e0e0e0;
-  cursor: pointer;
-}
-
-.pair-edit .pair-edit-btn-text:hover {
-  background: #4a4a66;
-}
-
-.pair-edit .pair-edit-btn-text:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.pair-edit-progress {
-  height: 8px;
-  margin: 6px 0;
-  border-radius: 4px;
-  background: #1e1e2e;
-  overflow: hidden;
-}
-
-.pair-edit-progress-bar {
-  height: 100%;
-  background: #2e8b57;
-  transition: width 0.15s linear;
-}
-
-.pair-edit-error {
-  margin: 6px 0;
-  color: #ff8080;
-  font-size: 0.9em;
-}
-
-.pair-edit-verifying {
-  margin: 6px 0;
-  color: #d8d8e8;
-  font-size: 0.9em;
-}
-
-.pair-list li.empty {
-  display: block;
-  color: #6a6a80;
-  padding: 12px;
-}
-
-.upload label {
-  display: block;
-  margin-bottom: 12px;
-  color: #b0b0c0;
-}
-
-.upload input[type="file"],
-.upload input[type="text"] {
-  display: block;
-  width: 100%;
-  margin-top: 4px;
-  padding: 8px;
-  box-sizing: border-box;
-  border: 1px solid #444;
-  border-radius: 6px;
-  background: #1e1e2e;
-  color: #e0e0e0;
-}
-
-.upload-progress {
-  height: 8px;
-  margin: 8px 0;
-  border-radius: 4px;
-  background: #1e1e2e;
-  overflow: hidden;
-}
-
-.upload-progress-bar {
-  height: 100%;
-  background: #2e8b57;
-  transition: width 0.15s linear;
-}
-
-.upload-error {
-  margin: 8px 0;
-  color: #ff8080;
-}
-
-.upload button[type="submit"] {
-  padding: 8px 16px;
-  border: none;
-  border-radius: 6px;
-  background: #2e8b57;
-  color: #fff;
-  cursor: pointer;
-}
-
-.upload button[type="submit"]:disabled {
-  opacity: 0.6;
+  color: var(--muted);
 }
 
 .back {
   display: block;
   margin: 0 auto;
   padding: 6px 14px;
-  border: 1px solid #444;
-  border-radius: 6px;
-  background: #3a3a52;
-  color: #e0e0e0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
   cursor: pointer;
 }
 
@@ -718,7 +861,8 @@ label.add-btn {
   bottom: 12px;
   max-width: 320px;
   padding: 12px;
-  background: #2a2a3e;
+  background: var(--panel);
+  border: 1px solid var(--edge);
   border-radius: 8px;
 }
 
@@ -745,7 +889,7 @@ label.add-btn {
 }
 
 .export-list a {
-  color: #7fb2ff;
+  color: var(--accent);
 }
 
 /* Кнопка «?» справки в панели редактора. */
@@ -772,10 +916,10 @@ label.add-btn {
   max-height: 85vh;
   overflow-y: auto;
   padding: 20px 24px;
-  background: #2a2a3e;
-  border: 1px solid #444;
-  border-radius: 10px;
-  color: #e0e0e0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  color: var(--text);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
 }
 
@@ -793,16 +937,16 @@ label.add-btn {
 
 .help-close {
   padding: 2px 10px;
-  border: 1px solid #444;
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: #3a3a52;
-  color: #e0e0e0;
+  background: var(--btn);
+  color: var(--text);
   font-size: 1.05em;
   cursor: pointer;
 }
 
 .help-close:hover {
-  background: #4a4a66;
+  background: var(--btn-hover);
 }
 
 .help-section {
@@ -812,8 +956,8 @@ label.add-btn {
 .help-section h3 {
   margin: 0 0 8px;
   padding-bottom: 4px;
-  border-bottom: 1px solid #3a3a52;
-  color: #7fb2ff;
+  border-bottom: 1px solid var(--edge);
+  color: var(--accent);
   font-size: 1em;
 }
 
@@ -823,7 +967,7 @@ label.add-btn {
 }
 
 .help-section b {
-  color: #e0e0e0;
+  color: var(--text);
 }
 
 .help-modes {
@@ -851,7 +995,7 @@ label.add-btn {
 }
 
 .help-table th {
-  color: #9a9ab0;
+  color: var(--muted);
   font-weight: 600;
 }
 
@@ -861,8 +1005,8 @@ label.add-btn {
   border: 1px solid #555;
   border-bottom-width: 2px;
   border-radius: 4px;
-  background: #1e1e2e;
-  color: #e0e0e0;
+  background: var(--bg);
+  color: var(--text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;
   line-height: 1.4;
@@ -887,4 +1031,50 @@ label.add-btn {
   width: 14px;
   height: 14px;
   border-radius: 3px;
+}
+
+/* ─── Адаптив ─────────────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .pair-list {
+    margin: 12px auto 32px;
+    padding: 0 8px;
+  }
+
+  .pair-list-head,
+  .project-panel,
+  .upload {
+    padding: 12px 14px;
+  }
+
+  /* Инструменты — в столбик: каждый контрол во всю ширину, переносов нет. */
+  .toolbar-row .search,
+  .toolbar-row .field,
+  .toolbar-row .field select {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .title-actions {
+    width: 100%;
+  }
+
+  .title-actions .btn {
+    flex: 1 1 0;
+  }
+
+  .project-create .btn {
+    flex: 1 1 100%;
+  }
+
+  .pair-list .pair-actions .pair-edit-btn,
+  .pair-list .pair-actions .pair-delete {
+    width: 38px;
+    height: 38px;
+  }
+
+  .export-list {
+    left: 12px;
+    max-width: none;
+  }
 }

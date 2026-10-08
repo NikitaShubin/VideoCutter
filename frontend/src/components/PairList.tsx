@@ -158,16 +158,22 @@ export function PairList({
     }
   };
 
+  const [query, setQuery] = useState("");
+
   const listed =
     visible === null
       ? null
-      : visible.filter((p) =>
-          projFilter === PROJ_ALL
-            ? true
-            : projFilter === PROJ_NONE
-              ? p.project_id == null
-              : p.project_id === projFilter,
-        );
+      : visible.filter((p) => {
+          const byProject =
+            projFilter === PROJ_ALL
+              ? true
+              : projFilter === PROJ_NONE
+                ? p.project_id == null
+                : p.project_id === projFilter;
+          if (!byProject) return false;
+          const q = query.trim().toLowerCase();
+          return !q || p.id.toLowerCase().includes(q);
+        });
 
   // Пока есть индексирующиеся задачи или бегущий экспорт — опрашиваем
   // список (фон сервера). Опрос прекращается, когда всё тихо.
@@ -678,58 +684,78 @@ export function PairList({
   return (
     <div className="pair-list">
       <div className="pair-list-head">
-        <h2>Задачи</h2>
-        <label className="sort-label">
-          Сортировка{" "}
-          <select
-            value={sortMode}
-            onChange={(e) => {
-              const v = e.target.value as SortMode;
-              setSortMode(v);
-              try {
-                window.localStorage.setItem(SORT_KEY, v);
-              } catch {
-                /* ignore */
-              }
-            }}
-          >
-            <option value="updated">Недавние</option>
-            <option value="created">Новые</option>
-            <option value="opened">Открытые</option>
-            <option value="name">По имени</option>
-          </select>
-        </label>
-        <label className="sort-label">
-          Проект{" "}
-          <select
-            value={projFilter}
-            onChange={(e) => pickProjectFilter(e.target.value)}
-          >
-            <option value={PROJ_ALL}>Все проекты</option>
-            <option value={PROJ_NONE}>Без проекта</option>
-            {(projects ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          className="add-btn"
-          onClick={() => setShowProjects((v) => !v)}
-        >
-          {showProjects ? "Скрыть проекты" : "Проекты"}
-        </button>
-        <button
-          className="add-btn"
-          onClick={() => (showForm ? reset() : setShowForm(true))}
-        >
-          {showForm ? "Отмена" : "＋ Добавить видео"}
-        </button>
+        <div className="title-row">
+          <h2>
+            Задачи{" "}
+            <span className="list-count">
+              {listed !== null ? listed.length : "…"}
+            </span>
+          </h2>
+          <div className="title-actions">
+            <button
+              className="btn"
+              onClick={() => setShowProjects((v) => !v)}
+            >
+              {showProjects ? "Скрыть проекты" : "Проекты"}
+            </button>
+            <button
+              className="btn primary"
+              onClick={() => (showForm ? reset() : setShowForm(true))}
+            >
+              {showForm ? "Отмена" : "＋ Добавить видео"}
+            </button>
+          </div>
+        </div>
+        <div className="toolbar-row">
+          <input
+            className="search"
+            type="search"
+            value={query}
+            placeholder="Поиск по имени задачи…"
+            aria-label="Поиск по имени задачи"
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <label className="field">
+            Сортировка{" "}
+            <select
+              value={sortMode}
+              onChange={(e) => {
+                const v = e.target.value as SortMode;
+                setSortMode(v);
+                try {
+                  window.localStorage.setItem(SORT_KEY, v);
+                } catch {
+                  /* ignore */
+                }
+              }}
+            >
+              <option value="updated">Недавние</option>
+              <option value="created">Новые</option>
+              <option value="opened">Открытые</option>
+              <option value="name">По имени</option>
+            </select>
+          </label>
+          <label className="field">
+            Проект{" "}
+            <select
+              value={projFilter}
+              onChange={(e) => pickProjectFilter(e.target.value)}
+            >
+              <option value={PROJ_ALL}>Все проекты</option>
+              <option value={PROJ_NONE}>Без проекта</option>
+              {(projects ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
 
       {showProjects && (
         <div className="project-panel">
+          <h3>Проекты</h3>
           <div className="project-create">
             <input
               type="text"
@@ -741,14 +767,14 @@ export function PairList({
               }}
             />
             <button
-              className="add-btn"
+              className="btn"
               onClick={() => void addProject()}
               disabled={!newProjectName.trim()}
             >
               Создать проект
             </button>
             <label
-              className="add-btn"
+              className="btn"
               title="Восстановить задачу/проект из zip-бэкапа (совпадающие имена получат суффикс _1)"
             >
               Восстановить из бэкапа…
@@ -825,6 +851,7 @@ export function PairList({
 
       {showForm && (
         <form className="upload" onSubmit={submit}>
+          <h3>Новое видео</h3>
           <label className="upload-role">
             <span>Источник (из него вырезаются фрагменты)</span>
             <input
@@ -948,9 +975,11 @@ export function PairList({
           listed.length === 0 &&
           uploads.length === 0 && (
             <li className="empty">
-              {visible !== null && visible.length > 0
-                ? "В выбранном проекте нет задач."
-                : "Пока нет задач."}
+              {query.trim()
+                ? `По запросу «${query.trim()}» ничего не найдено.`
+                : visible !== null && visible.length > 0
+                  ? "В выбранном проекте нет задач."
+                  : "Пока нет задач."}
             </li>
           )}
         {shownPairs.map((p) =>
