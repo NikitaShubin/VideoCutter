@@ -178,11 +178,43 @@ select option {
   font-size: 1.25em;
 }
 
-.list-count {
-  font-size: 0.65em;
-  font-weight: 400;
+/* Вкладки «Задачи / Проекты» (сегмент-контрол): активная подсвечена,
+ * счётчики — приглушены. Ряд переносится, вкладки сжимаемы. */
+.tabs {
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+  margin-right: auto;
+  padding: 3px;
+  background: var(--inset);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+}
+
+.tab {
+  border: none;
+  background: transparent;
   color: var(--muted);
-  vertical-align: middle;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.95em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--btn);
+  color: var(--text);
+}
+
+.tab-count {
+  font-size: 0.8em;
+  opacity: 0.75;
 }
 
 .title-actions {
@@ -266,6 +298,27 @@ select option {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+}
+
+/* Имя проекта — кнопка drill-down на вкладку задач с фильтром. */
+.project-panel .project-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 4px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-panel .project-open:hover .project-name {
+  color: var(--accent);
 }
 
 .project-panel .project-meta {
@@ -1060,6 +1113,16 @@ select option {
   }
 
   .title-actions .btn {
+    flex: 1 1 0;
+  }
+
+  /* Вкладки — во всю ширину шапки. */
+  .tabs {
+    flex: 1 1 100%;
+    margin-right: 0;
+  }
+
+  .tab {
     flex: 1 1 0;
   }
 

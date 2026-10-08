@@ -45,7 +45,10 @@ function fileStem(filename: string): string {
 
 type SortMode = "updated" | "created" | "opened" | "name";
 
+type Tab = "tasks" | "projects";
+
 const SORT_KEY = "vc-sort";
+const TAB_KEY = "vc-tab";
 
 /** Режим фильтра по проекту (localStorage): все / без проекта / id проекта. */
 const PROJ_KEY = "vc-project";
@@ -68,6 +71,16 @@ function readSortMode(): SortMode {
     /* ignore */
   }
   return "updated";
+}
+
+function readTab(): Tab {
+  try {
+    return window.localStorage.getItem(TAB_KEY) === "projects"
+      ? "projects"
+      : "tasks";
+  } catch {
+    return "tasks";
+  }
 }
 
 function timeKey(s: string | null): number {
@@ -122,10 +135,21 @@ export function PairList({
   const [sortMode, setSortMode] = useState<SortMode>(readSortMode);
   const visible = pairs === null ? null : sortPairs(pairs, sortMode);
 
-  // ─── Проекты: реестр, фильтр списка, CRUD-панель ─────────────────────────
+  // ─── Вкладки (как в CVAT): задачи и проекты — отдельные экраны ────────
+  const [tab, setTab] = useState<Tab>(readTab);
+
+  const pickTab = (t: Tab) => {
+    setTab(t);
+    try {
+      window.localStorage.setItem(TAB_KEY, t);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // ─── Проекты: реестр, фильтр списка, CRUD ────────────────────────────────
   const [projFilter, setProjFilter] = useState<string>(readProjectFilter);
   const [projects, setProjects] = useState<Project[] | null>(null);
-  const [showProjects, setShowProjects] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [projError, setProjError] = useState("");
   // Восстановление из бэкапа: XHR-заливка с прогрессом (default rename —
@@ -156,6 +180,17 @@ export function PairList({
     } catch {
       /* ignore */
     }
+  };
+
+  // Открыть проект: вкладка задач, отфильтрованная по нему (drill-down).
+  const openProject = (id: string) => {
+    pickProjectFilter(id);
+    pickTab("tasks");
+  };
+
+  const projectName = (pid: string | null): string | null => {
+    if (pid == null) return null;
+    return (projects ?? []).find((p) => p.id === pid)?.name ?? pid;
   };
 
   const [query, setQuery] = useState("");
@@ -685,77 +720,90 @@ export function PairList({
     <div className="pair-list">
       <div className="pair-list-head">
         <div className="title-row">
-          <h2>
-            Задачи{" "}
-            <span className="list-count">
-              {listed !== null ? listed.length : "…"}
-            </span>
-          </h2>
-          <div className="title-actions">
+          <div className="tabs" role="tablist" aria-label="Разделы">
             <button
-              className="btn"
-              onClick={() => setShowProjects((v) => !v)}
+              role="tab"
+              aria-selected={tab === "tasks"}
+              className={tab === "tasks" ? "tab active" : "tab"}
+              onClick={() => pickTab("tasks")}
             >
-              {showProjects ? "Скрыть проекты" : "Проекты"}
+              Задачи{" "}
+              <span className="tab-count">
+                {listed !== null ? listed.length : "…"}
+              </span>
             </button>
             <button
-              className="btn primary"
-              onClick={() => (showForm ? reset() : setShowForm(true))}
+              role="tab"
+              aria-selected={tab === "projects"}
+              className={tab === "projects" ? "tab active" : "tab"}
+              onClick={() => pickTab("projects")}
             >
-              {showForm ? "Отмена" : "＋ Добавить видео"}
+              Проекты{" "}
+              <span className="tab-count">{projects !== null ? projects.length : "…"}</span>
             </button>
           </div>
+          <div className="title-actions">
+            {tab === "tasks" && (
+              <button
+                className="btn primary"
+                onClick={() => (showForm ? reset() : setShowForm(true))}
+              >
+                {showForm ? "Отмена" : "＋ Добавить видео"}
+              </button>
+            )}
+          </div>
         </div>
-        <div className="toolbar-row">
-          <input
-            className="search"
-            type="search"
-            value={query}
-            placeholder="Поиск по имени задачи…"
-            aria-label="Поиск по имени задачи"
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <label className="field">
-            Сортировка{" "}
-            <select
-              value={sortMode}
-              onChange={(e) => {
-                const v = e.target.value as SortMode;
-                setSortMode(v);
-                try {
-                  window.localStorage.setItem(SORT_KEY, v);
-                } catch {
-                  /* ignore */
-                }
-              }}
-            >
-              <option value="updated">Недавние</option>
-              <option value="created">Новые</option>
-              <option value="opened">Открытые</option>
-              <option value="name">По имени</option>
-            </select>
-          </label>
-          <label className="field">
-            Проект{" "}
-            <select
-              value={projFilter}
-              onChange={(e) => pickProjectFilter(e.target.value)}
-            >
-              <option value={PROJ_ALL}>Все проекты</option>
-              <option value={PROJ_NONE}>Без проекта</option>
-              {(projects ?? []).map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+        {tab === "tasks" && (
+          <div className="toolbar-row">
+            <input
+              className="search"
+              type="search"
+              value={query}
+              placeholder="Поиск по имени задачи…"
+              aria-label="Поиск по имени задачи"
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <label className="field">
+              Сортировка{" "}
+              <select
+                value={sortMode}
+                onChange={(e) => {
+                  const v = e.target.value as SortMode;
+                  setSortMode(v);
+                  try {
+                    window.localStorage.setItem(SORT_KEY, v);
+                  } catch {
+                    /* ignore */
+                  }
+                }}
+              >
+                <option value="updated">Недавние</option>
+                <option value="created">Новые</option>
+                <option value="opened">Открытые</option>
+                <option value="name">По имени</option>
+              </select>
+            </label>
+            <label className="field">
+              Проект{" "}
+              <select
+                value={projFilter}
+                onChange={(e) => pickProjectFilter(e.target.value)}
+              >
+                <option value={PROJ_ALL}>Все проекты</option>
+                <option value={PROJ_NONE}>Без проекта</option>
+                {(projects ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
       </div>
 
-      {showProjects && (
+      {tab === "projects" && (
         <div className="project-panel">
-          <h3>Проекты</h3>
           <div className="project-create">
             <input
               type="text"
@@ -802,10 +850,16 @@ export function PairList({
           <ul className="project-rows">
             {(projects ?? []).map((p) => (
               <li key={p.id}>
-                <span className="project-name">{p.name}</span>
-                <span className="project-meta">
-                  {p.task_count} задач
-                </span>
+                <button
+                  className="project-open"
+                  title="Показать задачи проекта"
+                  onClick={() => openProject(p.id)}
+                >
+                  <span className="project-name">{p.name}</span>
+                  <span className="project-meta">
+                    {p.task_count} задач →
+                  </span>
+                </button>
                 <div className="pair-actions">
                   <a
                     className="pair-edit-btn"
@@ -849,9 +903,11 @@ export function PairList({
         </div>
       )}
 
-      {showForm && (
-        <form className="upload" onSubmit={submit}>
-          <h3>Новое видео</h3>
+      {tab === "tasks" && (
+        <>
+          {showForm && (
+            <form className="upload" onSubmit={submit}>
+              <h3>Новое видео</h3>
           <label className="upload-role">
             <span>Источник (из него вырезаются фрагменты)</span>
             <input
@@ -1028,6 +1084,8 @@ export function PairList({
                   {p.preview_name && p.preview_name !== p.source_name
                     ? ` → ${p.preview_name}`
                     : ""}
+                  {projectName(p.project_id) !== null &&
+                    ` · ⧉ ${projectName(p.project_id)}`}
                   {p.indexing
                     ? (p.indexing_progress != null
                       ? ` · Индексируется… ${Math.round(p.indexing_progress * 100)}%`
@@ -1086,6 +1144,8 @@ export function PairList({
           )
         )}
       </ul>
+        </>
+      )}
     </div>
   );
 }
