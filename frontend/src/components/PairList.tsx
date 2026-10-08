@@ -1143,7 +1143,6 @@ export function PairList({
                 />
                 <span className="pair-label">{p.name || p.id}</span>
                 <span className="pair-meta">
-                  {p.name && p.name !== p.id ? `${p.id} · ` : ""}
                   {p.source_name}
                   {p.preview_name && p.preview_name !== p.source_name
                     ? ` → ${p.preview_name}`
@@ -1155,6 +1154,7 @@ export function PairList({
                       ? ` · Индексируется… ${Math.round(p.indexing_progress * 100)}%`
                       : " · ⏳ Индексируется…")
                     : ` · ${p.total_frames} кадров · ${p.width}×${p.height}`}
+                  {p.name && p.name !== p.id ? ` · [${p.id}]` : ""}
                 </span>
                 {p.pair_warning && (
                   <span className="pair-warn" title={p.pair_warning}>
