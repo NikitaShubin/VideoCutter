@@ -22,7 +22,6 @@ import json
 import posixpath
 import re
 import zipfile
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 #: Идентификатор формата (значение поля ``format`` манифеста).
@@ -63,15 +62,17 @@ class ArchiveError(ValueError):
     """Архив отвергнут на входе: текст — готовая причина для HTTP-ответа."""
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 # ─── Манифест ────────────────────────────────────────────────────────────────
 
 def make_manifest(kind: str, *, resource: Optional[str] = None,
                   **extra: Any) -> Dict[str, Any]:
-    """Собирает манифест архива. Служебные поля перетереть нельзя."""
+    """Собирает манифест архива. Служебные поля перетереть нельзя.
+
+    Момент создания архива намеренно НЕ пишется: бэкап — слепок данных,
+    а не лог (в CVAT task.json тоже только данные, без таймингов). Время
+    последнего изменения сущности и так есть в её паспорте — и именно по
+    нему бэкап считается «свежим» на стороне клиента.
+    """
     if kind not in KINDS:
         raise ValueError(f"Неизвестный kind архива: {kind!r}")
     manifest: Dict[str, Any] = dict(extra)
@@ -80,7 +81,6 @@ def make_manifest(kind: str, *, resource: Optional[str] = None,
         "format_version": FORMAT_VERSION,
         "kind": kind,
         "resource": resource,
-        "created_at": now_iso(),
     })
     return manifest
 

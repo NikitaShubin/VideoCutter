@@ -132,7 +132,8 @@ class BackupFormatTests(SimpleTestCase):
         self.assertEqual(manifest["kind"], fmt.KIND_BACKUP)
         self.assertEqual(manifest["resource"], fmt.RESOURCE_TASK)
         self.assertEqual(manifest["task_id"], "t1")
-        self.assertTrue(manifest["created_at"])
+        # Момент сборки в манифесте не хранится (бэкап — слепок данных).
+        self.assertNotIn("created_at", manifest)
 
     def test_make_manifest_rejects_unknown_kind(self):
         with self.assertRaises(ValueError):
@@ -502,25 +503,18 @@ class TaskBackupGetTests(BackupArchiveMixin, WorkspaceApiTestBase):
 
 # ─── POST: импорт задачи ─────────────────────────────────────────────────────
 
-def _canonical(data: bytes) -> bytes:
-    """Архив с вырезанным created_at — для побайтового сравнения."""
-    with zipfile.ZipFile(io.BytesIO(data)) as src:
-        members = {n: src.read(n) for n in src.namelist()}
-    manifest = json.loads(members[fmt.MANIFEST_NAME].decode("utf-8"))
-    manifest.pop("created_at", None)
-    members[fmt.MANIFEST_NAME] = json.dumps(
-        manifest, ensure_ascii=False, indent=2).encode("utf-8")
-    return build_zip(members)
-
-
 class CanonicalExportTests(BackupArchiveMixin, WorkspaceApiTestBase):
-    """Один и тот же контент — одинаковый бэкап, независимо от папки/id."""
+    """Один и тот же контент — одинаковые данные в архиве, где бы ни лежали.
+
+    Сравниваем распакованные члены и их пути: zip-заголовки (mtime файлов на
+    диске) по условию могут отличаться — это не данные.
+    """
 
     def setUp(self):
         super().setUp()
         frame_provider.get_metadata(self.video)
         # Второй слепок того же содержимого: другая папка (другой id),
-        # то же отображаемое имя — бэкак обязан совпасть побайтово.
+        # то же отображаемое имя — содержимое архива обязано совпасть.
         self.twin_dir = os.path.join(self._tmpdir, "twin")
         os.makedirs(self.twin_dir)
         shutil.copy2(self.video, os.path.join(self.twin_dir, "visualization.mp4"))
@@ -537,14 +531,58 @@ class CanonicalExportTests(BackupArchiveMixin, WorkspaceApiTestBase):
     def _backup(self, ws_id: str) -> bytes:
         return self.fetch_zip_url(f"/api/v1/workspaces/{ws_id}/backup")
 
-    def test_identical_content_yields_identical_archive(self):
-        a = _canonical(self._backup(self.ws_id))
-        b = _canonical(self._backup("twin"))
-        with zipfile.ZipFile(io.BytesIO(a)) as za, \
-                zipfile.ZipFile(io.BytesIO(b)) as zb:
-            self.assertEqual(za.namelist(), zb.namelist())
-            for name in za.namelist():
-                self.assertEqual(za.read(name), zb.read(name), name)
+    def _members(self, data: bytes):
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            return {n: zf.read(n) for n in zf.namelist()}
+
+    def _comparable(self, members):
+        """Паспорт без полей, которые достраивает система сама.
+
+        ``created_at`` у задачи ставит валидация при создании/импорте —
+        у оригинала, положенного руками, его может не быть. Это единственное
+        законное расхождение слепков; всё остальное — данные.
+        """
+        out = dict(members)
+        if task_meta.TASK_FILE in out:
+            meta = json.loads(out[task_meta.TASK_FILE].decode("utf-8"))
+            meta.pop("created_at", None)
+            out[task_meta.TASK_FILE] = json.dumps(
+                meta, ensure_ascii=False, indent=2).encode("utf-8")
+        return out
+
+    def test_identical_content_yields_identical_members(self):
+        a = self._members(self._backup(self.ws_id))
+        b = self._members(self._backup("twin"))
+        self.assertEqual(sorted(a), sorted(b))
+        for name in a:
+            self.assertEqual(a[name], b[name], name)
+
+    def test_copy_backup_matches_original(self):
+        """Restore копии и её бэкап ≡ бэкап оригинала (данные и пути)."""
+        # Готовность ждём через лёгкий статус: GET detail штампует
+        # last_opened_at и сам же сломал бы сравнение паспортов.
+        self._wait_indexing_done(self.ws_id)
+        original = self._comparable(self._members(self._backup(self.ws_id)))
+        resp = self.import_archive(self._backup(self.ws_id))
+        self.assertEqual(resp.status_code, 202, resp.content)
+        copy_id = resp.json()["id"]
+        self.assertNotEqual(copy_id, self.ws_id)
+        self._wait_indexing_done(copy_id)
+        copy = self._comparable(self._members(self._backup(copy_id)))
+        self.assertEqual(sorted(copy), sorted(original))
+        for name, data in original.items():
+            self.assertEqual(copy[name], data, name)
+
+    def _wait_indexing_done(self, ws_id: str) -> None:
+        deadline = time.time() + 30
+        while True:
+            st = {w["id"]: w for w in self.client.get(
+                self.ws_list_url + "?light=1").json()}
+            if ws_id in st and not st[ws_id]["indexing"]:
+                return
+            if time.time() > deadline:
+                self.fail(f"индексация {ws_id} не завершилась")
+            time.sleep(0.1)
 
     def test_manifest_has_no_instance_ids(self):
         with zipfile.ZipFile(io.BytesIO(self._backup("twin"))) as zf:
@@ -615,7 +653,7 @@ class TaskImportTests(BackupArchiveMixin, ProjectTestBase):
         self.assertTrue(os.path.isdir(os.path.join(self._tmpdir, "legacy-task")))
 
     def test_import_rename_preserves_archived_display_name(self):
-        """Явное имя из архива задаёт и папку, и показ (без суффикса)."""
+        """Имя из архива задаёт и папку, и показ (суффикс — только конфликт)."""
         self.client.patch(
             f"/api/v1/workspaces/{self.ws_id}/",
             data=json.dumps({"name": "Выезд"}),
@@ -624,9 +662,10 @@ class TaskImportTests(BackupArchiveMixin, ProjectTestBase):
             f"/api/v1/workspaces/{self.ws_id}/backup")
         resp = self.import_archive(archive)
         self.assertEqual(resp.status_code, 202, resp.content)
-        # Папка по имени из архива (не по id оригинала и не с суффиксом).
+        # Имя папки свободно — суффикс не нужен; паспорт сохраняет имя.
         self.assertEqual(resp.json()["id"], "Выезд")
-        meta = _wait_validation(self, "Выезд", self._tmpdir + "/Выезд")
+        meta = _wait_validation(self, "Выезд",
+                                os.path.join(self._tmpdir, "Выезд"))
         self.assertEqual(meta["name"], "Выезд")
 
     def test_import_error_conflict_409(self):

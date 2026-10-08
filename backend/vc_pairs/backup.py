@@ -190,7 +190,10 @@ def _write_task_members(zf: zipfile.ZipFile, ws_path: str,
                         prefix: str = "") -> None:
     """Кладёт в архив task.json (без членства), fragments.tsv и видео.
 
-    Паспорт пишем сами: на диске он может нести project_id экземпляра.
+    Паспорт пишем сами: (а) на диске он может нести project_id экземпляра;
+    (б) имя нормализуем — пустое заменяем именем папки, чтобы слепок задачи
+    и слепок её копии давали одинаковое содержимое (cvat-подход: в архиве
+    данные, а не локальные id).
     """
     for name in (task_meta.TASK_FILE, ws_module.FRAGMENTS_FILE):
         if not os.path.isfile(os.path.join(ws_path, name)):
@@ -198,6 +201,8 @@ def _write_task_members(zf: zipfile.ZipFile, ws_path: str,
         if name == task_meta.TASK_FILE:
             meta = task_meta.load(ws_path)
             meta.pop("project_id", None)
+            meta["name"] = _task_display(
+                ws_path, os.path.basename(ws_path))
             zf.writestr(prefix + name,
                         json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
                         compress_type=zipfile.ZIP_DEFLATED)
@@ -484,11 +489,9 @@ def _stage_task(zf: zipfile.ZipFile, names: List[str],
             or project_meta.resolve_pid(manifest.get("project")) \
             or project_meta.resolve_pid(meta.get("project_id"))
     meta["project_id"] = pid
-    if forced_name is None and target != base and not meta.get("name"):
-        # Конфликт имён: папка получила суффикс, а показываем исходное имя
-        # (дубли отображаемых имён разрешены — как в CVAT и как у проектов,
-        # где у копии id новый, а name из архива).
-        meta["name"] = base
+    # Имя паспорта НЕ штампуем суффиксом: копия наследует нормализованное
+    # имя из архива, и слепки оригинала и копии совпадают по содержимому.
+    # Показ при конфликте опирается на имя папки (id), что и видно в UI.
 
     staging = _staging_dir()
     members = ([passport] if passport else []) \
@@ -664,9 +667,6 @@ def _import_project(zf: zipfile.ZipFile, names: List[str],
         for entry, target, base_name, prefix, videos, passport, tsv in plan:
             meta = _archived_task_meta(zf, passport)
             meta["project_id"] = pid
-            if target != base_name and not meta.get("name"):
-                # См. _stage_task: суффикс — папке, исходное имя — показу.
-                meta["name"] = base_name
             staging = _staging_dir()
             staged.append((target, staging))
             members = ([passport] if passport else []) \
