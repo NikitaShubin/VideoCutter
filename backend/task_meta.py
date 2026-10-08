@@ -27,6 +27,10 @@ SUBSETS = ("train", "val", "test", None)
 def defaults() -> Dict[str, Any]:
     """Пустые метаданные (эквивалент отсутствующего task.json)."""
     return {
+        # Отображаемое имя (как task.name в CVAT): свободный текст, дубли
+        # разрешены; id задачи — имя папки (уникально, неизменяемо через
+        # это поле). Пусто — UI показывает id.
+        "name": "",
         "owner": None,
         "assignees": [],
         "status": "new",
@@ -76,6 +80,11 @@ def validate(meta: Dict[str, Any]) -> Dict[str, Any]:
     base["assignees"] = _as_str_list(base.get("assignees"))
     if base.get("notes") is None:
         base["notes"] = ""
+    name = base.get("name")
+    if name is None:
+        base["name"] = ""
+    elif not isinstance(name, str):
+        raise ValueError(f"Недопустимое name: {name!r}")
     pid = base.get("project_id")
     if pid is not None:
         if not isinstance(pid, str):

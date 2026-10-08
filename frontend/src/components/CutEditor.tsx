@@ -938,7 +938,7 @@ export function CutEditor({ pairId, onBack }: Props) {
         <div className="editor-toolbar">
           <button onClick={handleBack}>← Назад</button>
           <span className="pair-name">
-            Источник: {pair.source_name}
+            {pair.name || pairId}: источник {pair.source_name}
             {pair.preview_name !== pair.source_name && (
               <span> · Превью: {pair.preview_name}</span>
             )}

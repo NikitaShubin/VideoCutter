@@ -16,6 +16,7 @@ import {
   removeWorkspaceVideo,
   renameProject,
   renameWorkspace,
+  setTaskName,
   setWorkspaceVideo,
   swapVideos,
   taskBackupUrl,
@@ -214,7 +215,9 @@ export function PairList({
                 : p.project_id === projFilter;
           if (!byProject) return false;
           const q = query.trim().toLowerCase();
-          return !q || p.id.toLowerCase().includes(q);
+          if (!q) return true;
+          return p.id.toLowerCase().includes(q) ||
+            (p.name || "").toLowerCase().includes(q);
         });
 
   // Пока есть индексирующиеся задачи или бегущий экспорт — опрашиваем
@@ -410,7 +413,7 @@ export function PairList({
 
   const openEdit = (p: VideoPair) => {
     setEditingId(p.id);
-    setEditName(p.id);
+    setEditName(p.name || p.id);
     setEditProject(p.project_id ?? "");
     setEditBusy(false);
     setEditProgress(null);
@@ -431,17 +434,18 @@ export function PairList({
     }
   };
 
-  const doRename = async (id: string) => {
+  // Отображаемое имя (как task.name в CVAT): дубли разрешены, папка не
+  // двигается — гонки путей нет, блокировки на индексацию не нужно.
+  const doRename = async (p: VideoPair) => {
     const trimmed = editName.trim();
     if (!trimmed) {
       setEditError("Имя не может быть пустым");
       return;
     }
-    if (trimmed === id) return;
+    if (trimmed === (p.name || p.id)) return;
     await withEditOp(async () => {
-      await renameWorkspace(id, trimmed);
+      await setTaskName(p.id, trimmed);
       onChanged();
-      setEditingId(trimmed);
       setEditName(trimmed);
     });
   };
@@ -540,11 +544,7 @@ export function PairList({
   // ─── Форма редактирования одной задачи ───────────────────────────────────
 
   const renderEdit = (p: VideoPair) => {
-    // Переименование во время индексации/валидации — гонка абсолютных
-    // путей (движок и фоновая проверка держат старый каталог): кнопка
-    // блокируется до готовности, как и открытие задачи.
-    const live = pairs?.find((x) => x.id === p.id);
-    const renameLocked = live?.indexing ?? p.indexing;
+    const current = p.name || p.id;
     return (
     <div className="pair-edit">
       <div className="pair-edit-row">
@@ -553,13 +553,13 @@ export function PairList({
           type="text"
           value={editName}
           onChange={(e) => setEditName(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") doRename(p.id); }}
+          onKeyDown={(e) => { if (e.key === "Enter") doRename(p); }}
         />
         <button
           className="pair-edit-btn-text"
-          onClick={() => doRename(p.id)}
-          disabled={editBusy || editName.trim() === p.id || renameLocked}
-          title={renameLocked ? "Дождитесь готовности задачи" : "Переименовать"}
+          onClick={() => doRename(p)}
+          disabled={editBusy || editName.trim() === current}
+          title="Отображаемое имя (дубли разрешены, папка не двигается)"
         >
           Переименовать
         </button>
@@ -1083,7 +1083,7 @@ export function PairList({
           p.broken ? (
             <li key={p.id} className="broken">
               <div className="pair-row">
-                <span className="pair-label">{p.id}</span>
+                <span className="pair-label">{p.name || p.id}</span>
                 <span className="pair-meta">
                   ⚠ {p.error || "Не удалось прочитать задачу"}
                 </span>
@@ -1119,8 +1119,9 @@ export function PairList({
                     frac: p.indexing_progress ?? 0,
                   } : undefined}
                 />
-                <span className="pair-label">{p.id}</span>
+                <span className="pair-label">{p.name || p.id}</span>
                 <span className="pair-meta">
+                  {p.name && p.name !== p.id ? `${p.id} · ` : ""}
                   {p.source_name}
                   {p.preview_name && p.preview_name !== p.source_name
                     ? ` → ${p.preview_name}`

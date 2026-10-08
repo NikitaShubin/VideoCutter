@@ -253,21 +253,50 @@ def _workspace_upload(request) -> JsonResponse:
 
 
 def _workspace_rename(request, name: str) -> JsonResponse:
-    """Переименовывает workspace (PATCH {"name": "новое"})."""
+    """PATCH: ``{"name": ...}`` — отображаемое имя (дубли разрешены, как
+    task.name в CVAT, папка не двигается); ``{"id": ...}`` — переезд папки
+    (id уникален, пути меняются — под работающим экспортом 409)."""
     try:
         payload = json.loads(request.body or "null")
     except json.JSONDecodeError:
         return JsonResponse({"error": "Некорректный JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse(
+            {"error": 'Ожидался объект {"name": ...} и/или {"id": ...}'},
+            status=400)
 
-    new_name = payload.get("name") if isinstance(payload, dict) else None
-    if isinstance(new_name, str) and \
-            new_name.strip() == project_meta.PROJECTS_DIRNAME:
+    ws = get_workspace(name)
+    if ws is None:
+        return _ws_404(name)
+
+    display = payload.get("name")
+    if display is not None:
+        if not isinstance(display, str):
+            return JsonResponse(
+                {"error": "Отображаемое имя — строка"}, status=400)
+        try:
+            meta = task_meta.load(ws.path)
+            meta["name"] = display
+            task_meta.save(ws.path, meta)
+        except ValueError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+        except OSError as e:
+            return _storage_error(e)
+
+    new_id = payload.get("id")
+    if new_id is None:
+        data = get_workspace_detail(name)
+        return JsonResponse(data if data is not None else {"id": name})
+    if not isinstance(new_id, str):
+        return JsonResponse(
+            {"error": "id задачи — строка"}, status=400)
+    if new_id.strip() == project_meta.PROJECTS_DIRNAME:
         return JsonResponse(
             {"error": "Имя зарезервировано под реестр проектов"}, status=400)
 
     from vc_fragments.views import EXPORTS, EXPORTS_LOCK
 
-    # Переименование под работающим ffmpeg убивает экспорт (пути захвачены
+    # Переезд под работающим ffmpeg убивает экспорт (пути захвачены
     # потоком): требуем дождаться завершения или отмены.
     with EXPORTS_LOCK:
         if EXPORTS.get(name, {}).get("state") == "running":
@@ -276,7 +305,7 @@ def _workspace_rename(request, name: str) -> JsonResponse:
                 status=409,
             )
     try:
-        renamed = ws_fs.rename_workspace(ws_module.WORKSPACE_ROOT, name, new_name)
+        renamed = ws_fs.rename_workspace(ws_module.WORKSPACE_ROOT, name, new_id)
     except ws_fs.WorkspaceExistsError as e:
         return JsonResponse({"error": str(e)}, status=409)
     except ws_fs.InvalidWorkspaceError as e:

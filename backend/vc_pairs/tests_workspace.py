@@ -8,6 +8,7 @@
 """
 
 import errno
+import json
 import os
 import shutil
 import time
@@ -408,12 +409,12 @@ class RoleApiTests(WorkspaceApiTestBase):
 
 
 class RenameApiTests(WorkspaceApiTestBase):
-    """Переименование workspace (PATCH .../ {"name": "new"})."""
+    """Переезд папки (PATCH .../ {"id": "new"}); отображаемое имя — {"name"}."""
 
     def test_rename_workspace(self):
         resp = self.client.patch(
             self.ws_detail_url,
-            data='{"name": "renamed"}',
+            data='{"id": "renamed"}',
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 200)
@@ -424,7 +425,7 @@ class RenameApiTests(WorkspaceApiTestBase):
     def test_rename_same_name_is_noop(self):
         resp = self.client.patch(
             self.ws_detail_url,
-            data='{"name": "test-ws"}',
+            data='{"id": "test-ws"}',
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 200)
@@ -435,7 +436,7 @@ class RenameApiTests(WorkspaceApiTestBase):
         os.makedirs(other, exist_ok=True)
         resp = self.client.patch(
             self.ws_detail_url,
-            data='{"name": "existing"}',
+            data='{"id": "existing"}',
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 409)
@@ -443,7 +444,7 @@ class RenameApiTests(WorkspaceApiTestBase):
     def test_rename_invalid_name(self):
         resp = self.client.patch(
             self.ws_detail_url,
-            data='{"name": "../evil"}',
+            data='{"id": "../evil"}',
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 400)
@@ -451,7 +452,7 @@ class RenameApiTests(WorkspaceApiTestBase):
     def test_rename_missing_workspace(self):
         resp = self.client.patch(
             "/api/v1/workspaces/nonexistent/",
-            data='{"name": "x"}',
+            data='{"id": "x"}',
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 404)
@@ -460,7 +461,7 @@ class RenameApiTests(WorkspaceApiTestBase):
         """После переименования фрагменты и видео доступны по новому id."""
         resp = self.client.patch(
             self.ws_detail_url,
-            data='{"name": "preserved"}',
+            data='{"id": "preserved"}',
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 200)
@@ -477,7 +478,7 @@ class RenameApiTests(WorkspaceApiTestBase):
         try:
             resp = self.client.patch(
                 self.ws_detail_url,
-                data='{"name": "renamed"}',
+                data='{"id": "renamed"}',
                 content_type="application/json",
             )
             self.assertEqual(resp.status_code, 409)
@@ -486,6 +487,50 @@ class RenameApiTests(WorkspaceApiTestBase):
         finally:
             with EXPORTS_LOCK:
                 EXPORTS.pop(self.ws_id, None)
+
+
+class DisplayNameApiTests(WorkspaceApiTestBase):
+    """Отображаемое имя (PATCH {"name"}): дубли разрешены, папка на месте."""
+
+    def _patch(self, payload, ws_id=None):
+        url = f"/api/v1/workspaces/{ws_id or self.ws_id}/"
+        return self.client.patch(
+            url, data=json.dumps(payload), content_type="application/json")
+
+    def test_name_sets_display_without_moving(self):
+        resp = self._patch({"name": "Мой выезд"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertEqual(body["id"], self.ws_id)
+        self.assertEqual(body["name"], "Мой выезд")
+        self.assertTrue(os.path.isdir(self.ws_dir))
+        items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
+        self.assertEqual(items[self.ws_id]["name"], "Мой выезд")
+
+    def test_names_may_duplicate_across_tasks(self):
+        """Как в CVAT: одинаковые имена задач — нормально (уникален id)."""
+        other = os.path.join(self._tmpdir, "other-ws")
+        os.makedirs(other, exist_ok=True)
+        shutil.copy2(self.video, os.path.join(other, "video.mp4"))
+        for ws_id in (self.ws_id, "other-ws"):
+            resp = self._patch({"name": "Одинаковое"}, ws_id=ws_id)
+            self.assertEqual(resp.status_code, 200, resp.content)
+        names = {w["id"]: w["name"]
+                 for w in self.client.get(self.ws_list_url).json()}
+        self.assertEqual(names[self.ws_id], "Одинаковое")
+        self.assertEqual(names["other-ws"], "Одинаковое")
+
+    def test_name_empty_falls_back_to_id(self):
+        self.assertEqual(
+            self.client.get(self.ws_detail_url).json()["name"], self.ws_id)
+
+    def test_name_rejects_non_string(self):
+        resp = self._patch({"name": 42})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_name_missing_workspace_404(self):
+        resp = self._patch({"name": "x"}, ws_id="nope")
+        self.assertEqual(resp.status_code, 404)
 
 
 class ListRobustnessTests(WorkspaceApiTestBase):

@@ -271,8 +271,18 @@ export function deleteWorkspace(id: string): Promise<{ deleted: string }> {
   }).then((r) => json<{ deleted: string }>(r));
 }
 
-// Переименовывает workspace (id задачи).
+// Переименовывает папку workspace (id задачи). Дубли id невозможны.
 export function renameWorkspace(id: string, name: string): Promise<VideoPair> {
+  return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: name }),
+  }).then((r) => json<VideoPair>(r));
+}
+
+// Отображаемое имя задачи (как task.name в CVAT): дубли разрешены,
+// папка не двигается — блокировки на индексацию не нужно.
+export function setTaskName(id: string, name: string): Promise<VideoPair> {
   return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },

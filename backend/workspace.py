@@ -532,6 +532,16 @@ def _task_dates(ws: Workspace):
             project_meta.resolve_pid(meta.get("project_id")))
 
 
+def _task_display_name(ws: Workspace) -> str:
+    """Отображаемое имя задачи (как task.name в CVAT): из task.json,
+    пусто — id (имя папки). Дубли разрешены, уникален только id."""
+    try:
+        name = task_meta.load(ws.path).get("name") or ""
+    except Exception:
+        return ws.name
+    return name if isinstance(name, str) and name else ws.name
+
+
 def _export_state(name: str):
     """Состояние фона экспорта для бейджа списка (None — тихо)."""
     try:
@@ -620,6 +630,7 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
     created_at, last_opened_at, project_id = _task_dates(ws)
     return {
         "id": ws.name,
+        "name": _safe(lambda: _task_display_name(ws), ws.name),
         "project_id": project_id,
         "source_name": os.path.basename(ws.original) if ws.original else "",
         "preview_name": os.path.basename(ws.visualization) if ws.visualization else "",
@@ -660,6 +671,7 @@ def _broken_entry(ws: Workspace, err: Exception) -> dict:
         lambda: _task_dates(ws), (None, None, None))
     return {
         "id": ws.name,
+        "name": _safe(lambda: _task_display_name(ws), ws.name),
         "project_id": project_id,
         "source_name": original,
         "preview_name": visualization,

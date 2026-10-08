@@ -6,6 +6,8 @@ export interface Fragment {
 
 export interface VideoPair {
   id: string;
+  /** Отображаемое имя (как task.name в CVAT): дубли разрешены, пусто — id. */
+  name: string;
   source_name: string;
   preview_name: string;
   unassigned_name: string | null;
