@@ -835,6 +835,9 @@ export function CutEditor({ pairId, onBack }: Props) {
 
   // Подхват состояния экспорта при входе: Esc во время экспорта сервер не
   // останавливает, прогресс/отмена продолжают работать после возврата.
+  // Готовый список файлов НЕ показываем автоматически — только по нажатию
+  // «Экспорт» (при актуальных нарезках сервер отдаёт done с файлами сразу,
+  // без перегона).
   useEffect(() => {
     let alive = true;
     getExportStatus(pairId)
@@ -845,8 +848,6 @@ export function CutEditor({ pairId, onBack }: Props) {
           const total = st.total ?? 1;
           setExportProgress((st.index ?? 0) / Math.max(1, total));
           startPolling();
-        } else if (st.state === "done") {
-          setExportItems(st.files ?? []);
         } else if (st.state === "error") {
           flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
         }
