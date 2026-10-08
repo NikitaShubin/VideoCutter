@@ -15,7 +15,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import project_meta
 import task_meta
@@ -585,6 +585,64 @@ def _safe(fn, default):
         return default
 
 
+def _index_state(ws) -> Tuple[dict, dict, bool, Optional[float]]:
+    """Меты ролей + (indexing, progress): только пробы кэша, без разметки.
+
+    Общее для полной записи и лёгкого статуса: прогресс — минимум
+    по неготовым ролям; None — сборка ещё не отметилась (пульс без %).
+    """
+    preview, preview_ready = _fast_role_meta(ws, "preview")
+    source, source_ready = _fast_role_meta(ws, "source")
+    indexing = not (preview_ready and source_ready)
+    progress = None
+    if indexing:
+        vals = []
+        for path, ready in (
+            (ws.original, source_ready),
+            (ws.visualization or ws.original, preview_ready),
+        ):
+            if not ready and path:
+                p = frame_provider.index_progress(path)
+                if p is not None:
+                    vals.append(p)
+        progress = min(vals) if vals else None
+    return preview, source, indexing, progress
+
+
+def workspace_status_entry(ws: Workspace) -> dict:
+    """Волатильное состояние задачи для дешёвого опроса (тик без TSV).
+
+    Только то, что меняется фоном: готовность индекса, прогресс, экспорт,
+    mtime (маркер чужих правок разметки), broken. Фрагменты/позиция/метрики
+    статичны в фоновых фазах — их тик больше не перечитывает и не гоняет
+    по сети; клиент мержит это в нарисованные строки, полный список —
+    на mount/возврат/CRUD и при смене состава.
+    """
+    err = workspace_error(ws.name)
+    if err is not None:
+        return {"id": ws.name, "indexing": False, "indexing_progress": None,
+                "export": _export_state(ws.name),
+                "updated_at": _workspace_updated_at(ws),
+                "broken": True, "error": str(err)[:300]}
+    try:
+        _, _, indexing, progress = _index_state(ws)
+    except ValueError as e:
+        return {"id": ws.name, "indexing": False, "indexing_progress": None,
+                "export": _export_state(ws.name),
+                "updated_at": _workspace_updated_at(ws),
+                "broken": True, "error": f"{type(e).__name__}: {e}"[:300]}
+    return {"id": ws.name, "indexing": indexing, "indexing_progress": progress,
+            "export": _export_state(ws.name),
+            "updated_at": _workspace_updated_at(ws),
+            "broken": False, "error": ""}
+
+
+def list_workspaces_status() -> List[dict]:
+    """Лёгкий снимок всех задач (см. workspace_status_entry)."""
+    ws_map = scan_workspaces()
+    return [workspace_status_entry(ws) for ws in ws_map.values()]
+
+
 def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
     """Элемент списка/деталей: роли, превью-метрики, фрагменты, позиция.
 
@@ -602,23 +660,7 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
     if err is not None:
         raise ValueError(err)
     if fast:
-        preview, preview_ready = _fast_role_meta(ws, "preview")
-        source, source_ready = _fast_role_meta(ws, "source")
-        indexing = not (preview_ready and source_ready)
-        # Прогресс строящегося индекса (минимум по неготовым ролям);
-        # None — сборка ещё не отметилась (показываем пульс без процентов).
-        indexing_progress = None
-        if indexing:
-            vals = []
-            for path, ready in (
-                (ws.original, source_ready),
-                (ws.visualization or ws.original, preview_ready),
-            ):
-                if not ready and path:
-                    p = frame_provider.index_progress(path)
-                    if p is not None:
-                        vals.append(p)
-            indexing_progress = min(vals) if vals else None
+        preview, source, indexing, indexing_progress = _index_state(ws)
     else:
         preview = ws.metadata()  # превью (или исходник, если пары нет)
         source = ws.video_metadata("source")

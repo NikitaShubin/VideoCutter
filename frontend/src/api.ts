@@ -108,6 +108,25 @@ export function listPairs(): Promise<VideoPair[]> {
   return apiFetch(`${BASE}/workspaces/`).then((r) => json<VideoPair[]>(r));
 }
 
+/** Волатильное состояние задач для тика (без TSV/метрик): готовность,
+// прогресс, экспорт, mtime, broken. Клиент мержит в нарисованные строки;
+// полный список — на mount/возврат/CRUD и при смене состава. */
+export interface WorkspaceStatus {
+  id: string;
+  indexing: boolean;
+  indexing_progress: number | null;
+  export: VideoPair["export"];
+  updated_at: number;
+  broken: boolean;
+  error: string;
+}
+
+export function getWorkspacesStatus(): Promise<WorkspaceStatus[]> {
+  return apiFetch(`${BASE}/workspaces/?light=1`).then((r) =>
+    json<WorkspaceStatus[]>(r),
+  );
+}
+
 export function getPair(id: string): Promise<VideoPairDetail> {
   return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`).then((r) =>
     json<VideoPairDetail>(r),

@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   authStatus,
   clearAuthToken,
   getAuthToken,
+  getWorkspacesStatus,
   listPairs,
   setUnauthorizedHandler,
 } from "./api";
@@ -34,6 +35,44 @@ export function App() {
   const reload = useCallback(() => {
     listPairs().then(setPairs).catch(console.error);
   }, []);
+
+  // Зеркало списка для тика: слияние лёгкого статуса без лишних рендеров.
+  const pairsRef = useRef<VideoPair[]>([]);
+  pairsRef.current = pairs;
+
+  // Тик: волатильное состояние мержим в нарисованные строки; полный список —
+  // только при смене состава (появились/ушли задачи), чужой правке разметки
+  // (mtime) или переходе готовности (дотянуть метрики): статичное больше не
+  // перечитывается и не гоняется по сети каждые 2 сек.
+  const handleStatusTick = useCallback(async () => {
+    let st;
+    try {
+      st = await getWorkspacesStatus();
+    } catch {
+      return; // следующий тик; явные действия и так делают полный reload
+    }
+    const prev = pairsRef.current;
+    const byId = new Map(prev.map((p) => [p.id, p]));
+    const structural =
+      st.length !== prev.length || st.some((s) => !byId.has(s.id));
+    const touched =
+      !structural &&
+      st.some((s) => {
+        const p = byId.get(s.id);
+        if (!p) return false;
+        return (
+          p.updated_at !== s.updated_at ||
+          p.broken !== s.broken ||
+          (p.indexing && !s.indexing)
+        );
+      });
+    if (structural || touched) {
+      reload();
+      return;
+    }
+    const sm = new Map(st.map((s) => [s.id, s]));
+    setPairs(prev.map((p) => ({ ...p, ...sm.get(p.id)! })));
+  }, [reload]);
 
   useEffect(() => {
     authStatus()
@@ -109,6 +148,7 @@ export function App() {
         setScreen("editor");
       }}
       onChanged={reload}
+      onTick={handleStatusTick}
       uploads={uploads}
       onStartUpload={startUpload}
       onCancelUpload={cancelUpload}

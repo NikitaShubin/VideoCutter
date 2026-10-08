@@ -32,6 +32,8 @@ interface Props {
   pairs: VideoPair[] | null;
   onSelect: (id: string) => void;
   onChanged: () => void;
+  /** Тик фона: лёгкий статус (мерж), полный список — по необходимости. */
+  onTick: () => void;
   uploads: UploadJob[];
   onStartUpload: (name: string, files: { source?: File; preview?: File }) => void;
   onCancelUpload: (key: string) => void;
@@ -112,6 +114,7 @@ export function PairList({
   pairs,
   onSelect,
   onChanged,
+  onTick,
   uploads,
   onStartUpload,
   onCancelUpload,
@@ -238,7 +241,9 @@ export function PairList({
         });
 
   // Пока есть индексирующиеся задачи или бегущий экспорт — опрашиваем
-  // список (фон сервера). Опрос прекращается, когда всё тихо.
+  // лёгкий статус (фон сервера). Разметка/мётры не перечитываются:
+  // мерж в нарисованные строки, полный список — при смене состава.
+  // Опрос прекращается, когда всё тихо.
   useEffect(() => {
     if (
       !pairs ||
@@ -250,9 +255,9 @@ export function PairList({
       )
     )
       return;
-    const id = window.setInterval(onChanged, 2000);
+    const id = window.setInterval(onTick, 2000);
     return () => window.clearInterval(id);
-  }, [pairs, onChanged]);
+  }, [pairs, onTick]);
 
   const pickFile = (which: "source" | "preview") => (f: File | null) => {
     if (which === "source") setSource(f);

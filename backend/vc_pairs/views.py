@@ -27,6 +27,7 @@ from workspace import (
     get_workspace,
     get_workspace_detail,
     list_workspaces,
+    list_workspaces_status,
     scan_workspaces,
 )
 
@@ -76,8 +77,12 @@ def workspace_list(request):
 
     GET-фильтр ``?project=<pid>`` — только задачи проекта; ``project=none``
     — standalone (без проекта); без параметра — все задачи.
+    ``?light=1`` — только волатильное состояние (тик без TSV: готовность,
+    прогресс, экспорт, mtime, broken); клиент мержит в нарисованные строки.
     """
     if request.method == "GET":
+        if request.GET.get("light") == "1":
+            return JsonResponse(list_workspaces_status(), safe=False)
         items = list_workspaces()
         pid = request.GET.get("project")
         if pid is not None:

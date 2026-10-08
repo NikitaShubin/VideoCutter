@@ -533,6 +533,23 @@ class DisplayNameApiTests(WorkspaceApiTestBase):
         self.assertEqual(resp.status_code, 404)
 
 
+class LightStatusTests(WorkspaceApiTestBase):
+    """GET ?light=1: волатильное состояние для тика — без TSV и метрик."""
+
+    def test_light_shape_and_parity(self):
+        full = {w["id"] for w in self.client.get(self.ws_list_url).json()}
+        resp = self.client.get(self.ws_list_url + "?light=1")
+        self.assertEqual(resp.status_code, 200)
+        light = resp.json()
+        self.assertEqual({w["id"] for w in light}, full)
+        for w in light:
+            self.assertEqual(
+                set(w.keys()),
+                {"id", "indexing", "indexing_progress", "export",
+                 "updated_at", "broken", "error"})
+            self.assertNotIn("fragments", w)
+
+
 class ListRobustnessTests(WorkspaceApiTestBase):
     """Список переживает битые задачи и долгую индексацию (F2/F3)."""
 
