@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  annotationsUrl,
   cancelExport,
   frameUrl,
   getExportStatus,
   getPair,
+  importAnnotations,
   replaceFragments,
   savePosition,
   setPairSettings,
   startExport,
+  taskBackupUrl,
   workspaceNonce,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
@@ -44,6 +47,9 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [waitPct, setWaitPct] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<number | null>(null);
+  // Импорт разметки: заливка архива с прогрессом (видео не трогается).
+  const [annBusy, setAnnBusy] = useState(false);
+  const [annProgress, setAnnProgress] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
   // Настройки просмотра: масштаб (0.05..1.0) и качество JPEG (30..95).
@@ -833,6 +839,26 @@ export function CutEditor({ pairId, onBack }: Props) {
     }
   };
 
+  // Импорт разметки из архива (только fragments.tsv): после применения
+  // пару перечитываем с сервера — модель, позиция и превью списка свежие.
+  const handleAnnotationsImport = (file: File) => {
+    if (annBusy) return;
+    setPlaying(false);
+    setAnnBusy(true);
+    setAnnProgress(0);
+    importAnnotations(pairId, file, { onProgress: setAnnProgress })
+      .then((res) => {
+        flash(`Разметка применена: фрагментов ${res.fragments}`);
+        return getPair(pairId);
+      })
+      .then((p) => loadPairInto(p))
+      .catch((e: Error) => flash(`Ошибка импорта разметки: ${e.message}`))
+      .finally(() => {
+        setAnnBusy(false);
+        setAnnProgress(null);
+      });
+  };
+
   // Подхват состояния экспорта при входе: Esc во время экспорта сервер не
   // останавливает, прогресс/отмена продолжают работать после возврата.
   // Готовый список файлов НЕ показываем автоматически — только по нажатию
@@ -959,6 +985,40 @@ export function CutEditor({ pairId, onBack }: Props) {
                 : "Экспорт (E)"}
             </span>
           </button>
+          <a
+            className="toolbar-btn"
+            href={annotationsUrl(pairId)}
+            download
+            title="Скачать разметку задачи (fragments.tsv + манифест)"
+          >
+            ⤓ Разметка
+          </a>
+          <label
+            className="toolbar-btn"
+            title="Применить архив разметки к этой задаче (видео не трогается)"
+          >
+            {annProgress !== null
+              ? `Разметка ${Math.round(annProgress * 100)}%`
+              : "Импорт разметки…"}
+            <input
+              type="file"
+              hidden
+              accept=".zip,application/zip"
+              onChange={(e) => {
+                const f = e.target.files?.[0] ?? null;
+                if (f) handleAnnotationsImport(f);
+                e.target.value = "";
+              }}
+            />
+          </label>
+          <a
+            className="toolbar-btn"
+            href={taskBackupUrl(pairId)}
+            download
+            title="Скачать полный бэкап задачи (видео + разметка + паспорт)"
+          >
+            ⤓ Бэкап
+          </a>
           <button
             className="toolbar-help"
             onClick={() => setHelpOpen(true)}

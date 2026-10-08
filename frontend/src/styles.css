@@ -730,6 +730,28 @@ select option {
   cursor: default;
 }
 
+/* Ссылки/лейблы-кнопки тулбара (обмен разметкой и бэкапом): та же геометрия. */
+.editor-toolbar a.toolbar-btn,
+.editor-toolbar label.toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85em;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.editor-toolbar a.toolbar-btn:hover,
+.editor-toolbar label.toolbar-btn:hover {
+  background: var(--btn-hover);
+}
+
 /* Кнопка-«статусбар» экспорта: заполняется пропорционально прогрессу. */
 .toolbar-export {
   position: relative;
