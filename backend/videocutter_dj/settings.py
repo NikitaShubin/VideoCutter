@@ -21,6 +21,8 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
+    # Входной фильтр-токен (VC_AUTH_TOKEN): пуст — выключен, всё открыто.
+    "vc_auth.AuthMiddleware",
 ]
 
 ROOT_URLCONF = "videocutter_dj.urls"

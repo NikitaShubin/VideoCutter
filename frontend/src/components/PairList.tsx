@@ -38,6 +38,8 @@ interface Props {
   onRenameUpload: (key: string, name: string) => void;
   onUpdateJob: (key: string, patch: Partial<UploadJob>) => void;
   onRemoveJob: (key: string) => void;
+  /** Входной фильтр включён: показать «Выйти», иначе null. */
+  onLogout: (() => void) | null;
 }
 
 function fileStem(filename: string): string {
@@ -116,6 +118,7 @@ export function PairList({
   onRenameUpload,
   onUpdateJob,
   onRemoveJob,
+  onLogout,
 }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -778,6 +781,15 @@ export function PairList({
                 onClick={() => (showForm ? reset() : setShowForm(true))}
               >
                 {showForm ? "Отмена" : "＋ Добавить видео"}
+              </button>
+            )}
+            {onLogout && (
+              <button
+                className="btn"
+                onClick={onLogout}
+                title="Забыть токен и выйти"
+              >
+                Выйти
               </button>
             )}
           </div>

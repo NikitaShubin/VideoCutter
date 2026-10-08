@@ -12,6 +12,7 @@ import {
   setPairSettings,
   startExport,
   taskBackupUrl,
+  withTokenQuery,
   workspaceNonce,
 } from "../api";
 import { FragmentModel } from "../model/fragmentModel";
@@ -1168,7 +1169,7 @@ export function CutEditor({ pairId, onBack }: Props) {
           <ul>
             {exportItems.map((f) => (
               <li key={f.url}>
-                <a href={f.url} download>{f.filename}</a>
+                <a href={withTokenQuery(f.url)} download>{f.filename}</a>
               </li>
             ))}
           </ul>

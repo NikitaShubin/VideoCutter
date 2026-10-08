@@ -7,7 +7,89 @@ import type {
 
 const BASE = "/api/v1";
 
+// ─── Входной фильтр-токен (VC_AUTH_TOKEN) ────────────────────────────────
+// Выключен на сервере — токена нет и всё открыто. Включён — токен летит
+// заголовком везде, где его можно прицепить (fetch/XHR); для <img> кадров
+// и <a download> (экспортные файлы) — query ?token= (см. withTokenQuery).
+
+const TOKEN_KEY = "vc-auth-token";
+
+export function getAuthToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthToken(token: string): void {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearAuthToken(): void {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/** Прицепить токен query (медиа/скачивание: заголовок не прицепить). */
+export function withTokenQuery(url: string): string {
+  const token = getAuthToken();
+  if (!token) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
+/** 401 от API — токен неверный/протух: App возвращает экран входа. */
+export class AuthError extends Error {}
+
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  unauthorizedHandler = fn;
+}
+
+function authFailed(detail: string): never {
+  unauthorizedHandler?.();
+  throw new AuthError(detail);
+}
+
+/** fetch с токеном (везде, кроме статуса — он открыт всегда). */
+function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const extra = init.headers as Record<string, string> | undefined;
+  return globalThis.fetch(url, {
+    ...init,
+    headers: { ...authHeaders(), ...extra },
+  });
+}
+
+export function authStatus(): Promise<{ enabled: boolean }> {
+  // Статус открыт всегда (секретов не отдаёт) — токен не нужен.
+  return apiFetch(`${BASE}/auth/status`).then((r) => json<{ enabled: boolean }>(r));
+}
+
 async function json<T>(res: Response): Promise<T> {
+  if (res.status === 401) {
+    let detail = "Нужен токен доступа";
+    try {
+      const body = await res.json();
+      if (body.error) detail = body.error;
+    } catch {
+      /* ignore */
+    }
+    return authFailed(detail);
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -23,11 +105,11 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 export function listPairs(): Promise<VideoPair[]> {
-  return fetch(`${BASE}/workspaces/`).then((r) => json<VideoPair[]>(r));
+  return apiFetch(`${BASE}/workspaces/`).then((r) => json<VideoPair[]>(r));
 }
 
 export function getPair(id: string): Promise<VideoPairDetail> {
-  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`).then((r) =>
+  return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`).then((r) =>
     json<VideoPairDetail>(r),
   );
 }
@@ -70,6 +152,7 @@ export function uploadWorkspace(
       ? `${BASE}/workspaces/?upload_id=${encodeURIComponent(opts.uploadId)}`
       : `${BASE}/workspaces/`;
     xhr.open("POST", url);
+    xhrAuthHeaders(xhr);
     if (opts.signal) {
       if (opts.signal.aborted) {
         reject(new DOMException("Отменено", "AbortError"));
@@ -90,8 +173,7 @@ export function uploadWorkspace(
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body as VideoPair);
       } else {
-        const err = body as { error?: string } | null;
-        reject(new Error(err?.error ?? `HTTP ${xhr.status}`));
+        reject(xhrError(xhr, body));
       }
     };
     xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
@@ -107,7 +189,7 @@ export interface UploadReceipt {
 
 export async function getUploadStatus(uploadId: string): Promise<UploadReceipt | null> {
   // 404 = неизвестно/готово — считать готовым (бар не врёт назад).
-  const res = await fetch(
+  const res = await apiFetch(
     `${BASE}/uploads/${encodeURIComponent(uploadId)}/status`);
   if (!res.ok) return null;
   return res.json() as Promise<UploadReceipt>;
@@ -129,6 +211,7 @@ export function setWorkspaceVideo(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`);
+    xhrAuthHeaders(xhr);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     };
@@ -142,8 +225,7 @@ export function setWorkspaceVideo(
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body as VideoPair);
       } else {
-        const err = body as { error?: string } | null;
-        reject(new Error(err?.error ?? `HTTP ${xhr.status}`));
+        reject(xhrError(xhr, body));
       }
     };
     xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
@@ -159,7 +241,7 @@ export function assignWorkspaceVideo(
 ): Promise<VideoPair> {
   const form = new FormData();
   form.append("assign", filename);
-  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`, {
+  return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`, {
     method: "POST",
     body: form,
   }).then((r) => json<VideoPair>(r));
@@ -170,28 +252,28 @@ export function removeWorkspaceVideo(
   id: string,
   role: "source" | "preview",
 ): Promise<VideoPair> {
-  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`, {
+  return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/video/${role}/`, {
     method: "DELETE",
   }).then((r) => json<VideoPair>(r));
 }
 
 // Меняет роли двух видео местами (source <-> preview).
 export function swapVideos(id: string): Promise<VideoPair> {
-  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/swap/`, {
+  return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/swap/`, {
     method: "POST",
   }).then((r) => json<VideoPair>(r));
 }
 
 // Безвозвратно удаляет workspace со всеми данными.
 export function deleteWorkspace(id: string): Promise<{ deleted: string }> {
-  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`, {
+  return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`, {
     method: "DELETE",
   }).then((r) => json<{ deleted: string }>(r));
 }
 
 // Переименовывает workspace (id задачи).
 export function renameWorkspace(id: string, name: string): Promise<VideoPair> {
-  return fetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`, {
+  return apiFetch(`${BASE}/workspaces/${encodeURIComponent(id)}/`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -201,11 +283,11 @@ export function renameWorkspace(id: string, name: string): Promise<VideoPair> {
 // ─── Проекты ────────────────────────────────────────────────────────────────
 
 export function listProjects(): Promise<Project[]> {
-  return fetch(`${BASE}/projects/`).then((r) => json<Project[]>(r));
+  return apiFetch(`${BASE}/projects/`).then((r) => json<Project[]>(r));
 }
 
 export function createProject(name: string): Promise<Project> {
-  return fetch(`${BASE}/projects/`, {
+  return apiFetch(`${BASE}/projects/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -213,7 +295,7 @@ export function createProject(name: string): Promise<Project> {
 }
 
 export function renameProject(id: string, name: string): Promise<Project> {
-  return fetch(`${BASE}/projects/${encodeURIComponent(id)}/`, {
+  return apiFetch(`${BASE}/projects/${encodeURIComponent(id)}/`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -228,7 +310,7 @@ export function deleteProject(
 ): Promise<{ deleted: string; tasks: Record<string, unknown> }> {
   const qs = new URLSearchParams({ with_tasks: withTasks });
   if (to) qs.set("to", to);
-  return fetch(`${BASE}/projects/${encodeURIComponent(id)}/?${qs}`, {
+  return apiFetch(`${BASE}/projects/${encodeURIComponent(id)}/?${qs}`, {
     method: "DELETE",
   }).then((r) => json<{ deleted: string; tasks: Record<string, unknown> }>(r));
 }
@@ -237,7 +319,7 @@ export function attachTask(
   projectId: string,
   taskId: string,
 ): Promise<{ task_id: string; project_id: string }> {
-  return fetch(`${BASE}/projects/${encodeURIComponent(projectId)}/tasks/`, {
+  return apiFetch(`${BASE}/projects/${encodeURIComponent(projectId)}/tasks/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ task_id: taskId }),
@@ -248,7 +330,7 @@ export function detachTask(
   projectId: string,
   taskId: string,
 ): Promise<{ task_id: string; project_id: null }> {
-  return fetch(
+  return apiFetch(
     `${BASE}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/`,
     { method: "DELETE" },
   ).then((r) => json<{ task_id: string; project_id: null }>(r));
@@ -260,7 +342,7 @@ export function setPairSettings(
   quality: number,
   scale: number,
 ): Promise<{ quality: number; scale: number }> {
-  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/settings`, {
+  return apiFetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ quality, scale }),
@@ -286,14 +368,14 @@ export interface CacheState {
 }
 
 export function getCache(): Promise<CacheState> {
-  return fetch(`${BASE}/cache`).then((r) => json<CacheState>(r));
+  return apiFetch(`${BASE}/cache`).then((r) => json<CacheState>(r));
 }
 
 export function setCache(patch: {
   gops?: number;
   mb?: number;
 }): Promise<CacheState> {
-  return fetch(`${BASE}/cache`, {
+  return apiFetch(`${BASE}/cache`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -312,7 +394,8 @@ export function frameUrl(
   if (ver) url += `&v=${encodeURIComponent(ver)}`;
   if (scale !== undefined && scale < 1.0) url += `&scale=${scale}`;
   if (quality !== undefined && quality !== 78) url += `&quality=${quality}`;
-  return url;
+  // <img> заголовок не несёт — токен query (см. withTokenQuery).
+  return withTokenQuery(url);
 }
 
 // Персистентный nonce для инвалидации кэша при удалении задачи (localStorage).
@@ -341,7 +424,7 @@ export function replaceFragments(
   fragments: { start: number; end: number; comment?: string }[],
   position: number,
 ): Promise<{ start: number; end: number; comment?: string }[]> {
-  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/fragments/`, {
+  return apiFetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/fragments/`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ fragments, position }),
@@ -353,7 +436,7 @@ export function savePosition(
   position: number,
   keepalive = false,
 ): Promise<{ position: number }> {
-  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/position`, {
+  return apiFetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/position`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ position }),
@@ -363,17 +446,17 @@ export function savePosition(
 
 export function startExport(pairId: string, force = false): Promise<ExportStatus> {
   const url = `${BASE}/pairs/${encodeURIComponent(pairId)}/export${force ? "?force=1" : ""}`;
-  return fetch(url, { method: "POST" }).then((r) => json<ExportStatus>(r));
+  return apiFetch(url, { method: "POST" }).then((r) => json<ExportStatus>(r));
 }
 
 export function getExportStatus(pairId: string): Promise<ExportStatus> {
-  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export/status`).then((r) =>
+  return apiFetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export/status`).then((r) =>
     json<ExportStatus>(r),
   );
 }
 
 export function cancelExport(pairId: string): Promise<ExportStatus> {
-  return fetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export/cancel`, { method: "POST" }).then((r) =>
+  return apiFetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export/cancel`, { method: "POST" }).then((r) =>
     json<ExportStatus>(r),
   );
 }
@@ -410,6 +493,23 @@ export interface AnnotationsImportResult {
   position: number;
 }
 
+/** Заголовок токена для XHR (fetch идёт через apiFetch). */
+function xhrAuthHeaders(xhr: XMLHttpRequest): void {
+  const token = getAuthToken();
+  if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+}
+
+/** Ошибка XHR-ответа; 401 заодно сбрасывает на экран входа. */
+function xhrError(xhr: XMLHttpRequest, body: unknown): Error {
+  const err = body as { error?: string } | null;
+  const detail = err?.error ?? `HTTP ${xhr.status}`;
+  if (xhr.status === 401) {
+    unauthorizedHandler?.();
+    return new AuthError(detail);
+  }
+  return new Error(detail);
+}
+
 function xhrPostFile<T>(
   url: string,
   file: File,
@@ -420,6 +520,7 @@ function xhrPostFile<T>(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
+    xhrAuthHeaders(xhr);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     };
@@ -433,8 +534,7 @@ function xhrPostFile<T>(
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body as T);
       } else {
-        const err = body as { error?: string } | null;
-        reject(new Error(err?.error ?? `HTTP ${xhr.status}`));
+        reject(xhrError(xhr, body));
       }
     };
     xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
@@ -487,7 +587,7 @@ export function downloadFile(
   url: string,
   filename: string,
   onProgress?: (fraction: number | null) => void,
-  headers?: Record<string, string>,
+  headers: Record<string, string> = authHeaders(),
 ): Promise<void> {
   const fail = async (res: Response): Promise<never> => {
     let detail = res.statusText;
@@ -497,6 +597,7 @@ export function downloadFile(
     } catch {
       /* ignore */
     }
+    if (res.status === 401) return authFailed(detail);
     throw new Error(detail);
   };
   const save = (blob: Blob) => {
@@ -509,7 +610,7 @@ export function downloadFile(
     a.remove();
     window.setTimeout(() => URL.revokeObjectURL(href), 5000);
   };
-  return fetch(url, headers ? { headers } : undefined).then(async (res) => {
+  return apiFetch(url, headers ? { headers } : undefined).then(async (res) => {
     if (!res.ok) return fail(res);
     const total = Number(res.headers.get("Content-Length")) || 0;
     if (!res.body || !total) {

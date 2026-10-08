@@ -105,6 +105,7 @@ label.add-btn {
 /* ─── Поля форм ──────────────────────────────────────────────────────────── */
 
 input[type="text"],
+input[type="password"],
 input[type="search"] {
   min-width: 0;
   padding: 8px 10px;
@@ -1127,6 +1128,64 @@ select option {
   width: 14px;
   height: 14px;
   border-radius: 3px;
+}
+
+/* ─── Экран входа (входной фильтр-токен) ─────────────────────────────────── */
+
+.login-wrap {
+  max-width: 420px;
+  margin: 80px auto;
+  padding: 0 16px;
+}
+
+.login {
+  padding: 24px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: var(--r);
+}
+
+.login h2 {
+  margin: 0 0 8px;
+}
+
+.login-hint {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.login label {
+  display: block;
+  margin-bottom: 12px;
+  color: #b0b0c0;
+}
+
+.login input[type="password"] {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.login-error {
+  margin: 8px 0;
+  color: var(--red);
+}
+
+.login button[type="submit"] {
+  width: 100%;
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--r-s);
+  background: var(--green);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.login button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* ─── Адаптив ─────────────────────────────────────────────────────────────── */

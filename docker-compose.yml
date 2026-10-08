@@ -38,6 +38,9 @@ services:
       DJANGO_ALLOWED_HOSTS: "*"
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
+      # Входной фильтр-токен (дверь локального контура): пуст — выключен,
+      # задан — API требует тот же токен (фронт спросит один раз).
+      VC_AUTH_TOKEN: ${VC_AUTH_TOKEN:-}
     volumes:
       - ./workspaces:/data/workspaces
     ports:
