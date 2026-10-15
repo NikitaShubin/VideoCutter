@@ -575,7 +575,10 @@ def _demux_landed(cont, stream, tick, tb, fallbacks):
             for pkt in gen:
                 yield pkt
             return
-    return
+    # Недостижимо: tried всегда непуст ([tick] + fallbacks + [0]), landed
+    # сбрасывается в True на каждой итерации, а последняя попытка
+    # (last=True) принимается всегда — выход только через return выше.
+    return  # pragma: no cover - доказанная недостижимость, см. выше
 
 
 def _decode_range(path: str, tb: float, start_us, end_us,
