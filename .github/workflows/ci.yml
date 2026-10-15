@@ -52,6 +52,9 @@ jobs:
         working-directory: backend
         run: python manage.py test
 
+      - name: Тест vc-add.sh (парсинг + живой цикл на runserver)
+        run: ./scripts/test_vc_add.sh
+
       - name: Сборка фронтенда
         working-directory: frontend
         run: npm run build
