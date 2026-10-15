@@ -716,6 +716,252 @@ class ExportApiTests(WorkspaceApiTestBase):
         self.assertIn("последнего", str(ctx.exception))
 
 
+class ExportConsistencyTests(WorkspaceApiTestBase):
+    """Ручные операции с файлами vs состояние экспорта (TDD: баг протухшего бейджа).
+
+    Критерии приёмки: бейдж списка не врёт после ручного удаления нарезок;
+    замена видео пересчитывает метаданные и гасит статус; повторный прогон
+    всё чистит и пересобирает; добавленное превью переключает роли и таймлайн.
+    """
+
+    def _run_export_to_done(self):
+        """Прогон экспорта до done на крошечном клипе (паттерн сюиты)."""
+        from videocutter.core.exporter import Exporter as RealExporter
+        import vc_fragments.views as export_views
+
+        class FakeExporter:
+            """Делегирует настоящему (крошечный клип — быстро)."""
+
+            def __init__(self, src, out_dir, **k):
+                self.real = RealExporter(src, out_dir)
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                return self.real.extract_fragments(
+                    fragments, progress=progress, cancelled=cancelled,
+                    frame_ts_ranges=frame_ts_ranges)
+
+        with mock.patch.object(export_views, "Exporter", FakeExporter):
+            resp = self.client.post(self.export_url)
+            self.assertEqual(resp.status_code, HTTP_OK)
+            deadline = time.time() + 30
+            while True:
+                st = self.client.get(self.export_status_url).json()
+                if st["state"] == "done":
+                    return st
+                self.assertNotEqual(st["state"], "error", st)
+                if time.time() > deadline:
+                    self.fail(f"export not done: {st}")
+                time.sleep(0.05)
+
+    def _list_export_state(self):
+        items = self.client.get(self.ws_list_url).json()
+        return next(w for w in items if w["id"] == self.ws_id)["export"]
+
+    def _remove_export_files(self):
+        """Ручное удаление нарезок (sidecar остаётся — сценарий пользователя)."""
+        out_dir = os.path.join(self.ws_dir, "exports")
+        removed = []
+        for name in sorted(os.listdir(out_dir)):
+            if name.endswith(".mp4"):
+                os.remove(os.path.join(out_dir, name))
+                removed.append(name)
+        self.assertTrue(removed, "экспорт не создал файлов для удаления")
+        return removed
+
+    def test_list_badge_idle_after_manual_delete(self):
+        """T1 (регрессия): удалили нарезки руками — бейдж списка idle, не done."""
+        self._run_export_to_done()
+        item = next(
+            w for w in self.client.get(self.ws_list_url).json()
+            if w["id"] == self.ws_id)
+        self.assertEqual(item["export"]["state"], "done")
+        self._remove_export_files()
+        self.assertIsNone(self._list_export_state())
+
+    def test_status_idle_after_manual_delete(self):
+        """T2 (lock-in): endpoint статуса и так честный — фиксируем."""
+        self._run_export_to_done()
+        self._remove_export_files()
+        st = self.client.get(self.export_status_url).json()
+        self.assertEqual(st["state"], "idle")
+
+    def test_video_replace_rekeys_metadata_and_idles_status(self):
+        """T3: замена видео — метаданные пересчитаны, статус idle."""
+        import cv2
+
+        old = self.client.get(self.ws_detail_url).json()
+        old_ver = old["video_ver"]
+        cap = cv2.VideoCapture(self.video)
+        ok, frame = cap.read()
+        cap.release()
+        self.assertTrue(ok)
+        h, w = frame.shape[:2]
+        # То же число кадров, другое разрешение и пиксели: совпадение
+        # total_frames со старым значением свежесть индекса не докажет,
+        # а width/height — докажут.
+        nw, nh = max(2, (w // 2) // 2 * 2), max(2, (h // 2) // 2 * 2)
+        vw = cv2.VideoWriter(
+            self.video, cv2.VideoWriter_fourcc(*"mp4v"), 10, (nw, nh))
+        small = cv2.resize(255 - frame, (nw, nh))
+        for _ in range(10):
+            vw.write(small)
+        vw.release()
+        # video_ver (имя:размер:mtime) сменился сразу — без ожидания фона.
+        new_ver = self.client.get(self.ws_detail_url).json()["video_ver"]
+        self.assertNotEqual(new_ver, old_ver)
+        # Свежий индекс собрался сам (ключ size/mtime): новое разрешение,
+        # 10 кадров, не нули — stale-кэш дал бы старые width/height.
+        deadline = time.time() + 30
+        while True:
+            body = self.client.get(self.ws_detail_url).json()
+            if (body["width"] == nw and body["height"] == nh
+                    and body["total_frames"] == 10
+                    and not body["indexing"]):
+                break
+            if time.time() > deadline:
+                self.fail(f"reindex not done: {body}")
+            time.sleep(0.1)
+        st = self.client.get(self.export_status_url).json()
+        self.assertEqual(st["state"], "idle")
+
+    def test_rerun_after_video_replace_rebuilds(self):
+        """T4: повторный прогон после замены — файлы на месте, хеш свежий."""
+        import vc_fragments.views as export_views
+
+        self._run_export_to_done()
+        self.test_video_replace_rekeys_metadata_and_idles_status()
+        st = self._run_export_to_done()
+        out_dir = os.path.join(self.ws_dir, "exports")
+        disk = sorted(
+            f for f in os.listdir(out_dir) if f.endswith(".mp4"))
+        self.assertEqual(
+            sorted(f["filename"] for f in st["files"]), disk)
+        for name in disk:
+            self.assertGreater(
+                os.path.getsize(os.path.join(out_dir, name)), 0)
+
+    def test_added_preview_switches_roles_and_timeline(self):
+        """T5: превью к одиночному source — пара, таймлайн по превью."""
+        import cv2
+        import numpy as np
+
+        cap = cv2.VideoCapture(self.video)
+        ok, _ = cap.read()
+        cap.release()
+        self.assertTrue(ok)
+        # Нейтральное видео -> source, новый 5-кадровый клип -> preview.
+        os.rename(self.video,
+                  os.path.join(self.ws_dir, "video.mp4"))
+        vw = cv2.VideoWriter(
+            os.path.join(self.ws_dir, "preview.mp4"),
+            cv2.VideoWriter_fourcc(*"mp4v"), 10, (96, 96))
+        for _ in range(5):
+            vw.write(np.zeros((96, 96, 3), dtype="uint8"))
+        vw.release()
+        deadline = time.time() + 30
+        while True:
+            body = self.client.get(self.ws_detail_url).json()
+            if (body["source_name"] and body["preview_name"]
+                    and not body["indexing"]):
+                break
+            if time.time() > deadline:
+                self.fail(f"roles not discovered: {body}")
+            time.sleep(0.1)
+        self.assertEqual(body["source_frames"], 10)
+        self.assertEqual(body["preview_frames"], 5)
+        self.assertEqual(body["total_frames"], 5)
+
+    def test_export_state_drops_stale_memory_entry(self):
+        """T6 (юнит): памяти done без файлов на диске — нет записи."""
+        import workspace as _ws_mod
+
+        self._run_export_to_done()
+        with EXPORTS_LOCK:
+            self.assertEqual(EXPORTS.get(self.ws_id, {}).get("state"), "done")
+        self._remove_export_files()
+        self.assertIsNone(_ws_mod._export_state(self.ws_id))
+        with EXPORTS_LOCK:
+            self.assertNotIn(self.ws_id, EXPORTS)
+
+    def test_metadata_stat_failure_rebuilds_empty(self):
+        """stat недоступен: запомненное сбрасывается, отдаются нули."""
+        import workspace as _ws_mod
+
+        ws = _ws_mod.get_workspace(self.ws_id)
+        self.assertGreater(ws.metadata()["total_frames"], 0)
+        with mock.patch.object(
+                _ws_mod.os, "stat", side_effect=OSError("gone")):
+            meta = ws.metadata()
+        self.assertEqual(meta["total_frames"], 0)
+
+    def test_export_outputs_race_returns_false(self):
+        """getsize упал после isfile: гонка — не готово, без исключений."""
+        import workspace as _ws_mod
+
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "a.mp4"), "wb") as f:
+            f.write(b"x")
+        with mock.patch("os.path.isfile", return_value=True), \
+                mock.patch("os.path.getsize", side_effect=OSError("gone")):
+            self.assertFalse(_ws_mod._export_outputs_present(
+                self.ws_id, [{"filename": "a.mp4"}]))
+
+    def test_export_badge_drops_when_no_fragments(self):
+        """Разметку снесли: done без предмета — тихо, запись выкинута."""
+        import workspace as _ws_mod
+
+        with EXPORTS_LOCK:
+            EXPORTS[self.ws_id] = {"state": "done", "files": []}
+        try:
+            with open(os.path.join(self.ws_dir, "fragments.tsv"), "w") as f:
+                f.write("start\tend\tcomment\n")
+            self.assertIsNone(_ws_mod._export_state(self.ws_id))
+            with EXPORTS_LOCK:
+                self.assertNotIn(self.ws_id, EXPORTS)
+        finally:
+            with EXPORTS_LOCK:
+                EXPORTS.pop(self.ws_id, None)
+
+    def test_export_badge_none_when_views_unimportable(self):
+        """Деградация: vc_fragments.views не импортируется — тихо, не 500."""
+        import sys
+        import workspace as _ws_mod
+
+        self._run_export_to_done()
+        with mock.patch.dict(sys.modules, {"vc_fragments.views": None}):
+            self.assertIsNone(_ws_mod._export_state(self.ws_id))
+
+    def test_detail_waits_while_indexing(self):
+        """Detail ждёт готовность, а не отдаёт первое попавшееся."""
+        import workspace as _ws_mod
+
+        slow = {"indexing": True}
+        ready = {"indexing": False, "id": self.ws_id}
+        with mock.patch.object(
+                _ws_mod, "_pair_entry", side_effect=[slow, ready, ready]):
+            body = _ws_mod.get_workspace_detail(self.ws_id, wait_s=5)
+        self.assertIs(body, ready)
+
+    def test_detail_returns_fast_entry_on_deadline(self):
+        """Дедлайн вышел, индекс не готов — fast-запись, а не вечное ожидание."""
+        import workspace as _ws_mod
+
+        slow = {"indexing": True}
+        with mock.patch.object(
+                _ws_mod, "_pair_entry", return_value=slow):
+            body = _ws_mod.get_workspace_detail(self.ws_id, wait_s=0)
+        self.assertIs(body, slow)
+
+    def test_scan_missing_root_empty(self):
+        """Корня нет — пустой реестр, без исключений."""
+        import workspace as _ws_mod
+
+        self.assertEqual(
+            _ws_mod.scan_workspaces("/nonexistent-root-xyz"), {})
+
+
 class ExportQueueTests(WorkspaceApiTestBase):
     """Очередь экспортов: слоты, FIFO, отмена queued, 409, force."""
 

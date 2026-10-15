@@ -52,6 +52,11 @@ class Workspace:
     _visualization: Optional[str] = field(default=None, repr=False)
     _unassigned: Optional[List[str]] = field(default=None, repr=False)
     _meta: Optional[dict] = field(default=None, repr=False)
+    # Снятые идентичности для инвалидации ручных правок: состав каталога
+    # (роли) и файл превью (метаданные). Без сверки долгоживущий объект
+    # из реестра отдавал бы stale после замены/добавления файлов мимо API.
+    _videos_mtime: Optional[float] = field(default=None, repr=False)
+    _meta_key: Optional[tuple] = field(default=None, repr=False)
     _fragments: Optional[List[dict]] = field(default=None, repr=False)
     _position: Optional[int] = field(default=None, repr=False)
     _settings: Optional[tuple] = field(default=None, repr=False)
@@ -62,15 +67,28 @@ class Workspace:
 
         Роли кодируются именами файлов: унифицированные ``source.<ext>`` /
         ``preview.<ext>``. Одиночный файл без маркера — «нейтральный»
-        (играет обе роли).
+        (играет обе роли). Состав каталога сверяется по его mtime: ручное
+        добавление/удаление файлов мимо API переоткрывает роли (дешёвый
+        stat + readdir маленькой папки).
         """
-        if self._original is not None:
+        try:
+            dir_mtime = os.path.getmtime(self.path)
+        except OSError:
+            dir_mtime = None
+        if self._original is not None and (
+                dir_mtime is None or dir_mtime == self._videos_mtime):
+            # Состав не менялся — или stat недоступен (держим мемоизированное,
+            # как раньше: сбой stat не повод ронять роли).
             return
 
         found = ws_fs.classify_videos(WORKSPACE_ROOT, self.name)
         self._original = found["source"] or ""
         self._visualization = found["preview"] or ""
         self._unassigned = found["unassigned"]
+        self._videos_mtime = dir_mtime
+        # Роли могли смениться — метаданные превью тоже пересчитать.
+        self._meta = None
+        self._meta_key = None
 
     def invalidate_videos(self) -> None:
         """Сбрасывает кэш ролей и метаданных (после замены/переименования)."""
@@ -78,6 +96,8 @@ class Workspace:
         self._visualization = None
         self._unassigned = None
         self._meta = None
+        self._videos_mtime = None
+        self._meta_key = None
 
     @property
     def original(self) -> str:
@@ -103,12 +123,24 @@ class Workspace:
         """Метаданные видео-превью (того, что смотрит пользователь).
 
         Номера кадров ведём по превью (как в PyVideoCutter: ``total_frames``
-        берётся из превью), а нарезаем — из source.
+        берётся из превью), а нарезаем — из source. Запомненные метаданные
+        сверяются с идентичностью файла (размер, mtime): ручная замена
+        видео мимо API сбрасывает кэш, иначе detail врал бы старыми
+        width/height/total_frames до рестарта.
         """
-        if self._meta is not None:
+        preview = self.visualization or self.original
+        key = None
+        if preview:
+            try:
+                st = os.stat(preview)
+                key = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                key = None
+        if self._meta is not None and (not preview or key == self._meta_key):
             return self._meta
 
         self._meta = self.video_metadata("preview")
+        self._meta_key = key if preview else None
         return self._meta
 
     def video_metadata(self, role: str) -> dict:
@@ -542,18 +574,70 @@ def _task_display_name(ws: Workspace) -> str:
     return name if isinstance(name, str) and name else ws.name
 
 
+def _export_outputs_present(ws_name: str, files) -> bool:
+    """Все файлы записи на месте и ненулевые (пустой список — вакуумно да).
+
+    Ручной снос нарезок мимо API виден только так: sidecar при этом может
+    остаться (хеш-то совпадает — он про границы и видео, а не про наличие
+    файлов), поэтому сверяемся с самими файлами, а не с ним.
+    """
+    out_dir = os.path.join(WORKSPACE_ROOT, ws_name, "exports")
+    for item in files or []:
+        name = item.get("filename", "") if isinstance(item, dict) else item
+        full = os.path.join(out_dir, os.path.basename(name or ""))
+        try:
+            if not os.path.isfile(full) or os.path.getsize(full) == 0:
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def _export_state(name: str):
-    """Состояние фона экспорта для бейджа списка (None — тихо)."""
+    """Состояние фона экспорта для бейджа списка (None — тихо).
+
+    done из памяти сверяется с диском: нарезки, снесённые вручную мимо
+    API, иначе светились бы «готовыми» до рестарта. Протухшая запись
+    выкидывается из памяти. Не-done состояния ведёт фон — сверять нечего.
+    Проверка только для done-задач (редкость), а не для всех строк.
+    """
     try:
-        from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+        from vc_fragments.views import (
+            EXPORTS, EXPORTS_LOCK, _task_hash as _disk_hash,
+            _video_identity as _disk_video,
+        )
     except Exception:
+        # Деградация: без views ни память, ни свежесть недоступны.
         return None
     with EXPORTS_LOCK:
         exp = EXPORTS.get(name)
     if exp is None:
         return None
-    return {"state": exp.get("state"), "index": exp.get("index", 0),
-            "total": exp.get("total", 1), "error": exp.get("error", "")}
+    badge = {"state": exp.get("state"), "index": exp.get("index", 0),
+             "total": exp.get("total", 1), "error": exp.get("error", "")}
+    if badge["state"] != "done":
+        return badge
+    ws = get_workspace(name)
+    if ws is None or not _export_outputs_present(name, exp.get("files")):
+        with EXPORTS_LOCK:
+            EXPORTS.pop(name, None)
+        return None
+    # Предмет экспорта цел: непустая разметка и видео на месте. Хеш
+    # сверяем, только если запись его несёт (без хеша — служебные done
+    # без файлов, их честность — файлами выше).
+    frags = ws.load_fragments()
+    vid = _disk_video(ws.original)
+    if not frags or vid is None:
+        with EXPORTS_LOCK:
+            EXPORTS.pop(name, None)
+        return None
+    if "hash" in exp:
+        want = _disk_hash(frags, vid["size"], vid["mtime_ns"])
+        if want != exp["hash"]:
+            with EXPORTS_LOCK:
+                EXPORTS.pop(name, None)
+            return None
+    return badge
 
 
 def _fast_role_meta(ws: Workspace, role: str):

@@ -957,6 +957,9 @@ class _Provider:
     def __init__(self, path: str) -> None:
         self.path = path
         self._index: Optional[_Index] = None
+        # Снятая при создании идентичность файла: _same_file() сверяет,
+        # не подменили ли файл вручную (тогда объект сиротеем в _get_provider).
+        self._surveyed = _survey_file(path)
         self._ilock = threading.Lock()
         self._cache: "OrderedDict[tuple, Dict[int, bytes]]" = OrderedDict()
         self._gop_sizes: Dict[tuple, int] = {}  # фактические байты GOP в кэше
@@ -981,6 +984,16 @@ class _Provider:
     def _key(g: int, quality: int, scale: float) -> tuple:
         """Ключ кэша GOP: номер группы + параметры просмотра (масштаб округлён)."""
         return (g, int(quality), round(float(scale), 2))
+
+    def _same_file(self) -> bool:
+        """Файл на диске — тот же, что при создании провайдера.
+
+        Нет файла (удаление/копирование в процессе) — считаем тем же:
+        удаление обслуживает контур cancel_path/close_source, а флоппинг
+        на недописанном файле лишь плодил бы провайдеров.
+        """
+        current = _survey_file(self.path)
+        return current is None or current == self._surveyed
 
     @staticmethod
     def _gop_bytes(idx, g: int) -> int:
@@ -1614,9 +1627,28 @@ def _evict_global() -> None:
             _BUDGET.evict_cached(size)
 
 
+def _survey_file(path: str) -> Optional[tuple]:
+    """Идентичность файла (размер, mtime_ns); None — файла нет/не читается.
+
+    Ручная замена файла под тем же именем видна только так: провайдеры
+    и индексы, закешированные по пути, без сверки отдают stale наружу
+    и вешают фоновую сборку (single-flight на путь уже отработал).
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
 def _get_provider(path: str) -> _Provider:
     with _providers_lock:
         p = _providers.get(path)
+        if p is not None and not p._same_file():
+            # Файл подменили вручную (мимо API, без close_source): старый
+            # объект сиротеем вместе с его задачами/кэшем (им poisoning
+            # нового не грозит), дальше работает свежий провайдер.
+            p = None
         if p is None:
             p = _Provider(path)
             _providers[path] = p
@@ -1765,6 +1797,10 @@ def _bg_index_build(key: str) -> None:
         _get_provider(key)._ensure_index()
         with _BG_INDEX_LOCK:
             _BG_INDEX_FAILED.pop(key, None)
+            # Single-flight — только на время сборки: готовый индекс
+            # memoized, повторный ensure дешёвый, а вечный пин _BG_INDEX_STARTED
+            # запрещал бы пересборку после ручной замены файла.
+            _BG_INDEX_STARTED.discard(key)
     except _DecodeCancelled:
         # Путь удалён посреди сборки: тихо, без broken-записи и варнингов.
         # Повтор разрешён (перезаливка под тем же именем снимает уже новое

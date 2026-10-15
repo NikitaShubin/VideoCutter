@@ -723,7 +723,15 @@ def _current_done(pair_id: str):
     with EXPORTS_LOCK:
         state = EXPORTS.get(pair_id)
     if state and state.get("state") == "done" and state.get("hash") == want:
-        return {"state": "done", "files": state["files"]}
+        # Файлы могли снести вручную (хеш-то совпадает — он про границы
+        # и видео, а не про наличие файлов): сверяем сами файлы, иначе
+        # отдадим битые ссылки. Протухшую запись выкидываем.
+        from workspace import _export_outputs_present
+        if _export_outputs_present(pair_id, state.get("files")):
+            return {"state": "done", "files": state["files"]}
+        with EXPORTS_LOCK:
+            EXPORTS.pop(pair_id, None)
+        return None
     return _status_from_disk(pair_id, want)
 
 
