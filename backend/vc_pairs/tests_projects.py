@@ -313,3 +313,311 @@ class UploadJoinsDefaultTests(ProjectTestBase):
             __import__("time").sleep(0.1)
         self.assertFalse(body.get("broken"), body.get("error"))
         self.assertEqual(body["project_id"], "default")
+
+
+# ─── Добивка покрытия vc_pairs/projects.py и project_meta.py ─────────────────
+# Новые классы ниже закрывают ветки, не задетые основными тестами: битый JSON,
+# пустые/чужие тела, ошибки сохранения и удаления (5xx), краевые случаи
+# project_meta (битые project.json, мусор в реестре, сбои ФС при миграции).
+
+import logging
+from unittest import mock
+
+import project_meta
+
+
+class ProjectLoadJsonTests(ProjectTestBase):
+    """Битые и не-объектные тела запросов (vc_pairs/projects.py: _load_json)."""
+
+    def test_post_broken_json_400(self):
+        resp = self.client.post(
+            self.projects_url, data="{bad",
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_post_null_body_400(self):
+        resp = self.client.post(
+            self.projects_url, data="null",
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_post_list_body_400(self):
+        resp = self.client.post(
+            self.projects_url, data="[1, 2]",
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_attach_broken_json_400(self):
+        p = self.create_project("Привязка")
+        resp = self.client.post(
+            self.tasks_url(p["id"]), data="{bad",
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_attach_missing_task_id_400(self):
+        p = self.create_project("Привязка")
+        for bad in ({}, {"task_id": "  "}, {"task_id": 5}):
+            resp = self.json_post(self.tasks_url(p["id"]), bad)
+            self.assertEqual(resp.status_code, 400, bad)
+
+
+class ProjectDetailUpdateTests(ProjectTestBase):
+    """GET детали и ветки PUT (projects.py: 107, 115, 118, 127, 132, 136-137)."""
+
+    def test_detail_ok(self):
+        p = self.create_project("Детали")
+        resp = self.client.get(self.project_url(p["id"]))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["id"], p["id"])
+        self.assertEqual(resp.json()["name"], "Детали")
+
+    def test_put_missing_project_404(self):
+        resp = self.json_put("/api/v1/projects/nope/", {"name": "x"})
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_put_broken_json_400(self):
+        p = self.create_project("Правка")
+        resp = self.client.put(
+            self.project_url(p["id"]), data="{bad",
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_put_empty_name_400(self):
+        p = self.create_project("Правка")
+        resp = self.json_put(self.project_url(p["id"]), {"name": "   "})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_put_model_not_dict_400(self):
+        p = self.create_project("Правка")
+        resp = self.json_put(self.project_url(p["id"]), {"model": "sam2"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_put_save_error_400(self):
+        p = self.create_project("Правка")
+        with mock.patch.object(
+                project_meta, "save", side_effect=ValueError("плохая модель")):
+            resp = self.json_put(
+                self.project_url(p["id"]), {"name": "ok"})
+        self.assertEqual(resp.status_code, 400)
+
+
+class ProjectDeleteDetachEdgeTests(ProjectTestBase):
+    """Редкие ветки DELETE/DETACH (projects.py: 154, 167-170, 182-184, 219-223,
+    231-232)."""
+
+    def test_delete_move_unknown_target_404(self):
+        self.client.get(self.ws_list_url)  # миграция → default
+        resp = self.client.delete(
+            f"{self.default_url}?with_tasks=move&to=nope")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_delete_cascade_failure_500(self):
+        from django.http import JsonResponse
+
+        self.client.get(self.ws_list_url)  # миграция: test-ws → default
+        with mock.patch(
+                "vc_pairs.projects._workspace_delete",
+                return_value=JsonResponse({"error": "boom"}, status=500)):
+            logging.disable(logging.CRITICAL)
+            try:
+                resp = self.client.delete(self.default_url)
+            finally:
+                logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 500)
+        # Прерванный каскад оставляет проект и задачу на месте.
+        self.assertTrue(project_meta.exists("default"))
+        self.assertTrue(os.path.isdir(self.ws_dir))
+
+    def test_delete_project_rm_failure_500(self):
+        self.client.get(self.ws_list_url)
+        with mock.patch.object(
+                project_meta, "delete", side_effect=OSError("диск занят")):
+            logging.disable(logging.CRITICAL)
+            try:
+                resp = self.client.delete(
+                    f"{self.default_url}?with_tasks=keep")
+            finally:
+                logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 500)
+
+    def test_detach_missing_project_404(self):
+        resp = self.client.delete(
+            f"/api/v1/projects/nope/tasks/{self.ws_id}/")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_detach_bad_task_name_400(self):
+        self.create_project("Целевой")
+        resp = self.client.delete(
+            f"/api/v1/projects/{u('Целевой')}/tasks/{u('bad\\name')}/")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_detach_backend_error_400(self):
+        self.client.get(self.ws_list_url)  # миграция: test-ws → default
+        with mock.patch.object(
+                project_meta, "detach", side_effect=ValueError("сбой")):
+            resp = self.client.delete(
+                f"/api/v1/projects/default/tasks/{self.ws_id}/")
+        self.assertEqual(resp.status_code, 400)
+
+
+class ProjectMetaValidateTests(ProjectTestBase):
+    """Ветки validate (project_meta.py: 90, 93, 96, 100)."""
+
+    def test_validate_rejects_bad_name(self):
+        with self.assertRaises(ValueError):
+            project_meta.validate({"name": 123})
+
+    def test_validate_rejects_bad_id(self):
+        with self.assertRaises(ValueError):
+            project_meta.validate({"name": "x", "id": "   "})
+
+    def test_validate_rejects_bad_model(self):
+        with self.assertRaises(ValueError):
+            project_meta.validate({"name": "x", "model": "sam2"})
+
+    def test_validate_none_model_gets_default(self):
+        out = project_meta.validate({"name": "x", "model": None})
+        self.assertEqual(
+            out["model"], {"id": None, "kind": "", "params": {}})
+
+
+class ProjectMetaLoadTests(ProjectTestBase):
+    """Ветки exists/load/list (project_meta.py: 108-109, 117-118, 122-134,
+    172, 180, 184, 186, 189)."""
+
+    def _write_project_file(self, pid, text):
+        d = os.path.join(self._tmpdir, "projects", pid)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "project.json"), "w",
+                  encoding="utf-8") as f:
+            f.write(text)
+
+    def test_exists_bad_pid_false(self):
+        self.assertFalse(project_meta.exists("../evil"))
+
+    def test_load_bad_pid_none(self):
+        self.assertIsNone(project_meta.load("../evil"))
+
+    def test_load_missing_none(self):
+        self.assertIsNone(project_meta.load("ghost-xyz"))
+
+    def test_load_broken_json_defaults(self):
+        self._write_project_file("broken", "{not json")
+        self.assertEqual(
+            project_meta.load("broken"), project_meta.defaults())
+
+    def test_load_non_dict_defaults(self):
+        self._write_project_file("nondict", "[1, 2]")
+        self.assertEqual(
+            project_meta.load("nondict"), project_meta.defaults())
+
+    def test_load_invalid_dict_defaults(self):
+        self._write_project_file("invalid", '{"name": 123}')
+        self.assertEqual(
+            project_meta.load("invalid"), project_meta.defaults())
+
+    def test_delete_missing_raises(self):
+        with self.assertRaises(ValueError):
+            project_meta.delete("ghost-proj")
+
+    def test_list_empty_root(self):
+        self.assertEqual(
+            project_meta.list_projects(
+                root=os.path.join(self._tmpdir, "no-such")), [])
+
+    def test_list_skips_junk(self):
+        self.create_project("Настоящий")
+        base = os.path.join(self._tmpdir, "projects")
+        os.makedirs(os.path.join(base, ".hidden"), exist_ok=True)
+        with open(os.path.join(base, "junk.txt"), "w") as f:
+            f.write("x")
+        os.makedirs(os.path.join(base, "empty-no-json"), exist_ok=True)
+        ids = [m["id"] for m in project_meta.list_projects()]
+        self.assertEqual(ids, ["Настоящий"])
+
+
+class ProjectMetaMembershipTests(ProjectTestBase):
+    """Членство и его ФС-края (project_meta.py: 203, 230-231, 237, 250-251,
+    256-257, 264, 275, 278, 292, 294)."""
+
+    def test_task_project_ids_missing_root(self):
+        self.assertEqual(
+            project_meta.task_project_ids(
+                root=os.path.join(self._tmpdir, "no-such")), {})
+
+    def test_can_attach_bad_task_name(self):
+        err = project_meta.can_attach("../evil", "default")
+        self.assertIn("не найдена", err)
+
+    def test_can_attach_missing_project(self):
+        err = project_meta.can_attach(self.ws_id, "ghost-proj")
+        self.assertIn("не найден", err)
+
+    def test_attach_missing_task_raises(self):
+        with self.assertRaises(ValueError):
+            project_meta.attach("ghost-task", "default")
+
+    def test_detach_missing_task_raises(self):
+        with self.assertRaises(ValueError):
+            project_meta.detach("ghost-task")
+
+    def test_detach_standalone_noop(self):
+        # У задачи из фикстуры нет task.json — отвязка молча ничего не делает.
+        self.assertIsNone(project_meta.detach(self.ws_id))
+
+    def test_set_project_for_all_noop(self):
+        self.create_project("default")
+        project_meta.attach(self.ws_id, "default")
+        self.assertEqual(project_meta.set_project_for_all("default"), 0)
+
+    def test_set_project_for_all_skips_bound_when_only_null(self):
+        self.create_project("default")
+        project_meta.attach(self.ws_id, "default")
+        self.assertEqual(
+            project_meta.set_project_for_all("other", only_null=True), 0)
+
+    def test_save_membership_stat_failure(self):
+        meta = task_meta.load(self.ws_dir)
+        with mock.patch.object(
+                project_meta.os, "stat", side_effect=OSError("boom")):
+            project_meta._save_membership(self.ws_dir, meta)
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.ws_dir, "task.json")))
+
+    def test_save_membership_utime_failure(self):
+        meta = task_meta.load(self.ws_dir)
+        with mock.patch.object(
+                project_meta.os, "utime", side_effect=OSError("ro")):
+            project_meta._save_membership(self.ws_dir, meta)
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.ws_dir, "task.json")))
+
+
+class ProjectMetaMigrationTests(ProjectTestBase):
+    """Разовая миграция: края ФС (project_meta.py: 315-316, 322, 331-332,
+    344-345)."""
+
+    def test_ensure_migrated_missing_root(self):
+        project_meta._ensure_migrated_impl(
+            root=os.path.join(self._tmpdir, "no-such-root"))
+
+    def test_ensure_migrated_swallows_errors(self):
+        with mock.patch.object(
+                project_meta, "task_project_ids",
+                side_effect=RuntimeError("сбой скана")):
+            project_meta.ensure_migrated(root=self._tmpdir)
+
+    def test_ensure_migrated_create_race(self):
+        from videocutter.standalone import workspace as ws_fs
+
+        with mock.patch.object(
+                project_meta, "create",
+                side_effect=ws_fs.WorkspaceExistsError("уже есть")):
+            project_meta._ensure_migrated_impl(root=self._tmpdir)
+        self.assertFalse(project_meta.exists("default"))
+
+    def test_ensure_migrated_marker_write_failure(self):
+        marker = os.path.join(self._tmpdir, project_meta.MIGRATION_MARKER)
+        os.makedirs(marker + ".tmp", exist_ok=True)  # open(tmp) → IsADirectory
+        project_meta._ensure_migrated_impl(root=self._tmpdir)
+        self.assertFalse(os.path.isfile(marker))

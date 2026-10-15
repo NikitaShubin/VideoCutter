@@ -31,6 +31,7 @@ import project_meta
 import task_meta
 import workspace
 from vc_fragments.tests import WorkspaceApiTestBase
+from vc_pairs import backup as backup_mod
 from vc_pairs import frame_provider
 from vc_pairs.backup import _task_members
 from vc_pairs.tests_projects import ProjectTestBase, u
@@ -1300,3 +1301,725 @@ class AnnotationsTests(BackupArchiveMixin, WorkspaceApiTestBase):
         resp = self._import(archive, trailing=True)
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.json()["fragments"], 2)
+
+
+# ─── Gaps: внутренности бэкапа/импорта ───────────────────────────────────────
+
+class BackupInternalsTests(SimpleTestCase):
+    """Юниты хелперов: тихие отказы, свипы, фолбэки имён, чтение членов."""
+
+    def test_unlink_quiet_none_and_missing(self):
+        backup_mod.unlink_quiet(None)
+        backup_mod.unlink_quiet("")
+        backup_mod.unlink_quiet("/nonexistent-dir-xyz/definitely-no-file.zip")
+
+    def test_drop_staging_none(self):
+        backup_mod._drop_staging(None)
+        backup_mod._drop_staging("")
+
+    def test_sweep_backups_listdir_error_returns_silently(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                    workspace, "WORKSPACE_ROOT", tmp), \
+                 mock.patch("os.listdir", side_effect=OSError("boom")):
+                backup_mod._sweep_stale_backups()  # не бросает
+
+    def test_sweep_backups_keeps_fresh(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = os.path.join(tmp, ".backup-old.zip")
+            fresh = os.path.join(tmp, ".backup-new.zip")
+            keep = os.path.join(tmp, "keep.txt")
+            for path in (stale, fresh, keep):
+                with open(path, "wb") as fh:
+                    fh.write(b"x")
+            old = time.time() - 48 * 3600
+            os.utime(stale, (old, old))
+            with mock.patch.object(workspace, "WORKSPACE_ROOT", tmp):
+                backup_mod._sweep_stale_backups()
+            self.assertFalse(os.path.exists(stale))
+            self.assertTrue(os.path.exists(fresh))
+            self.assertTrue(os.path.exists(keep))
+
+    def test_sweep_backups_missing_root_returns_silently(self):
+        with mock.patch.object(
+                workspace, "WORKSPACE_ROOT", "/nonexistent-root-xyz"):
+            backup_mod._sweep_stale_backups()  # не бросает
+
+    def test_sweep_backups_getmtime_error_ignored(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = os.path.join(tmp, ".backup-x.zip")
+            with open(stale, "wb") as fh:
+                fh.write(b"x")
+            with mock.patch.object(workspace, "WORKSPACE_ROOT", tmp), \
+                 mock.patch("os.path.getmtime", side_effect=OSError("boom")):
+                backup_mod._sweep_stale_backups()  # не бросает
+            self.assertTrue(os.path.exists(stale))
+
+    def test_sweep_staging_missing_root_returns_silently(self):
+        with mock.patch.object(
+                workspace, "WORKSPACE_ROOT", "/nonexistent-root-xyz"):
+            backup_mod._sweep_stale_staging()  # не бросает
+
+    def test_sweep_staging_getmtime_error_ignored(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            stale_dir = os.path.join(tmp, ".import-x")
+            os.makedirs(stale_dir)
+            with mock.patch.object(workspace, "WORKSPACE_ROOT", tmp), \
+                 mock.patch("os.path.getmtime", side_effect=OSError("boom")):
+                backup_mod._sweep_stale_staging()  # не бросает
+            self.assertTrue(os.path.isdir(stale_dir))
+
+    def test_file_response_build_error_cleans_temp(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".backup-t.zip")
+            with open(path, "wb") as fh:
+                fh.write(b"x")
+            with mock.patch("vc_pairs.backup.FileResponse",
+                            side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    backup_mod.file_response(path, "x.zip")
+            self.assertFalse(os.path.exists(path))
+
+    def test_import_base_name_fallbacks(self):
+        f = backup_mod._import_base_name
+        self.assertEqual(f({"task_id": "a/b"}, {}), "task")
+        self.assertEqual(f({"task_id": 123, "name": "  "}, {"name": None}),
+                         "task")
+        self.assertEqual(f({}, {}), "task")
+        self.assertEqual(f({"task_id": "legacy"}, {}), "legacy")
+        self.assertEqual(f({"name": "hello"}, {}), "hello")
+        self.assertEqual(f({}, {"name": "frommeta"}), "frommeta")
+
+    def test_archived_task_meta_missing_returns_defaults(self):
+        self.assertEqual(backup_mod._archived_task_meta(None, None),
+                         task_meta.defaults())
+
+    def test_extract_skips_foreign_prefix(self):
+        import tempfile
+        data = build_zip({"task_0/v.mp4": b"zero",
+                          "task_1/v.mp4": b"one"})
+        with tempfile.TemporaryDirectory() as staging, \
+                zipfile.ZipFile(io.BytesIO(data)) as zf:
+            backup_mod._extract(zf, staging, "task_1/",
+                                ["task_0/v.mp4", "task_1/v.mp4"])
+            with open(os.path.join(staging, "v.mp4"), "rb") as fh:
+                self.assertEqual(fh.read(), b"one")
+
+    def test_task_members_skips_nonflat_names(self):
+        videos, passport, tsv = backup_mod._task_members(
+            ["", ".hidden", "a/b", "task.json"], "")
+        self.assertEqual((videos, passport, tsv),
+                         ([], "task.json", None))
+
+    def test_member_problem_dotdot_variants(self):
+        self.assertTrue(fmt.member_problem("a/.."))
+        self.assertTrue(fmt.member_problem("x/../../y"))
+
+    def test_open_archive_oversize_manifest_rejected(self):
+        data = build_zip({
+            "manifest.json": manifest_json(big="x" * (5 * 1024 * 1024)),
+        })
+        with self.assertRaises(fmt.ArchiveError) as ctx:
+            fmt.open_archive(io.BytesIO(data))
+        self.assertIn("подозрительно большой", str(ctx.exception))
+
+    def test_read_json_member_non_dict_rejected(self):
+        data = build_zip({"manifest.json": manifest_json(),
+                          "m": b"[1, 2]"})
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            with self.assertRaises(fmt.ArchiveError):
+                fmt.read_json_member(zf, "m")
+
+    def test_read_json_member_oversize_rejected(self):
+        data = build_zip({"manifest.json": manifest_json(),
+                          "m": b'{"a": "1234567890"}'})
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            with self.assertRaises(fmt.ArchiveError) as ctx:
+                fmt.read_json_member(zf, "m", max_bytes=10)
+            self.assertIn("подозрительно большой", str(ctx.exception))
+
+
+class BackupGetGapsTests(BackupArchiveMixin, WorkspaceApiTestBase):
+    """GET бэкапов: сбои сборки, гонки, неполные задачи."""
+
+    def setUp(self):
+        super().setUp()
+        self.backup_url = f"/api/v1/workspaces/{self.ws_id}/backup"
+        frame_provider.get_metadata(self.video)
+
+    def _507(self, resp):
+        self.assertEqual(resp.status_code, 507)
+        self.assertIn("места", resp.json()["error"])
+
+    def test_project_backup_disk_full_507_no_temp(self):
+        self.create_project_for_backup()
+        nospace = OSError(errno.ENOSPC, "No space left on device")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("zipfile.ZipFile.write", side_effect=nospace):
+                resp = self.client.get(self.project_backup_url)
+        finally:
+            logging.disable(logging.NOTSET)
+        self._507(resp)
+        self.assertEqual(
+            [e for e in os.listdir(self._tmpdir) if e.startswith(".backup-")],
+            [])
+
+    def test_workspace_backup_unexpected_error_cleans_temp(self):
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("zipfile.ZipFile.writestr",
+                            side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    self.client.get(self.backup_url)
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(
+            [e for e in os.listdir(self._tmpdir) if e.startswith(".backup-")],
+            [])
+
+    def test_project_backup_unexpected_error_cleans_temp(self):
+        self.create_project_for_backup()
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("zipfile.ZipFile.writestr",
+                            side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    self.client.get(self.project_backup_url)
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(
+            [e for e in os.listdir(self._tmpdir) if e.startswith(".backup-")],
+            [])
+
+    def test_project_backup_task_vanished_mid_assembly(self):
+        """Задача ушла между снапшотом состава и сборкой — пустой проект, 200."""
+        self.create_project_for_backup()
+        # Снапшот видит задачу, сборки — уже нет: честная гонка без моков isdir
+        # (мок прятал бы папку и от самого task_project_ids).
+        with mock.patch("vc_pairs.backup.project_meta.task_project_ids",
+                        return_value={self.ws_id: "Архив"}):
+            shutil.rmtree(self.ws_dir)
+            resp = self.client.get(self.project_backup_url)
+        self.assertEqual(resp.status_code, 200)
+        data = fetch_zip(resp)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            manifest = json.loads(zf.read(fmt.MANIFEST_NAME))
+            self.assertEqual(manifest["tasks"], [])
+
+    def test_backup_task_without_passport_and_fragments(self):
+        """Без fragments.tsv: пропуски членов, архив всё равно валиден."""
+        os.remove(os.path.join(self.ws_dir, "fragments.tsv"))
+        data = self.fetch_zip_url(self.backup_url)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            # task.json создаёт миграция при первом скане.
+            self.assertEqual(set(zf.namelist()),
+                             {"manifest.json", "task.json",
+                              "visualization.mp4"})
+
+    def create_project_for_backup(self):
+        resp = self.client.post(
+            "/api/v1/projects/", data=json.dumps({"name": "Архив"}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        resp = self.client.post(
+            f"/api/v1/projects/{u('Архив')}/tasks/",
+            data=json.dumps({"task_id": self.ws_id}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.project_backup_url = f"/api/v1/projects/{u('Архив')}/backup"
+
+
+class TaskImportGapsTests(BackupArchiveMixin, ProjectTestBase):
+    """POST backups/import: гейты имён, битые паспорта, откаты."""
+
+    def setUp(self):
+        super().setUp()
+        frame_provider.get_metadata(self.video)
+        with open(self.video, "rb") as fh:
+            self.video_bytes = fh.read()
+
+    def _video_zip(self, members):
+        return build_zip(members)
+
+    def _task_zip(self, task_id="t", extra_tsv=None, video_name="v.mp4",
+                  task_json="default"):
+        members = {"manifest.json": manifest_json(task_id=task_id),
+                   video_name: self.video_bytes,
+                   "fragments.tsv": extra_tsv or TSV_FIXTURE}
+        if task_json == "default":
+            members["task.json"] = json.dumps(
+                task_meta.defaults(), ensure_ascii=False).encode("utf-8")
+        elif task_json is not None:
+            members["task.json"] = task_json
+        return build_zip(members)
+
+    def _staging_dirs(self):
+        return [e for e in os.listdir(self._tmpdir)
+                if e.startswith(".import-")]
+
+    def test_dot_task_name_rejected(self):
+        resp = self.import_archive(self._task_zip(task_id=".hidden"))
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("точки", resp.json()["error"])
+
+    def test_projects_task_name_rejected(self):
+        resp = self.import_archive(self._task_zip(task_id="projects"))
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("зарезервировано", resp.json()["error"])
+
+    def test_broken_task_json_rejected(self):
+        resp = self.import_archive(self._task_zip(task_json=b"{nope"))
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_invalid_task_json_rejected(self):
+        bad = json.dumps({"status": "bogus"}).encode("utf-8")
+        resp = self.import_archive(self._task_zip(task_json=bad))
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("task.json", resp.json()["error"])
+
+    def test_stage_task_forced_name(self):
+        data = self._task_zip(task_id="orig")
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = zf.namelist()
+            manifest = json.loads(zf.read(fmt.MANIFEST_NAME))
+            target, staging, _pid = backup_mod._stage_task(
+                zf, names, manifest, prefix="", on_conflict="rename",
+                forced_name="custom")
+        try:
+            self.assertEqual(target, "custom")
+            self.assertTrue(os.path.isfile(
+                os.path.join(staging, "v.mp4")))
+        finally:
+            backup_mod._drop_staging(staging)
+        self.assertEqual(self._staging_dirs(), [])
+
+    def test_overwrite_delete_failure_json_error(self):
+        data = self._task_zip(task_id=self.ws_id)
+        resp = self.import_archive(data, "?on_conflict=overwrite")
+        self.assertEqual(resp.status_code, 202, resp.content)
+        fake = mock.Mock()
+        fake.status_code = 500
+        fake.json.return_value = {"error": "boom"}
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("vc_pairs.backup._workspace_delete",
+                            return_value=fake):
+                resp = self.import_archive(data, "?on_conflict=overwrite")
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 500, resp.content)
+        self.assertIn("boom", resp.json()["error"])
+
+    def test_overwrite_delete_failure_unparsable_error(self):
+        data = self._task_zip(task_id=self.ws_id)
+        fake = mock.Mock()
+        fake.status_code = 500
+        fake.json.side_effect = ValueError("no json")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("vc_pairs.backup._workspace_delete",
+                            return_value=fake):
+                resp = self.import_archive(data, "?on_conflict=overwrite")
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 500, resp.content)
+        self.assertIn("не удалось удалить", resp.json()["error"])
+
+    def _place_replace(self, exc):
+        """os.replace падает только на переезде (save с .tmp — мимо)."""
+        real_replace = os.replace
+
+        def fake_replace(src, dst):
+            if isinstance(src, str) and src.endswith(".tmp"):
+                return real_replace(src, dst)
+            raise exc
+
+        return mock.patch("vc_pairs.backup.os.replace",
+                          side_effect=fake_replace)
+
+    def test_place_race_conflict_409(self):
+        """Папка появилась между резолвом и переездом — 409, стейджинг убран."""
+        data = self._task_zip(task_id="racer")
+        with self._place_replace(OSError(errno.EEXIST, "exists")):
+            resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 409, resp.content)
+        self.assertIn("уже существует", resp.json()["error"])
+        self.assertEqual(self._staging_dirs(), [])
+
+    def test_place_unexpected_oserror_507(self):
+        data = self._task_zip(task_id="racer")
+        nospace = OSError(errno.ENOSPC, "No space left on device")
+        logging.disable(logging.CRITICAL)
+        try:
+            with self._place_replace(nospace):
+                resp = self.import_archive(data)
+        finally:
+            logging.disable(logging.NOTSET)
+        self._507(resp)
+        self.assertEqual(self._staging_dirs(), [])
+
+    def _507(self, resp):
+        self.assertEqual(resp.status_code, 507)
+        self.assertIn("места", resp.json()["error"])
+
+    def test_import_place_failure_cleans_staging(self):
+        data = self._task_zip(task_id="racer")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("vc_pairs.backup._place_task",
+                            side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    self.import_archive(data)
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(self._staging_dirs(), [])
+
+    def test_staging_corrupt_archive_400_no_leftovers(self):
+        data = self._task_zip(task_id="racer")
+        with mock.patch("vc_pairs.backup.ws_fs.write_stream",
+                        side_effect=zipfile.BadZipFile("bad")):
+            resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("повреждён", resp.json()["error"])
+        self.assertEqual(self._staging_dirs(), [])
+        self.assertFalse(os.path.isdir(os.path.join(self._tmpdir, "racer")))
+
+    def test_staging_disk_full_507_no_leftovers(self):
+        data = self._task_zip(task_id="racer")
+        nospace = OSError(errno.ENOSPC, "No space left on device")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("vc_pairs.backup.ws_fs.write_stream",
+                            side_effect=nospace):
+                resp = self.import_archive(data)
+        finally:
+            logging.disable(logging.NOTSET)
+        self._507(resp)
+        self.assertEqual(self._staging_dirs(), [])
+        self.assertFalse(os.path.isdir(os.path.join(self._tmpdir, "racer")))
+
+    def test_staging_problem_aborts_import(self):
+        """_Problem из распаковки: стейджинг убран, отказ — клиенту."""
+        data = self._task_zip(task_id="racer")
+        with mock.patch("vc_pairs.backup.ws_fs.write_stream",
+                        side_effect=backup_mod._Problem(400, "плохой член")):
+            resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("плохой член", resp.json()["error"])
+        self.assertEqual(self._staging_dirs(), [])
+        self.assertFalse(os.path.isdir(os.path.join(self._tmpdir, "racer")))
+
+    def test_project_bad_prefix_rejected(self):
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак", tasks=[{"dir": "../evil", "name": "x"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "Призрак"}).encode("utf-8"),
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("префикс", resp.json()["error"])
+        self.assertFalse(project_meta.exists("Призрак"))
+
+    def test_project_prefix_fallback_success(self):
+        """Без tasks в манифесте — префиксы task_*/ из имён членов."""
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак")
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "Призрак"}).encode("utf-8"),
+            "task_0/v.mp4": self.video_bytes,
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        # id — фолбэк "project", отображаемое имя — из project.json.
+        self.assertEqual(resp.json()["id"], "project")
+        self.assertEqual(resp.json()["tasks"], ["task_0"])
+        self.assertEqual(project_meta.load("project")["name"], "Призрак")
+
+    def test_project_invalid_base_name_falls_back(self):
+        """Некорректный id проекта в манифесте — проект 'project'."""
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT)
+        manifest["task_id"] = "a/b"
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "P"}).encode("utf-8"),
+            "task_0/v.mp4": self.video_bytes,
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        self.assertEqual(resp.json()["id"], "project")
+
+    def test_project_no_dirs_fallback_rejected(self):
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак")
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "Призрак"}).encode("utf-8"),
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("не найдено задач", resp.json()["error"])
+        self.assertFalse(project_meta.exists("Призрак"))
+
+    def test_project_dot_task_name_rejected(self):
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак",
+            tasks=[{"dir": "task_0", "name": ".hidden"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "Призрак"}).encode("utf-8"),
+            "task_0/v.mp4": self.video_bytes,
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("точки", resp.json()["error"])
+        self.assertFalse(project_meta.exists("Призрак"))
+
+    def test_project_reserved_task_name_rejected(self):
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак",
+            tasks=[{"dir": "task_0", "name": "projects"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "Призрак"}).encode("utf-8"),
+            "task_0/v.mp4": self.video_bytes,
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("зарезервировано", resp.json()["error"])
+        self.assertFalse(project_meta.exists("Призрак"))
+
+    def test_project_task_without_videos_rejected(self):
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак",
+            tasks=[{"dir": "task_0", "name": "t"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "Призрак"}).encode("utf-8"),
+            "task_0/fragments.tsv": TSV_FIXTURE,
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("нет видео", resp.json()["error"])
+        self.assertFalse(project_meta.exists("Призрак"))
+
+    def test_project_broken_project_json_rejected(self):
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак",
+            tasks=[{"dir": "task_0", "name": "t"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": b"{broken",
+            "task_0/v.mp4": self.video_bytes,
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(project_meta.exists("Призрак"))
+
+    def test_project_invalid_project_json_rejected(self):
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак",
+            tasks=[{"dir": "task_0", "name": "t"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": 123}).encode("utf-8"),
+            "task_0/v.mp4": self.video_bytes,
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("project.json", resp.json()["error"])
+        self.assertFalse(project_meta.exists("Призрак"))
+
+    def test_project_fallback_pid_and_empty_name(self):
+        """Без id в манифесте — проект 'project', пустое имя — id."""
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            tasks=[{"dir": "task_0", "name": "t"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "   "}).encode("utf-8"),
+            "task_0/v.mp4": self.video_bytes,
+        })
+        resp = self.import_archive(data)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        self.assertEqual(resp.json()["id"], "project")
+        meta = project_meta.load("project")
+        self.assertEqual(meta["name"], "project")
+        self.assertTrue(meta["created_at"])
+
+    def test_project_overwrite_twice_reuses_container(self):
+        self.create_project_for_overwrite()
+        archive = self.fetch_zip_url(self.project_backup_url)
+        resp = self.import_archive(archive, "?on_conflict=overwrite")
+        self.assertEqual(resp.status_code, 202, resp.content)
+        self.assertEqual(resp.json()["id"], "Архив")
+        self.assertTrue(project_meta.exists("Архив"))
+        meta = task_meta.load(self.ws_dir)
+        self.assertEqual(meta["project_id"], "Архив")
+
+    def create_project_for_overwrite(self):
+        resp = self.client.post(
+            "/api/v1/projects/", data=json.dumps({"name": "Архив"}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        resp = self.client.post(
+            f"/api/v1/projects/{u('Архив')}/tasks/",
+            data=json.dumps({"task_id": self.ws_id}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.project_backup_url = f"/api/v1/projects/{u('Архив')}/backup"
+
+    def test_project_staging_disk_full_507_no_container(self):
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак",
+            tasks=[{"dir": "task_0", "name": "t"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "Призрак"}).encode("utf-8"),
+            "task_0/v.mp4": self.video_bytes,
+        })
+        nospace = OSError(errno.ENOSPC, "No space left on device")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("vc_pairs.backup.ws_fs.write_stream",
+                            side_effect=nospace):
+                resp = self.import_archive(data)
+        finally:
+            logging.disable(logging.NOTSET)
+        self._507(resp)
+        self.assertFalse(project_meta.exists("Призрак"))
+        self.assertEqual(self._staging_dirs(), [])
+
+    def test_project_place_failure_507_partial_kept(self):
+        """Отказ переезда: размещённое валидно и остаётся, стейджинг убран."""
+        manifest = fmt.make_manifest(
+            fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+            project_id="Призрак",
+            tasks=[{"dir": "task_0", "name": "t"}])
+        data = build_zip({
+            "manifest.json": json.dumps(
+                manifest, ensure_ascii=False).encode("utf-8"),
+            "project.json": json.dumps({"name": "Призрак"}).encode("utf-8"),
+            "task_0/v.mp4": self.video_bytes,
+        })
+        nospace = OSError(errno.ENOSPC, "No space left on device")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("vc_pairs.backup._place_task",
+                            side_effect=nospace):
+                resp = self.import_archive(data)
+        finally:
+            logging.disable(logging.NOTSET)
+        self._507(resp)
+        self.assertEqual(self._staging_dirs(), [])
+
+
+class AnnotationsGapsTests(BackupArchiveMixin, WorkspaceApiTestBase):
+    """Импорт/экспорт разметки: сбои сборки, битые члены, лимиты."""
+
+    def setUp(self):
+        super().setUp()
+        self.ann_url = f"/api/v1/pairs/{self.ws_id}/annotations"
+        frame_provider.get_metadata(self.video)
+
+    def _import(self, data: bytes, query: str = "", trailing: bool = False):
+        suffix = "/" if trailing else ""
+        return self.import_archive(
+            data, query, path=f"{self.ann_url}/import{suffix}")
+
+    def _mocked_open(self, names, manifest, getinfo=None, read=None):
+        zf = mock.MagicMock()
+        if getinfo is not None:
+            zf.getinfo.side_effect = getinfo
+        if read is not None:
+            zf.read.side_effect = read
+        return mock.patch("backup_format.open_archive",
+                          return_value=(zf, names, manifest))
+
+    def test_export_disk_full_507(self):
+        nospace = OSError(errno.ENOSPC, "No space left on device")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("zipfile.ZipFile.write", side_effect=nospace):
+                resp = self.client.get(self.ann_url)
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 507)
+        self.assertIn("места", resp.json()["error"])
+
+    def test_export_unexpected_error_propagates_no_temp(self):
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("zipfile.ZipFile.writestr",
+                            side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    self.client.get(self.ann_url)
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(
+            [e for e in os.listdir(self._tmpdir) if e.startswith(".backup-")],
+            [])
+
+    def test_import_garbage_archive_400(self):
+        resp = self._import(b"not-a-zip-at-all")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("zip", resp.json()["error"].lower())
+
+    def test_import_missing_member_keyerror_400(self):
+        manifest = {"kind": fmt.KIND_ANNOTATIONS}
+        with self._mocked_open(
+                [fmt.FRAGMENTS_FILE], manifest,
+                getinfo=KeyError(fmt.FRAGMENTS_FILE)):
+            resp = self._import(b"ignored")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("нет fragments.tsv", resp.json()["error"])
+
+    def test_import_oversize_fragments_400(self):
+        manifest = {"kind": fmt.KIND_ANNOTATIONS}
+        info = mock.Mock()
+        info.file_size = fmt.FRAGMENTS_MAX_BYTES + 1
+        with self._mocked_open([fmt.FRAGMENTS_FILE], manifest,
+                               getinfo=lambda name: info):
+            resp = self._import(b"ignored")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("подозрительно большая", resp.json()["error"])
+
+    def test_import_corrupt_member_400(self):
+        manifest = {"kind": fmt.KIND_ANNOTATIONS}
+        info = mock.Mock()
+        info.file_size = 10
+        with self._mocked_open(
+                [fmt.FRAGMENTS_FILE], manifest,
+                getinfo=lambda name: info,
+                read=zipfile.BadZipFile("bad")):
+            resp = self._import(b"ignored")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("повреждён", resp.json()["error"])

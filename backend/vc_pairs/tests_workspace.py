@@ -698,3 +698,718 @@ class DeleteRobustnessTests(WorkspaceApiTestBase):
             with EXPORTS_LOCK:
                 EXPORTS.pop(self.ws_id, None)
                 EXPORT_CANCEL.discard(self.ws_id)
+
+
+class _CovHelperMixin:
+    def _video(self, name="vid.mp4"):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        src = os.path.join(os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        with open(src, "rb") as f:
+            data = f.read()
+        return SimpleUploadedFile(name, data, content_type="video/mp4")
+
+
+class StampCoverageTests(WorkspaceApiTestBase):
+    def test_stamp_opened_swallows_load_error(self):
+        import vc_pairs.views as views
+        with mock.patch.object(views.task_meta, "load", side_effect=OSError("boom")):
+            resp = self.client.get(self.ws_detail_url)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_stamp_opened_swallows_save_error(self):
+        import vc_pairs.views as views
+        with mock.patch.object(views.task_meta, "save", side_effect=RuntimeError("boom")):
+            resp = self.client.get(self.ws_detail_url)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_stamp_opened_missing_ws_is_noop(self):
+        import vc_pairs.views as views
+        views._stamp_opened("no-such-ws-zzz")
+
+
+class ValidateCoverageTests(WorkspaceApiTestBase):
+    def test_validate_missing_ws_quiet(self):
+        import workspace as ws_module
+        import vc_pairs.views as views
+        views._validate_workspace_async("no-such-ws-zzz")
+        self.assertIsNone(ws_module.workspace_error("no-such-ws-zzz"))
+
+    def test_validate_no_video_marks_broken(self):
+        import workspace as ws_module
+        import vc_pairs.views as views
+        empty = os.path.join(self._tmpdir, "empty-ws")
+        os.makedirs(empty, exist_ok=True)
+        views._validate_workspace_async("empty-ws")
+        err = ws_module.workspace_error("empty-ws")
+        self.assertIsNotNone(err)
+        self.assertIn("не распознано", err)
+
+    def test_validate_zero_frames_marks_broken(self):
+        import workspace as ws_module
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_metadata",
+                               return_value={"total_frames": 0}):
+            views._validate_workspace_async(self.ws_id)
+        err = ws_module.workspace_error(self.ws_id)
+        self.assertIsNotNone(err)
+        self.assertIn("кадров", err)
+
+    def test_validate_decode_cancelled_quiet(self):
+        import workspace as ws_module
+        import vc_pairs.views as views
+        from vc_pairs import frame_provider as fp
+        with mock.patch.object(views.frame_provider, "get_metadata",
+                               side_effect=fp._DecodeCancelled("gone")):
+            views._validate_workspace_async(self.ws_id)
+        self.assertIsNone(ws_module.workspace_error(self.ws_id))
+
+    def test_validate_oserror_marks_broken(self):
+        import workspace as ws_module
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_metadata",
+                               side_effect=OSError(errno.ENOSPC, "No space")):
+            views._validate_workspace_async(self.ws_id)
+        err = ws_module.workspace_error(self.ws_id)
+        self.assertIsNotNone(err)
+        self.assertIn("места", err)
+
+    def test_validate_generic_error_marks_broken(self):
+        import workspace as ws_module
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_metadata",
+                               side_effect=RuntimeError("bad header")):
+            views._validate_workspace_async(self.ws_id)
+        err = ws_module.workspace_error(self.ws_id)
+        self.assertIsNotNone(err)
+        self.assertIn("Не удалось прочитать", err)
+
+    def test_validate_save_failure_swallowed(self):
+        import workspace as ws_module
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_metadata",
+                               return_value={"total_frames": 10}), \
+             mock.patch.object(views.task_meta, "save", side_effect=OSError("disk")):
+            views._validate_workspace_async(self.ws_id)
+        self.assertIsNone(ws_module.workspace_error(self.ws_id))
+
+
+class UploadCoverageTests(_CovHelperMixin, WorkspaceApiTestBase):
+    def test_upload_race_exists_409(self):
+        import vc_pairs.views as views
+        from videocutter.standalone import workspace as ws_fs_mod
+        with mock.patch.object(views.ws_fs, "create_workspace_pair",
+                               side_effect=ws_fs_mod.WorkspaceExistsError("уже есть")):
+            resp = self.client.post(self.ws_list_url, {"file": self._video(), "name": "race"})
+        self.assertEqual(resp.status_code, 409)
+
+    def test_upload_invalid_workspace_400(self):
+        import vc_pairs.views as views
+        from videocutter.standalone import workspace as ws_fs_mod
+        with mock.patch.object(views.ws_fs, "create_workspace_pair",
+                               side_effect=ws_fs_mod.InvalidWorkspaceError("плохое имя")):
+            resp = self.client.post(self.ws_list_url, {"file": self._video(), "name": "badx"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_upload_unrecognized_rolls_back_400(self):
+        import vc_pairs.views as views
+
+        def _fake_create(root, name, source=None, preview=None):
+            dest = os.path.join(root, name)
+            os.makedirs(dest, exist_ok=True)
+            return dest
+        with mock.patch.object(views.ws_fs, "create_workspace_pair", side_effect=_fake_create):
+            resp = self.client.post(self.ws_list_url, {"file": self._video(), "name": "novid"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("не распознано", resp.json()["error"])
+        self.assertFalse(os.path.isdir(os.path.join(self._tmpdir, "novid")))
+
+    def test_upload_unrecognized_rollback_failure_still_400(self):
+        import vc_pairs.views as views
+
+        def _fake_create(root, name, source=None, preview=None):
+            dest = os.path.join(root, name)
+            os.makedirs(dest, exist_ok=True)
+            return dest
+        with mock.patch.object(views.ws_fs, "create_workspace_pair", side_effect=_fake_create), \
+             mock.patch.object(views.ws_fs, "delete_workspace", side_effect=OSError("busy")):
+            resp = self.client.post(self.ws_list_url, {"file": self._video(), "name": "novid2"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("не распознано", resp.json()["error"])
+
+    def test_upload_reserved_projects_name_400(self):
+        resp = self.client.post(self.ws_list_url, {"file": self._video(), "name": "projects"})
+        self.assertEqual(resp.status_code, 400)
+
+
+class RenameCoverageTests(WorkspaceApiTestBase):
+    def _patch(self, payload_raw):
+        return self.client.patch(
+            self.ws_detail_url, data=payload_raw, content_type="application/json")
+
+    def test_rename_bad_json_400(self):
+        resp = self._patch("{bad json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rename_non_dict_400(self):
+        resp = self._patch("[1, 2]")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rename_display_value_error_400(self):
+        import vc_pairs.views as views
+        with mock.patch.object(views.task_meta, "save", side_effect=ValueError("плохой статус")):
+            resp = self.client.patch(
+                self.ws_detail_url, data=json.dumps({"name": "X"}),
+                content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rename_display_oserror_507(self):
+        import logging
+        import vc_pairs.views as views
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch.object(views.task_meta, "save", side_effect=OSError("disk")):
+                resp = self.client.patch(
+                    self.ws_detail_url, data=json.dumps({"name": "X"}),
+                    content_type="application/json")
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 507)
+
+    def test_rename_id_non_string_400(self):
+        resp = self.client.patch(
+            self.ws_detail_url, data=json.dumps({"id": 42}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rename_id_reserved_400(self):
+        resp = self.client.patch(
+            self.ws_detail_url, data=json.dumps({"id": "projects"}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rename_id_not_found_404(self):
+        import vc_pairs.views as views
+        from videocutter.standalone import workspace as ws_fs_mod
+        with mock.patch.object(views.ws_fs, "rename_workspace",
+                               side_effect=ws_fs_mod.InvalidWorkspaceError("Workspace 'x' не найден")):
+            resp = self.client.patch(
+                self.ws_detail_url, data=json.dumps({"id": "newname"}),
+                content_type="application/json")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_rename_id_invalid_400(self):
+        import vc_pairs.views as views
+        from videocutter.standalone import workspace as ws_fs_mod
+        with mock.patch.object(views.ws_fs, "rename_workspace",
+                               side_effect=ws_fs_mod.InvalidWorkspaceError("Некорректное имя")):
+            resp = self.client.patch(
+                self.ws_detail_url, data=json.dumps({"id": "newname"}),
+                content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rename_moves_export_state(self):
+        from vc_fragments.views import EXPORTS, EXPORTS_LOCK
+        with EXPORTS_LOCK:
+            EXPORTS[self.ws_id] = {"state": "done", "index": 2, "total": 2}
+        try:
+            resp = self.client.patch(
+                self.ws_detail_url, data=json.dumps({"id": "moved-ws"}),
+                content_type="application/json")
+            self.assertEqual(resp.status_code, 200)
+            with EXPORTS_LOCK:
+                self.assertNotIn(self.ws_id, EXPORTS)
+                self.assertIn("moved-ws", EXPORTS)
+        finally:
+            with EXPORTS_LOCK:
+                EXPORTS.pop(self.ws_id, None)
+                EXPORTS.pop("moved-ws", None)
+
+
+class DeleteCoverageTests(WorkspaceApiTestBase):
+    def test_delete_invalid_workspace_404(self):
+        import vc_pairs.views as views
+        from videocutter.standalone import workspace as ws_fs_mod
+        with mock.patch.object(views.ws_fs, "delete_workspace",
+                               side_effect=ws_fs_mod.InvalidWorkspaceError("не найден")):
+            resp = self.client.delete(self.ws_detail_url)
+        self.assertEqual(resp.status_code, 404)
+
+
+class FrameCoverageTests(WorkspaceApiTestBase):
+    def test_frame_missing_ws_404(self):
+        resp = self.client.get("/api/v1/workspaces/nonexistent/frame/0/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_frame_no_video_404(self):
+        empty = os.path.join(self._tmpdir, "novid-ws")
+        os.makedirs(empty, exist_ok=True)
+        resp = self.client.get("/api/v1/workspaces/novid-ws/frame/0/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_frame_bad_quality_400(self):
+        resp = self.client.get(self.ws_frame_url + "?quality=bad")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_frame_bad_scale_400(self):
+        resp = self.client.get(self.ws_frame_url + "?scale=bad")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_frame_cancelled_404(self):
+        import vc_pairs.views as views
+        from vc_pairs import frame_provider as fp
+        with mock.patch.object(views.frame_provider, "get_frame_jpeg",
+                               side_effect=fp._DecodeCancelled("gone")):
+            resp = self.client.get(self.ws_frame_url)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_frame_unavailable_404(self):
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_frame_jpeg",
+                               return_value=(None, None, {"source": "?"})):
+            resp = self.client.get(self.ws_frame_url)
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("недоступен", resp.json()["error"])
+
+    def test_frame_ok(self):
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_frame_jpeg",
+                               return_value=(b"fakejpeg", "image/jpeg", {"source": "cache"})):
+            resp = self.client.get(self.ws_frame_url + "?quality=50&scale=0.5")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "image/jpeg")
+        self.assertEqual(resp["X-Cache"], "cache")
+        self.assertIn("X-Decode-Ms", resp)
+        self.assertEqual(resp["Cache-Control"], "private, max-age=3600")
+        self.assertNotIn("X-Abandoned", resp)
+
+    def test_frame_ok_abandoned(self):
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_frame_jpeg",
+                               return_value=(b"fakejpeg", "image/jpeg",
+                                             {"source": "decode", "abandoned": True})):
+            resp = self.client.get(self.ws_frame_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["X-Abandoned"], "1")
+
+    def test_frame_original_kind(self):
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_frame_jpeg",
+                               return_value=(b"fakejpeg", "image/jpeg", {"source": "cache"})) as m:
+            resp = self.client.get(self.ws_frame_url + "?video=original")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(m.called)
+
+
+class CacheCoverageTests(WorkspaceApiTestBase):
+    def test_cache_bad_json_400(self):
+        resp = self.client.post("/api/v1/cache/", data="{bad", content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_cache_invalid_caps_400(self):
+        resp = self.client.post(
+            "/api/v1/cache/", data=json.dumps({"gops": 0}),
+            content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_cache_get_ok(self):
+        resp = self.client.get("/api/v1/cache/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("caps", resp.json())
+
+    def test_debug_threads_ok(self):
+        resp = self.client.get("/api/v1/debug/threads")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_meta_missing_404(self):
+        resp = self.client.get("/api/v1/workspaces/nonexistent/meta")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_upload_status_bad_id_404(self):
+        resp = self.client.get("/api/v1/uploads/bad id!/status")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_upload_status_missing_404(self):
+        resp = self.client.get("/api/v1/uploads/0123456789abcdef0123456789abcdef/status")
+        self.assertEqual(resp.status_code, 404)
+
+
+class RoleCoverageTests(_CovHelperMixin, WorkspaceApiTestBase):
+    def test_assign_invalid_file_400(self):
+        resp = self.client.post(f"/api/v1/workspaces/{self.ws_id}/video/preview/",
+                                {"assign": "gone.mp4"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_role_missing_file_400(self):
+        resp = self.client.post(f"/api/v1/workspaces/{self.ws_id}/video/preview/", {})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_role_existing_unknown_400(self):
+        resp = self.client.post(
+            f"/api/v1/workspaces/{self.ws_id}/video/preview/",
+            {"file": self._video(), "existing": "bogus"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_role_existing_equals_role_400(self):
+        resp = self.client.post(
+            f"/api/v1/workspaces/{self.ws_id}/video/source/",
+            {"file": self._video(), "existing": "source"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_role_zero_frames_400(self):
+        import vc_pairs.views as views
+        with mock.patch.object(views.frame_provider, "get_metadata",
+                               return_value={"total_frames": 0}):
+            resp = self.client.post(
+                f"/api/v1/workspaces/{self.ws_id}/video/preview/",
+                {"file": self._video()})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("кадров", resp.json()["error"])
+
+    def test_role_invalid_content_400(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        bad = SimpleUploadedFile("bad.mp4", b"not a video", content_type="video/mp4")
+        resp = self.client.post(
+            f"/api/v1/workspaces/{self.ws_id}/video/preview/", {"file": bad})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_role_existing_no_neutral_400(self):
+        self.client.post(self.ws_list_url, {
+            "source": self._video("a.mp4"),
+            "preview": self._video("b.mp4"),
+            "name": "pair608",
+        })
+        resp = self.client.post(
+            "/api/v1/workspaces/pair608/video/preview/",
+            {"file": self._video("c.mp4"), "existing": "source"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("existing", resp.json()["error"])
+
+    def test_role_commit_invalid_400(self):
+        import vc_pairs.views as views
+        from videocutter.standalone import workspace as ws_fs_mod
+        with mock.patch.object(views.ws_fs, "commit_role_upload",
+                               side_effect=ws_fs_mod.InvalidWorkspaceError("плохая роль")):
+            resp = self.client.post(
+                f"/api/v1/workspaces/{self.ws_id}/video/preview/",
+                {"file": self._video()})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_role_commit_oserror_507(self):
+        import logging
+        import vc_pairs.views as views
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch.object(views.ws_fs, "commit_role_upload",
+                                   side_effect=OSError("disk")):
+                resp = self.client.post(
+                    f"/api/v1/workspaces/{self.ws_id}/video/preview/",
+                    {"file": self._video()})
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 507)
+
+    def test_role_write_oserror_507(self):
+        import logging
+        import vc_pairs.views as views
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch.object(views.ws_fs, "write_stream",
+                                   side_effect=OSError("disk")):
+                resp = self.client.post(
+                    f"/api/v1/workspaces/{self.ws_id}/video/preview/",
+                    {"file": self._video()})
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, 507)
+
+    def test_delete_role_not_explicit_400(self):
+        hole = os.path.join(self._tmpdir, "rolehole")
+        os.makedirs(hole, exist_ok=True)
+        shutil.copy2(self.video, os.path.join(hole, "preview.mp4"))
+        shutil.copy2(self.video, os.path.join(hole, "neut.mp4"))
+        resp = self.client.delete("/api/v1/workspaces/rolehole/video/source/")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("не выделена", resp.json()["error"])
+
+    def test_delete_role_closes_old_provider(self):
+        import tempfile
+        import vc_pairs.views as views
+        from django.http import JsonResponse
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        tmp.write(b"x")
+        tmp.close()
+        self.addCleanup(lambda: os.path.exists(tmp.name) and os.remove(tmp.name))
+        ws = mock.Mock()
+        ws.original = "/tmp/other-source.mp4"
+        ws.visualization = tmp.name
+        ws.name = self.ws_id
+        with mock.patch.object(views.ws_fs, "remove_role_file", return_value=tmp.name), \
+             mock.patch.object(views.frame_provider, "close_source") as mclose, \
+             mock.patch.object(views, "scan_workspaces"), \
+             mock.patch.object(views, "bump_updated_at"), \
+             mock.patch.object(views, "_entry_response", return_value=JsonResponse({"id": "x"})):
+            resp = views._delete_role(ws, "preview")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(mclose.called)
+
+
+class SwapCoverageTests(WorkspaceApiTestBase):
+    def test_swap_missing_404(self):
+        resp = self.client.post("/api/v1/workspaces/nonexistent/swap/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_swap_needs_two_400(self):
+        resp = self.client.post(f"/api/v1/workspaces/{self.ws_id}/swap/")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_swap_promotes_neutral_roles(self):
+        import vc_pairs.views as views
+        from django.http import JsonResponse
+        ws = mock.Mock()
+        ws.original = "/tmp/neut1.mp4"
+        ws.visualization = "/tmp/neut2.mp4"
+        ws.name = self.ws_id
+        with mock.patch.object(views, "get_workspace", return_value=ws), \
+             mock.patch.object(views.ws_fs, "promote_plain_video", return_value="/tmp/x") as mprom, \
+             mock.patch.object(views.ws_fs, "swap_role_files",
+                               return_value=("/tmp/s", "/tmp/p")), \
+             mock.patch.object(views.frame_provider, "close_source"), \
+             mock.patch.object(views, "scan_workspaces"), \
+             mock.patch.object(views, "bump_updated_at"), \
+             mock.patch.object(views, "_entry_response", return_value=JsonResponse({"id": "x"})):
+            resp = self.client.post(f"/api/v1/workspaces/{self.ws_id}/swap/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(mprom.call_count, 2)
+
+    def test_swap_invalid_400(self):
+        import vc_pairs.views as views
+        from videocutter.standalone import workspace as ws_fs_mod
+        ws = mock.Mock()
+        ws.original = "/tmp/a.mp4"
+        ws.visualization = "/tmp/b.mp4"
+        ws.name = self.ws_id
+        with mock.patch.object(views, "get_workspace", return_value=ws), \
+             mock.patch.object(views.ws_fs, "promote_plain_video", return_value=None), \
+             mock.patch.object(views.ws_fs, "swap_role_files",
+                               side_effect=ws_fs_mod.InvalidWorkspaceError("нужны два файла")):
+            resp = self.client.post(f"/api/v1/workspaces/{self.ws_id}/swap/")
+        self.assertEqual(resp.status_code, 400)
+
+
+class WorkspaceUnitCoverageTests(WorkspaceApiTestBase):
+    def test_has_visualization(self):
+        import workspace as ws_module
+        ws = ws_module.get_workspace(self.ws_id)
+        self.assertTrue(ws.has_visualization)
+        empty_dir = os.path.join(self._tmpdir, "empty-hv")
+        os.makedirs(empty_dir, exist_ok=True)
+        empty = ws_module.Workspace(name="empty-hv", path=empty_dir)
+        self.assertFalse(empty.has_visualization)
+
+    def test_video_metadata_no_file(self):
+        import workspace as ws_module
+        empty_dir = os.path.join(self._tmpdir, "empty-vm")
+        os.makedirs(empty_dir, exist_ok=True)
+        ws = ws_module.Workspace(name="empty-vm", path=empty_dir)
+        meta = ws.video_metadata("preview")
+        self.assertEqual(meta["total_frames"], 0)
+
+    def test_read_bad_position_kept_zero(self):
+        import workspace as ws_module
+        d = os.path.join(self._tmpdir, "badpos")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "fragments.tsv"), "w", encoding="utf-8") as f:
+            f.write("# position\tnot-a-number\n")
+            f.write("start\tend\tcomment\n0\t3\tx\n")
+        ws = ws_module.Workspace(name="badpos", path=d)
+        self.assertEqual(ws.load_position(), 0)
+
+    def test_read_bad_settings_kept_default(self):
+        import workspace as ws_module
+        d = os.path.join(self._tmpdir, "badset")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "fragments.tsv"), "w", encoding="utf-8") as f:
+            f.write("# settings\tbad\tbad\n")
+            f.write("start\tend\tcomment\n0\t3\tx\n")
+        ws = ws_module.Workspace(name="badset", path=d)
+        q, s = ws.load_settings()
+        self.assertEqual((q, s), (ws_module.DEFAULT_QUALITY, ws_module.DEFAULT_SCALE))
+
+    def test_read_skips_broken_rows(self):
+        import workspace as ws_module
+        d = os.path.join(self._tmpdir, "badrows")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "fragments.tsv"), "w", encoding="utf-8") as f:
+            f.write("start\tend\tcomment\n")
+            f.write("bad\t3\tx\n")
+            f.write("5\tbad\ty\n")
+            f.write("0\t2\tok\n")
+        ws = ws_module.Workspace(name="badrows", path=d)
+        frags = ws.load_fragments()
+        self.assertEqual(len(frags), 1)
+        self.assertEqual(frags[0]["comment"], "ok")
+
+    def test_parse_csv_error_400(self):
+        import csv as _csv
+        import workspace as ws_module
+        with mock.patch.object(ws_module.csv, "DictReader", side_effect=_csv.Error("bad")):
+            frags, pos, problem = ws_module.parse_fragments_tsv_strict(
+                b"start\tend\n0\t1\n", 10)
+        self.assertIsNone(frags)
+        self.assertEqual(problem[0], 400)
+
+    def test_rename_workspace_error_moves(self):
+        import workspace as ws_module
+        ws_module.note_workspace_error("old-ws", "boom")
+        ws_module.rename_workspace_error("old-ws", "new-ws")
+        self.assertEqual(ws_module.workspace_error("new-ws"), "boom")
+        self.assertIsNone(ws_module.workspace_error("old-ws"))
+        ws_module.clear_workspace_error("new-ws")
+
+    def test_updated_at_oserror_zero(self):
+        import workspace as ws_module
+        ws = ws_module.get_workspace(self.ws_id)
+        with mock.patch.object(ws_module.os.path, "getmtime", side_effect=OSError("gone")):
+            self.assertEqual(ws_module._workspace_updated_at(ws), 0.0)
+
+    def test_bump_updated_at_double_failure(self):
+        import workspace as ws_module
+        ws = ws_module.get_workspace(self.ws_id)
+        with mock.patch.object(ws_module.os, "utime", side_effect=OSError("ro")):
+            ws_module.bump_updated_at(ws)
+
+    def test_video_ver_oserror_fallback(self):
+        import workspace as ws_module
+        ws = ws_module.get_workspace(self.ws_id)
+        _ = ws.original
+        _ = ws.visualization
+        with mock.patch.object(ws_module.os, "stat", side_effect=OSError("gone")):
+            ver = ws_module._video_ver(ws)
+        self.assertIn(".mp4", ver)
+
+    def test_pair_warning_skipped(self):
+        import workspace as ws_module
+        w = ws_module._pair_warning(
+            {"skipped_frames": 2, "total_frames": 10},
+            {"skipped_frames": 3, "total_frames": 10}, True)
+        self.assertIn("источнике", w)
+        self.assertIn("превью", w)
+
+    def test_pair_warning_mismatch(self):
+        import workspace as ws_module
+        w = ws_module._pair_warning(
+            {"skipped_frames": 0, "total_frames": 10},
+            {"skipped_frames": 0, "total_frames": 9}, True)
+        self.assertIn("не совпадает", w)
+
+    def test_task_dates_oserror_none(self):
+        import workspace as ws_module
+        import task_meta as tm
+        ws = ws_module.get_workspace(self.ws_id)
+        with mock.patch.object(tm, "load", side_effect=OSError("gone")):
+            self.assertEqual(ws_module._task_dates(ws), (None, None, None))
+
+    def test_task_display_oserror_fallback(self):
+        import workspace as ws_module
+        import task_meta as tm
+        ws = ws_module.get_workspace(self.ws_id)
+        with mock.patch.object(tm, "load", side_effect=OSError("gone")):
+            self.assertEqual(ws_module._task_display_name(ws), ws.name)
+
+    def test_export_state_import_failure_none(self):
+        import sys as _sys
+        import workspace as ws_module
+        ws = ws_module.get_workspace(self.ws_id)
+        with mock.patch.dict(_sys.modules, {"vc_fragments.views": None}):
+            self.assertIsNone(ws_module._export_state(ws.name))
+
+    def test_fast_role_meta_no_path(self):
+        import workspace as ws_module
+        empty_dir = os.path.join(self._tmpdir, "empty-fast")
+        os.makedirs(empty_dir, exist_ok=True)
+        ws = ws_module.Workspace(name="empty-fast", path=empty_dir)
+        meta, ready = ws_module._fast_role_meta(ws, "preview")
+        self.assertTrue(ready)
+        self.assertEqual(meta["total_frames"], 0)
+
+    def test_fast_role_meta_index_error_raises(self):
+        import workspace as ws_module
+        from vc_pairs import frame_provider as fp
+        ws = ws_module.get_workspace(self.ws_id)
+        with mock.patch.object(fp, "try_get_metadata", return_value=None), \
+             mock.patch.object(fp, "index_error", return_value="boom"):
+            with self.assertRaises(ValueError):
+                ws_module._fast_role_meta(ws, "preview")
+
+    def test_status_broken_via_error(self):
+        import workspace as ws_module
+        ws = ws_module.get_workspace(self.ws_id)
+        ws_module.note_workspace_error(self.ws_id, "boom")
+        try:
+            st = ws_module.workspace_status_entry(ws)
+            self.assertTrue(st["broken"])
+        finally:
+            ws_module.clear_workspace_error(self.ws_id)
+
+    def test_status_index_error_broken(self):
+        import workspace as ws_module
+        ws = ws_module.get_workspace(self.ws_id)
+        with mock.patch.object(ws_module, "_index_state", side_effect=ValueError("idx fail")):
+            st = ws_module.workspace_status_entry(ws)
+        self.assertTrue(st["broken"])
+
+    def test_detail_slow_broken(self):
+        import workspace as ws_module
+        with mock.patch.object(ws_module, "_pair_entry",
+                               side_effect=[{"indexing": False}, ValueError("boom")]):
+            detail = ws_module.get_workspace_detail(self.ws_id)
+        self.assertTrue(detail["broken"])
+
+    def test_safe_returns_default(self):
+        import workspace as ws_module
+
+        def _boom():
+            raise RuntimeError("x")
+        self.assertEqual(ws_module._safe(_boom, "dflt"), "dflt")
+
+
+class TaskMetaCoverageTests(WorkspaceApiTestBase):
+    def test_as_str_list_non_list(self):
+        import task_meta as tm
+        out = tm.validate({"assignees": "ivan"})
+        self.assertEqual(out["assignees"], [])
+
+    def test_as_str_list_filters(self):
+        import task_meta as tm
+        out = tm.validate({"assignees": ["ivan", 42, None, ["x"]]})
+        self.assertEqual(out["assignees"], ["ivan", "42"])
+
+    def test_notes_none_becomes_empty(self):
+        import task_meta as tm
+        out = tm.validate({"notes": None})
+        self.assertEqual(out["notes"], "")
+
+    def test_name_none_becomes_empty(self):
+        import task_meta as tm
+        out = tm.validate({"name": None})
+        self.assertEqual(out["name"], "")
+
+    def test_name_non_string_rejected(self):
+        import task_meta as tm
+        with self.assertRaises(ValueError):
+            tm.validate({"name": 42})
+
+    def test_project_id_non_string_rejected(self):
+        import task_meta as tm
+        with self.assertRaises(ValueError):
+            tm.validate({"project_id": 42})
+
+    def test_project_id_blank_becomes_none(self):
+        import task_meta as tm
+        out = tm.validate({"project_id": "   "})
+        self.assertIsNone(out["project_id"])
+
+    def test_now_iso_ok(self):
+        import task_meta as tm
+        self.assertTrue(tm.now_iso())
+        self.assertTrue(tm.init_new()["created_at"])

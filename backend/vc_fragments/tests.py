@@ -897,3 +897,590 @@ class SettingsApiTests(WorkspaceApiTestBase):
     def test_settings_405_for_post(self):
         resp = self.client.post(self.settings_url)
         self.assertEqual(resp.status_code, 405)
+
+
+class ExportNiceFallbackTests(WorkspaceApiTestBase):
+    def test_export_nice_bad_value_fallback(self):
+        import importlib
+        import sys
+        import vc_fragments.views as v
+        tmod = sys.modules[__name__]
+        orig = os.environ.get("VC_EXPORT_NICE")
+        try:
+            with mock.patch.dict(os.environ, {"VC_EXPORT_NICE": "not-a-number"}):
+                importlib.reload(v)
+            self.assertEqual(v.EXPORT_NICE, 19)
+        finally:
+            if orig is None:
+                os.environ.pop("VC_EXPORT_NICE", None)
+            else:
+                os.environ["VC_EXPORT_NICE"] = orig
+            importlib.reload(v)
+            tmod.EXPORTS = v.EXPORTS
+            tmod.EXPORTS_LOCK = v.EXPORTS_LOCK
+            tmod.EXPORT_CANCEL = v.EXPORT_CANCEL
+            tmod._EXPORT_QUEUE = v._EXPORT_QUEUE
+
+
+class ExportCapacityEnvTests(WorkspaceApiTestBase):
+    def test_capacity_valid_and_invalid(self):
+        import vc_fragments.views as v
+        with mock.patch.dict(os.environ, {"VC_EXPORT_WORKERS": "2"}):
+            self.assertEqual(v._export_capacity(), 2)
+        with mock.patch.dict(os.environ, {"VC_EXPORT_WORKERS": "0"}):
+            self.assertEqual(v._export_capacity(), 1)
+        with mock.patch.dict(os.environ, {"VC_EXPORT_WORKERS": "bad"}):
+            self.assertGreaterEqual(v._export_capacity(), 1)
+
+
+class VideoIdentityAndStateTests(WorkspaceApiTestBase):
+    def test_video_identity_missing(self):
+        import vc_fragments.views as v
+        self.assertIsNone(v._video_identity(os.path.join(self.ws_dir, "nope.mp4")))
+
+    def test_export_failed_direct(self):
+        import vc_fragments.views as v
+        v._export_failed(self.ws_id, "boom")
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+        self.assertEqual(st["error"], "boom")
+
+    def test_export_finished_ok_sidecar_oserror(self):
+        import vc_fragments.views as v
+        created = [os.path.join(self.ws_dir, "exports", "a_fragment_1.mp4")]
+        with mock.patch("builtins.open", side_effect=OSError("ro")):
+            v._export_finished_ok(self.ws_id, created, "hash123")
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "done")
+
+    def test_export_cancelled_cleans_partial(self):
+        import vc_fragments.views as v
+        keep = os.path.join(self.ws_dir, "gone.mp4")
+        Path = os.path.join(self.ws_dir, "todel.mp4")
+        with open(Path, "wb") as f:
+            f.write(b"x")
+        v._export_cancelled(self.ws_id, [Path, keep])
+        self.assertFalse(os.path.exists(Path))
+        with EXPORTS_LOCK:
+            self.assertEqual(EXPORTS.get(self.ws_id, {}).get("state"), "cancelled")
+
+
+class ProbeDecodeBranchTests(WorkspaceApiTestBase):
+    def test_ffprobe_oserror(self):
+        import vc_fragments.views as v
+        with mock.patch.object(v.subprocess, "run", side_effect=OSError("no bin")):
+            self.assertIsNone(v._ffprobe_frame_count(self.video))
+
+    def test_ffprobe_nonzero(self):
+        import vc_fragments.views as v
+        m = mock.Mock(returncode=1, stdout="", stderr="")
+        with mock.patch.object(v.subprocess, "run", return_value=m):
+            self.assertIsNone(v._ffprobe_frame_count(self.video))
+
+    def test_ffprobe_bad_stdout(self):
+        import vc_fragments.views as v
+        m = mock.Mock(returncode=0, stdout="oops\n", stderr="")
+        with mock.patch.object(v.subprocess, "run", return_value=m):
+            self.assertIsNone(v._ffprobe_frame_count(self.video))
+        m2 = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(v.subprocess, "run", return_value=m2):
+            self.assertIsNone(v._ffprobe_frame_count(self.video))
+
+    def test_decode_thumbs_oserror(self):
+        import vc_fragments.views as v
+        with mock.patch.object(v.subprocess, "run", side_effect=OSError("no bin")):
+            self.assertIsNone(v._decode_thumbs(self.video, 3))
+
+    def test_decode_thumbs_nonzero(self):
+        import vc_fragments.views as v
+        m = mock.Mock(returncode=1, stdout=b"", stderr=b"")
+        with mock.patch.object(v.subprocess, "run", return_value=m):
+            self.assertIsNone(v._decode_thumbs(self.video, 3))
+
+    def test_decode_thumbs_misaligned(self):
+        import vc_fragments.views as v
+        m = mock.Mock(returncode=0, stdout=b"x" * 10)
+        with mock.patch.object(v.subprocess, "run", return_value=m):
+            self.assertIsNone(v._decode_thumbs(self.video, 3))
+
+
+class VerifyCutExtraTests(WorkspaceApiTestBase):
+    def test_verify_cut_decode_fail(self):
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+        with mock.patch.object(v, "_ffprobe_frame_count", return_value=2), \
+                mock.patch.object(v, "_decode_thumbs", return_value=None):
+            with self.assertRaises(FFmpegError):
+                v._verify_cut(self.video, 0, self.video, 2)
+
+    def test_verify_cut_etalon_fail(self):
+        import numpy as np
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+        got = [np.zeros(2304, dtype=np.float32) for _ in range(2)]
+        with mock.patch.object(v, "_ffprobe_frame_count", return_value=2), \
+                mock.patch.object(v, "_decode_thumbs", side_effect=[got, None]):
+            with self.assertRaises(FFmpegError):
+                v._verify_cut(self.video, 0, self.video, 2)
+        with mock.patch.object(v, "_ffprobe_frame_count", return_value=2), \
+                mock.patch.object(v, "_decode_thumbs", side_effect=[got, [np.zeros(2304, dtype=np.float32)]]):
+            with self.assertRaises(FFmpegError):
+                v._verify_cut(self.video, 0, self.video, 2)
+
+    def test_verify_cut_shift_detected(self):
+        import numpy as np
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+        exp0 = np.zeros(2304, dtype=np.float32)
+        exp1 = np.full(2304, 255, dtype=np.float32)
+        exp2 = np.zeros(2304, dtype=np.float32)
+        got = [np.full(2304, 255, dtype=np.float32),
+               np.zeros(2304, dtype=np.float32),
+               np.zeros(2304, dtype=np.float32)]
+        exp_all = [exp0, exp1, exp2]
+        with mock.patch.object(v, "_ffprobe_frame_count", return_value=3), \
+                mock.patch.object(v, "_decode_thumbs", side_effect=[got, exp_all]):
+            with self.assertRaises(FFmpegError) as ctx:
+                v._verify_cut(self.video, 0, self.video, 3)
+        self.assertIn("сдвиг", str(ctx.exception))
+
+
+class RunExportErrorTests(WorkspaceApiTestBase):
+    def test_run_export_ws_missing(self):
+        import vc_fragments.views as v
+        v._run_export("ghost-ws-xyz-missing")
+        with EXPORTS_LOCK:
+            st = EXPORTS.get("ghost-ws-xyz-missing")
+        self.assertIsNotNone(st)
+        self.assertEqual(st["state"], "error")
+
+    def test_run_export_no_frags(self):
+        import vc_fragments.views as v
+        ws_dir = os.path.join(self._tmpdir, "empty-ws")
+        os.makedirs(ws_dir, exist_ok=True)
+        shutil.copy2(self.video, os.path.join(ws_dir, "visualization.mp4"))
+        with open(os.path.join(ws_dir, "fragments.tsv"), "w") as f:
+            f.write("start\tend\tcomment\n")
+        v._run_export("empty-ws")
+        with EXPORTS_LOCK:
+            st = EXPORTS.get("empty-ws")
+        self.assertEqual(st["state"], "error")
+
+    def test_run_export_fragment_out_of_range(self):
+        import vc_fragments.views as v
+        with mock.patch.object(v.frame_provider, "get_visible_pts", return_value=[0, 1]), \
+                mock.patch.object(v.frame_provider, "index_pts_unreliable", return_value=False):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+        self.assertIn("вне диапазона", st["error"])
+
+    def test_run_export_by_count_out_of_range(self):
+        import vc_fragments.views as v
+        with mock.patch.object(v.frame_provider, "get_visible_pts", return_value=[0, 1]), \
+                mock.patch.object(v.frame_provider, "index_pts_unreliable", return_value=True):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+        self.assertIn("вне диапазона", st["error"])
+
+    def test_run_export_by_count_valid(self):
+        import vc_fragments.views as v
+
+        class EmptyExporter:
+            def __init__(self, *a, **k):
+                pass
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                self.seen_ranges = frame_ts_ranges
+                return []
+
+        exp = EmptyExporter
+        vpts = [i * 100000 for i in range(12)]
+        with mock.patch.object(v.frame_provider, "get_visible_pts", return_value=vpts), \
+                mock.patch.object(v.frame_provider, "index_pts_unreliable", return_value=True), \
+                mock.patch.object(v, "Exporter", exp):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "done")
+
+    def test_run_export_cancel_listdir_oserror(self):
+        import vc_fragments.views as v
+        real_listdir = os.listdir
+        exp_calls = []
+
+        def fake_listdir(p, *a, **k):
+            if os.path.abspath(p) == os.path.abspath(os.path.join(self.ws_dir, "exports")):
+                exp_calls.append(p)
+                if len(exp_calls) == 1:
+                    return []
+                raise OSError("gone")
+            return real_listdir(p, *a, **k)
+
+        class CancelExporter:
+            def __init__(self, *a, **k):
+                pass
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                raise v._ExportCancelled()
+
+        with mock.patch.object(v, "Exporter", CancelExporter), \
+                mock.patch.object(v.os, "listdir", side_effect=fake_listdir):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "cancelled")
+
+    def test_run_export_ffmpeg_error_cleanup(self):
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+
+        class FailExporter:
+            def __init__(self, src, out_dir, **k):
+                self.out_dir = out_dir
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                with open(os.path.join(self.out_dir, "video_fragment_1.mp4"), "wb") as f:
+                    f.write(b"x")
+                raise FFmpegError("boom-ffmpeg")
+
+        vpts = [i * 100000 for i in range(12)]
+        with mock.patch.object(v.frame_provider, "get_visible_pts", return_value=vpts), \
+                mock.patch.object(v.frame_provider, "index_pts_unreliable", return_value=False), \
+                mock.patch.object(v, "Exporter", FailExporter):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+        self.assertIn("boom-ffmpeg", st["error"])
+        out_dir = os.path.join(self.ws_dir, "exports")
+        if os.path.isdir(out_dir):
+            self.assertNotIn("video_fragment_1.mp4", os.listdir(out_dir))
+
+    def test_run_export_ffmpeg_error_listdir_and_remove_oserror(self):
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+
+        class FailExporter2:
+            def __init__(self, src, out_dir, **k):
+                self.out_dir = out_dir
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                with open(os.path.join(self.out_dir, "video_fragment_9.mp4"), "wb") as f:
+                    f.write(b"x")
+                raise FFmpegError("boom2")
+
+        vpts = [i * 100000 for i in range(12)]
+        real_listdir = os.listdir
+        out_dir = os.path.join(self.ws_dir, "exports")
+        calls = []
+
+        def fake_listdir(p, *a, **k):
+            if os.path.abspath(p) == os.path.abspath(out_dir):
+                calls.append(p)
+                if len(calls) == 1:
+                    return real_listdir(p, *a, **k)
+                raise OSError("gone")
+            return real_listdir(p, *a, **k)
+
+        with mock.patch.object(v.frame_provider, "get_visible_pts", return_value=vpts), \
+                mock.patch.object(v.frame_provider, "index_pts_unreliable", return_value=False), \
+                mock.patch.object(v, "Exporter", FailExporter2), \
+                mock.patch.object(v.os, "listdir", side_effect=fake_listdir), \
+                mock.patch.object(v.os, "remove", side_effect=OSError("ro")):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+
+    def test_run_export_ffmpeg_remove_oserror(self):
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+
+        class FailExporter3:
+            def __init__(self, src, out_dir, **k):
+                self.out_dir = out_dir
+
+            def extract_fragments(self, fragments, progress=None, cancelled=None,
+                                  frame_ts_ranges=None):
+                with open(os.path.join(self.out_dir, "video_fragment_7.mp4"), "wb") as f:
+                    f.write(b"x")
+                raise FFmpegError("boom3")
+
+        vpts = [i * 100000 for i in range(12)]
+        with mock.patch.object(v.frame_provider, "get_visible_pts", return_value=vpts), \
+                mock.patch.object(v.frame_provider, "index_pts_unreliable", return_value=False), \
+                mock.patch.object(v, "Exporter", FailExporter3), \
+                mock.patch.object(v.os, "remove", side_effect=OSError("ro")):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+
+    def test_run_export_generic_exception(self):
+        import vc_fragments.views as v
+
+        class BoomExporter:
+            def __init__(self, *a, **k):
+                pass
+
+            def extract_fragments(self, *a, **k):
+                raise RuntimeError("boom-generic")
+
+        vpts = [i * 100000 for i in range(12)]
+        with mock.patch.object(v.frame_provider, "get_visible_pts", return_value=vpts), \
+                mock.patch.object(v.frame_provider, "index_pts_unreliable", return_value=False), \
+                mock.patch.object(v, "Exporter", BoomExporter):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+        self.assertIn("boom-generic", st["error"])
+
+
+class FragmentsValidationExtraTests(WorkspaceApiTestBase):
+    def test_put_bad_json(self):
+        resp = self.client.put(self.frags_url, data="not json{",
+                               content_type="application/json")
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_bad_position_type(self):
+        resp = self.json_put(self.frags_url, {"fragments": [{"start": 0, "end": 1}],
+                                              "position": "bad"})
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_position_out_of_range(self):
+        resp = self.json_put(self.frags_url, {"fragments": [{"start": 0, "end": 1}],
+                                              "position": 9999})
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_item_not_dict(self):
+        resp = self.json_put(self.frags_url, [123])
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_item_bad_start_end(self):
+        resp = self.json_put(self.frags_url, [{"start": "x", "end": 1}])
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+        resp2 = self.json_put(self.frags_url, [{"start": 0}])
+        self.assertEqual(resp2.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_item_out_of_range(self):
+        resp = self.json_put(self.frags_url, [{"start": -1, "end": 1}])
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+        resp2 = self.json_put(self.frags_url, [{"start": 0, "end": 9999}])
+        self.assertEqual(resp2.status_code, HTTP_BAD_REQUEST)
+        resp3 = self.json_put(self.frags_url, [{"start": 5, "end": 2}])
+        self.assertEqual(resp3.status_code, HTTP_BAD_REQUEST)
+
+
+class PositionValidationExtraTests(WorkspaceApiTestBase):
+    def test_put_bad_json(self):
+        resp = self.client.put(self.position_url, data="not json{",
+                               content_type="application/json")
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_missing_position(self):
+        resp = self.json_put(self.position_url, {})
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+        resp2 = self.json_put(self.position_url, [1, 2])
+        self.assertEqual(resp2.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_bad_position_type(self):
+        resp = self.json_put(self.position_url, {"position": "bad"})
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+
+class SettingsValidationExtraTests(WorkspaceApiTestBase):
+    def setUp(self):
+        super().setUp()
+        self.settings_url = f"/api/v1/pairs/{self.ws_id}/settings"
+
+    def test_put_bad_json(self):
+        resp = self.client.put(self.settings_url, data="not json{",
+                               content_type="application/json")
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_not_dict(self):
+        resp = self.json_put(self.settings_url, [1, 2])
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+
+    def test_put_bad_quality_scale_type(self):
+        resp = self.json_put(self.settings_url, {"quality": "bad"})
+        self.assertEqual(resp.status_code, HTTP_BAD_REQUEST)
+        resp2 = self.json_put(self.settings_url, {"scale": "bad"})
+        self.assertEqual(resp2.status_code, HTTP_BAD_REQUEST)
+
+
+class ExportHttpExtraTests(WorkspaceApiTestBase):
+    def test_export_missing_workspace(self):
+        resp = self.client.post("/api/v1/pairs/nonexistent/export")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_force_over_running(self):
+        import vc_fragments.views as export_views
+        gate = threading.Event()
+
+        class GatedExporter:
+            def __init__(self, *a, **k):
+                pass
+
+            def extract_fragments(self, fragments, progress=None,
+                                  cancelled=None, frame_ts_ranges=None):
+                from videocutter.core.exporter import ExportCancelled
+                if progress:
+                    progress(1, len(fragments), fragments[0])
+                while not gate.is_set():
+                    if cancelled is not None and cancelled():
+                        raise ExportCancelled("cancelled")
+                    time.sleep(0.02)
+                return []
+
+        with mock.patch.object(export_views, "_export_capacity", return_value=1), \
+                mock.patch.object(export_views, "Exporter", GatedExporter):
+            try:
+                body = self.client.post(self.export_url).json()
+                self.assertEqual(body["state"], "running")
+                deadline = time.time() + 15
+                while True:
+                    st = self.client.get(self.export_status_url).json()
+                    if st.get("index", 0) >= 1:
+                        break
+                    if time.time() > deadline:
+                        self.fail("did not reach running")
+                    time.sleep(0.02)
+                resp = self.client.post(self.export_url + "?force=1")
+                self.assertEqual(resp.status_code, HTTP_OK)
+                deadline = time.time() + 15
+                while True:
+                    with EXPORTS_LOCK:
+                        cancelled = self.ws_id in EXPORT_CANCEL
+                        q = list(_EXPORT_QUEUE)
+                    if cancelled or q:
+                        break
+                    if time.time() > deadline:
+                        break
+                    time.sleep(0.02)
+                gate.set()
+                deadline = time.time() + 30
+                while True:
+                    st = self.client.get(self.export_status_url).json()
+                    if st["state"] == "done":
+                        break
+                    if time.time() > deadline:
+                        self.fail(f"force rerun not done: {st}")
+                    time.sleep(0.05)
+            finally:
+                gate.set()
+
+    def test_status_error(self):
+        with EXPORTS_LOCK:
+            EXPORTS[self.ws_id] = {"state": "error", "error": "boom"}
+        resp = self.client.get(self.export_status_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        body = resp.json()
+        self.assertEqual(body["state"], "error")
+
+    def test_current_done_ws_missing(self):
+        import vc_fragments.views as v
+        self.assertIsNone(v._current_done("ghost-ws-zzz"))
+        resp = self.client.get("/api/v1/pairs/ghost-ws-zzz/export/status")
+        self.assertEqual(resp.json()["state"], "idle")
+
+    def test_current_done_no_frags_or_no_video(self):
+        import vc_fragments.views as v
+        with mock.patch.object(v, "get_workspace") as gw:
+            m = mock.Mock()
+            m.load_fragments.return_value = []
+            m.original = self.video
+            gw.return_value = m
+            self.assertIsNone(v._current_done(self.ws_id))
+            m2 = mock.Mock()
+            m2.load_fragments.return_value = [{"start": 0, "end": 1}]
+            m2.original = ""
+            gw.return_value = m2
+            self.assertIsNone(v._current_done(self.ws_id))
+
+    def test_current_done_no_identity(self):
+        import vc_fragments.views as v
+        with mock.patch.object(v, "_video_identity", return_value=None):
+            self.assertIsNone(v._current_done(self.ws_id))
+
+
+class DiskStatusExtraTests(WorkspaceApiTestBase):
+    def _write_sidecar(self, out_dir, payload):
+        with open(os.path.join(out_dir, ".export-state.json"), "w") as f:
+            json.dump(payload, f)
+
+    def test_drop_previous_remove_oserror(self):
+        import vc_fragments.views as v
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        victim = os.path.join(out_dir, "video_fragment_1.mp4")
+        with open(victim, "wb") as f:
+            f.write(b"x")
+        self._write_sidecar(out_dir, {"hash": "h", "files": ["video_fragment_1.mp4"]})
+        with mock.patch.object(v.os, "remove", side_effect=OSError("ro")):
+            v._drop_previous_outputs(v.get_workspace(self.ws_id))
+        self.assertTrue(os.path.isfile(victim))
+
+    def test_status_from_disk_ws_missing(self):
+        import vc_fragments.views as v
+        self.assertIsNone(v._status_from_disk("ghost-ws-zzz", "h"))
+
+    def test_status_from_disk_missing_file(self):
+        import vc_fragments.views as v
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        self._write_sidecar(out_dir, {"hash": "abc", "files": ["missing.mp4"]})
+        self.assertIsNone(v._status_from_disk(self.ws_id, "abc"))
+
+    def test_status_from_disk_oserror(self):
+        import vc_fragments.views as v
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "a.mp4"), "wb") as f:
+            f.write(b"x")
+        self._write_sidecar(out_dir, {"hash": "abc", "files": ["a.mp4"]})
+        with mock.patch("os.path.getsize", side_effect=OSError("gone")):
+            self.assertIsNone(v._status_from_disk(self.ws_id, "abc"))
+
+    def test_status_from_disk_empty_files(self):
+        import vc_fragments.views as v
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        self._write_sidecar(out_dir, {"hash": "abc", "files": []})
+        self.assertIsNone(v._status_from_disk(self.ws_id, "abc"))
+
+
+class DownloadTests(WorkspaceApiTestBase):
+    def test_download_missing_workspace(self):
+        resp = self.client.get("/api/v1/pairs/nonexistent/export/a.mp4")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_download_missing_file(self):
+        resp = self.client.get(f"/api/v1/pairs/{self.ws_id}/export/nope.mp4")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_download_traversal(self):
+        resp = self.client.get(f"/api/v1/pairs/{self.ws_id}/export/../fragments.tsv")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_download_ok(self):
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "hello.mp4"), "wb") as f:
+            f.write(b"data123")
+        resp = self.client.get(f"/api/v1/pairs/{self.ws_id}/export/hello.mp4")
+        self.assertEqual(resp.status_code, HTTP_OK)
+        body = b"".join(resp.streaming_content)
+        resp.close()
+        self.assertEqual(body, b"data123")

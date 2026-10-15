@@ -1246,3 +1246,1139 @@ class DecodeCancelTests(SimpleTestCase):
         prov._finish_task(
             (0, fp.JPEG_QUALITY, round(fp.FRAME_SCALE, 2)), task)
         self.assertEqual(prov._cache, {})
+
+
+# ─── Добивка покрытия движка кадров (cgroup/disk-cache/demux/decode) ─────────
+# Только append: существующие тесты выше не меняются.
+
+
+class HostResourcesCoverTest(SimpleTestCase):
+    """Ветки детекта окружения _host_resources (cgroup v2/v1, meminfo)."""
+
+    def _run_with_files(self, files, cpu_count=8):
+        import io
+        import unittest.mock as mock
+
+        def _fake_open(path, *a, **k):
+            if path in files:
+                content = files[path]
+                if isinstance(content, BaseException):
+                    raise content
+                m = mock.MagicMock()
+                m.__enter__.return_value = io.StringIO(content)
+                m.__exit__.return_value = False
+                return m
+            raise OSError("no such file: %s" % path)
+
+        with mock.patch("builtins.open", side_effect=_fake_open), \
+                mock.patch.object(os, "cpu_count", return_value=cpu_count):
+            return fp._host_resources()
+
+    def test_cpu_v2_quota_and_ram_v2_value(self):
+        # Строки 66-68 (cpu.max с квотой) + 82-84 (memory.max со значением).
+        ncpu, ram = self._run_with_files({
+            "/sys/fs/cgroup/cpu.max": "200000 100000\n",
+            "/sys/fs/cgroup/memory.max": str(2048 << 20) + "\n",
+        })
+        self.assertEqual(ncpu, 2)
+        self.assertEqual(ram, 2048)
+
+    def test_cpu_v2_max_falls_to_ram_v1(self):
+        # cpu.max = "max ..." (квота без лимита) + memory.max = "max"
+        # (строка 86 raise) -> v1 memory со значением (строки 90-92).
+        ncpu, ram = self._run_with_files({
+            "/sys/fs/cgroup/cpu.max": "max 100000\n",
+            "/sys/fs/cgroup/memory.max": "max\n",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes": str(1024 << 20) + "\n",
+        }, cpu_count=8)
+        self.assertEqual(ncpu, 8)
+        self.assertEqual(ram, 1024)
+
+    def test_cpu_v1_quota(self):
+        # Строки 72-76: cpu.max отсутствует, v1 квота/период.
+        ncpu, ram = self._run_with_files({
+            "/sys/fs/cgroup/memory.max": str(512 << 20) + "\n",
+            "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "400000\n",
+            "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000\n",
+        }, cpu_count=8)
+        self.assertEqual(ncpu, 4)
+
+    def test_cpu_v1_nonpositive_quota_keeps_host(self):
+        # quota <= 0: строка 75 ложна, 76 пропускается.
+        ncpu, _ = self._run_with_files({
+            "/sys/fs/cgroup/memory.max": str(512 << 20) + "\n",
+            "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "-1\n",
+            "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000\n",
+        }, cpu_count=6)
+        self.assertEqual(ncpu, 6)
+
+    def test_cpu_v2_garbage_falls_back_to_v1(self):
+        # Мусор в cpu.max -> ValueError -> ветка v1.
+        ncpu, _ = self._run_with_files({
+            "/sys/fs/cgroup/cpu.max": "garbage!!!\n",
+            "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "300000\n",
+            "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000\n",
+            "/sys/fs/cgroup/memory.max": str(512 << 20) + "\n",
+        }, cpu_count=8)
+        self.assertEqual(ncpu, 3)
+
+    def test_ram_v1_huge_falls_to_meminfo(self):
+        # Строки 93-94: v1 лимит >= 1<<60 -> raise -> meminfo.
+        _, ram = self._run_with_files({
+            "/sys/fs/cgroup/cpu.max": "max 100000\n",
+            "/sys/fs/cgroup/memory.max": "max\n",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes":
+                str(1 << 62) + "\n",
+            "/proc/meminfo": "MemTotal:        8192000 kB\n",
+        }, cpu_count=4)
+        self.assertEqual(ram, 8000)
+
+    def test_meminfo_failure_keeps_fallback(self):
+        # Строки 102-103: все источники недоступны -> фолбэк 4096.
+        ncpu, ram = self._run_with_files({
+            "/proc/meminfo": OSError("no meminfo"),
+        }, cpu_count=4)
+        self.assertEqual(ncpu, 4)
+        self.assertEqual(ram, 4096)
+
+
+class FrameCacheDirCoverTest(SimpleTestCase):
+    """Ветки _frame_cache_dir (строки 267, 270)."""
+
+    def test_explicit_framecache_dir(self):
+        import unittest.mock as mock
+        with mock.patch.dict(os.environ, {"VC_FRAMECACHE_DIR": "/tmp/x_fc"}):
+            self.assertEqual(fp._frame_cache_dir(), "/tmp/x_fc")
+
+    def test_workspace_root_fallback(self):
+        import unittest.mock as mock
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("VC_FRAMECACHE_DIR", "VC_WORKSPACE_ROOT")}
+        env["VC_WORKSPACE_ROOT"] = "/tmp/wsroot"
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(fp._frame_cache_dir(), "/tmp/wsroot/.framecache")
+
+
+class ProbeOffsetCoverTest(SimpleTestCase):
+    """_probe_start_offset_us целиком (строки 289-313)."""
+
+    def _cont(self, start_time=None, streams=None, close_raises=False):
+        import unittest.mock as mock
+        cont = mock.Mock()
+        cont.start_time = start_time
+        cont.streams.video = streams if streams is not None else []
+        cont.closed = False
+
+        def _close():
+            cont.closed = True
+            if close_raises:
+                raise OSError("close boom")
+
+        cont.close.side_effect = _close
+        return cont
+
+    def test_open_failure_returns_zero(self):
+        import unittest.mock as mock
+        with mock.patch.object(fp.av, "open", side_effect=RuntimeError("no")):
+            self.assertEqual(fp._probe_start_offset_us("/nonexistent/a.mp4"), 0)
+
+    def test_container_start_time(self):
+        import unittest.mock as mock
+        cont = self._cont(start_time=5000)
+        with mock.patch.object(fp.av, "open", return_value=cont):
+            self.assertEqual(fp._probe_start_offset_us("/x.mp4"), 5000)
+        self.assertTrue(cont.closed)
+
+    def test_bad_container_start_falls_to_stream(self):
+        import unittest.mock as mock
+        stream = mock.Mock()
+        stream.start_time = 5
+        stream.time_base = 0.001
+        cont = self._cont(start_time="bad-string", streams=[stream])
+        with mock.patch.object(fp.av, "open", return_value=cont):
+            # int("bad-string") -> ValueError (строки 300-301), затем 303-305.
+            self.assertEqual(fp._probe_start_offset_us("/x.mp4"), 5000)
+
+    def test_no_streams_returns_zero(self):
+        import unittest.mock as mock
+        cont = self._cont(start_time=None, streams=[])
+        with mock.patch.object(fp.av, "open", return_value=cont):
+            self.assertEqual(fp._probe_start_offset_us("/x.mp4"), 0)
+
+    def test_stream_start_raises_hits_outer_except(self):
+        import unittest.mock as mock
+        stream = mock.Mock()
+        type(stream).start_time = mock.PropertyMock(
+            side_effect=RuntimeError("boom"))
+        cont = self._cont(start_time=None, streams=[stream])
+        with mock.patch.object(fp.av, "open", return_value=cont):
+            # Строки 306-307: исключение внутри зонда гасится.
+            self.assertEqual(fp._probe_start_offset_us("/x.mp4"), 0)
+
+    def test_close_failure_is_swallowed(self):
+        import unittest.mock as mock
+        cont = self._cont(start_time=123, close_raises=True)
+        with mock.patch.object(fp.av, "open", return_value=cont):
+            # Строки 310-312: ошибка close в finally гасится.
+            self.assertEqual(fp._probe_start_offset_us("/x.mp4"), 123)
+
+
+class CacheLoadSaveCoverTest(SimpleTestCase):
+    """Дисковый кэш: offset-miss (331-336), params (348-358), save (367,388-389)."""
+
+    def _write_cache(self, cache_dir, path, size, mtime_ns, payload):
+        data = {
+            "path": os.path.abspath(path),
+            "size": size,
+            "mtime_ns": mtime_ns,
+            "packet_total": 3,
+            "visible_pts": [0, 1000, 2000],
+            "kf_pts": [0, 2000],
+            "tb": "1/1000",
+            "fps": 25.0,
+            "width": 16,
+            "height": 16,
+            "pts_unreliable": False,
+            "v": fp._INDEX_CACHE_VERSION,
+        }
+        data.update(payload)
+        with open(os.path.join(cache_dir, fp._cache_key(path)),
+                  "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def test_load_size_none_returns_none(self):
+        self.assertIsNone(fp._cache_load("/x.mp4", None, 123))
+
+    def test_load_mismatch_returns_none(self):
+        import unittest.mock as mock
+        tmp = tempfile.TemporaryDirectory(prefix="vccl_")
+        self.addCleanup(tmp.cleanup)
+        dummy = os.path.join(tmp.name, "a.mp4")
+        with open(dummy, "wb") as f:
+            f.write(b"0" * 16)
+        st = os.stat(dummy)
+        with mock.patch.object(fp, "_FRAME_CACHE_DIR", tmp.name):
+            self._write_cache(tmp.name, dummy, st.st_size + 1,
+                              st.st_mtime_ns, {})
+            self.assertIsNone(fp._cache_load(dummy, st.st_size,
+                                             st.st_mtime_ns))
+
+    def test_load_without_offset_probes(self):
+        import unittest.mock as mock
+        tmp = tempfile.TemporaryDirectory(prefix="vccl_")
+        self.addCleanup(tmp.cleanup)
+        dummy = os.path.join(tmp.name, "a.mp4")
+        with open(dummy, "wb") as f:
+            f.write(b"0" * 16)
+        st = os.stat(dummy)
+        with mock.patch.object(fp, "_FRAME_CACHE_DIR", tmp.name):
+            self._write_cache(tmp.name, dummy, st.st_size,
+                              st.st_mtime_ns, {"start_offset_us": None})
+            # Убираем ключ полностью: data.get -> None -> probe (331-336).
+            cp = os.path.join(tmp.name, fp._cache_key(dummy))
+            with open(cp, encoding="utf-8") as f:
+                data = json.load(f)
+            data.pop("start_offset_us", None)
+            with open(cp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            with mock.patch.object(fp, "_probe_start_offset_us",
+                                   return_value=777) as probe:
+                got = fp._cache_load(dummy, st.st_size, st.st_mtime_ns)
+            probe.assert_called_once_with(dummy)
+            self.assertEqual(got[7], 777)
+
+    def test_stream_params_success(self):
+        import unittest.mock as mock
+        from fractions import Fraction
+        stream = mock.Mock()
+        stream.time_base = Fraction(1, 90000)
+        stream.average_rate = Fraction(25, 1)
+        stream.codec_context.width = 16
+        stream.codec_context.height = 12
+        cont = mock.Mock()
+        cont.streams.video = [stream]
+        with mock.patch.object(fp.av, "open", return_value=cont):
+            tb, fps, w, h = fp._stream_params("/x.mp4")
+        self.assertEqual(tb, Fraction(1, 90000))
+        self.assertEqual(fps, 25.0)
+        self.assertEqual((w, h), (16, 12))
+        cont.close.assert_called_once()
+
+    def test_stream_params_open_failure(self):
+        import unittest.mock as mock
+        with mock.patch.object(fp.av, "open",
+                               side_effect=OSError("no file")):
+            with self.assertRaises(ValueError):
+                fp._stream_params("/nonexistent.mp4")
+
+    def test_cache_save_size_none_is_noop(self):
+        fp._cache_save("/x.mp4", None, 0, 0, [], [])
+
+    def test_cache_save_oserror_is_swallowed(self):
+        import unittest.mock as mock
+        with mock.patch("os.makedirs", side_effect=OSError("ro")):
+            fp._cache_save("/x.mp4", 10, 1, 1, array.array("q", [0]),
+                           array.array("q", [0]))
+
+
+class MakeBoundsCoverTest(SimpleTestCase):
+    """_make_bounds: препенд нуля (строка 404)."""
+
+    def test_prepend_zero_when_keyframes_missing(self):
+        self.assertEqual(
+            fp._make_bounds(array.array("q", [10, 20, 30]),
+                            array.array("q", [])),
+            [0, 3])
+        self.assertEqual(
+            fp._make_bounds(array.array("q", [10, 20, 30]),
+                            array.array("q", [20])),
+            [0, 1, 3])
+
+
+class ScanPacketsCoverTest(SimpleTestCase):
+    """_scan_packets: отмена (490) и сдвиг шкалы (508-512)."""
+
+    def _fake_cont(self, packets, cst=0, stream_start=None,
+                   tb=None):
+        import unittest.mock as mock
+        from fractions import Fraction
+        tb = tb or Fraction(1, 1000)
+        stream = mock.Mock()
+        stream.time_base = tb
+        stream.codec_context.width = 16
+        stream.codec_context.height = 16
+        stream.average_rate = Fraction(25, 1)
+        stream.start_time = stream_start
+        cont = mock.Mock()
+        cont.streams.video = [stream]
+        cont.start_time = cst
+        cont.demux.return_value = iter(packets)
+        return cont, stream
+
+    def test_cancelled_raises(self):
+        import unittest.mock as mock
+        pkt = mock.Mock(pts=100, size=10, is_keyframe=True,
+                        time_base=None)
+        cont, _ = self._fake_cont([pkt])
+        with mock.patch.object(fp.av, "open", return_value=cont), \
+                mock.patch.object(fp, "_cancelled", return_value=True):
+            with self.assertRaises(fp._DecodeCancelled):
+                fp._scan_packets("/nonexistent/cancel.mp4")
+
+    def test_offset_from_stream_start(self):
+        import unittest.mock as mock
+        cont, _ = self._fake_cont([], cst=None, stream_start=5)
+        with mock.patch.object(fp.av, "open", return_value=cont), \
+                mock.patch.object(fp, "_cancelled", return_value=False):
+            _, _, _, _, _, _, off = fp._scan_packets(
+                "/nonexistent/off.mp4")
+        self.assertEqual(off, 5000)
+
+    def test_offset_exception_resets_to_zero(self):
+        import unittest.mock as mock
+
+        class BadCont:
+            streams = mock.Mock()
+
+            def __init__(self):
+                s = mock.Mock()
+                s.time_base = 0.001
+                s.codec_context.width = 1
+                s.codec_context.height = 1
+                s.average_rate = 0
+                s.start_time = None
+                self.streams.video = [s]
+
+            @property
+            def start_time(self):
+                raise RuntimeError("boom")
+
+            def demux(self, stream):
+                return iter([])
+
+            def close(self):
+                pass
+
+        with mock.patch.object(fp.av, "open",
+                               return_value=BadCont()), \
+                mock.patch.object(fp, "_cancelled", return_value=False):
+            _, _, _, _, _, _, off = fp._scan_packets(
+                "/nonexistent/badoff.mp4")
+        self.assertEqual(off, 0)
+
+
+class DemuxLandedCoverTest(SimpleTestCase):
+    """_demux_landed: пустой demux (564-565), pts None (568), fallback miss."""
+
+    def test_empty_demux_yields_nothing(self):
+        import unittest.mock as mock
+        cont = mock.Mock()
+        cont.demux.return_value = iter([])
+        stream = mock.Mock()
+        self.assertEqual(
+            list(fp._demux_landed(cont, stream, None, 0.001, [])), [])
+
+    def test_none_pts_skipped(self):
+        import unittest.mock as mock
+        p_none = mock.Mock(pts=None)
+        p_ok = mock.Mock(pts=100)
+        cont = mock.Mock()
+        cont.demux.return_value = iter([p_none, p_ok])
+        stream = mock.Mock()
+        got = list(fp._demux_landed(cont, stream, None, 0.001, []))
+        self.assertEqual(got, [p_none, p_ok])
+
+    def test_miss_then_fallback_lands(self):
+        import unittest.mock as mock
+        stream = mock.Mock()
+        cont = mock.Mock()
+        far = mock.Mock(pts=2000)
+        near = mock.Mock(pts=500)
+        cont.demux.side_effect = [iter([far]), iter([near])]
+        cont.seek = mock.Mock()
+        got = list(fp._demux_landed(cont, stream, 1000, 0.001, [500]))
+        # Первый заход мимо (569-570 landed=False), второй — посадка.
+        self.assertEqual(got, [near])
+        self.assertGreaterEqual(cont.seek.call_count, 1)
+
+    # Строка 578 (финальный `return` после цикла) недостижима извне:
+    # tried всегда непуст ([tick] + fallback 0), а последняя попытка
+    # (last=True) принимается всегда (условие `if not last ...`),
+    # поэтому цикл всегда выходит через `return` внутри (577).
+
+
+class DecodeRangeCoverTest(SimpleTestCase):
+    """_decode_range: фильтры end (622), InvalidData (624-625),
+    дренаж (633,635) и FFmpegError (637-638)."""
+
+    def _run(self, packets, per_frames, drain_frames=None,
+             drain_raises=None, start_us=None, end_us=None,
+             keep_from_us="sentinel"):
+        import unittest.mock as mock
+        stream = mock.Mock()
+
+        def _dec(pkt):
+            if pkt is None:
+                if drain_raises is not None:
+                    raise drain_raises
+                return list(drain_frames or [])
+            if isinstance(per_frames, BaseException):
+                raise per_frames
+            return list(per_frames)
+
+        stream.decode.side_effect = _dec
+        cont = mock.Mock()
+        cont.streams.video = [stream]
+        kwargs = {}
+        if keep_from_us != "sentinel":
+            kwargs["keep_from_us"] = keep_from_us
+        with mock.patch.object(fp.av, "open", return_value=cont), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=list(packets)), \
+                mock.patch.object(fp, "_cancelled", return_value=False):
+            return fp._decode_range("/nonexistent/r.mp4", 0.001,
+                                    start_us, end_us, **kwargs)
+
+    def _fr(self, pts):
+        import unittest.mock as mock
+        fr = mock.Mock()
+        fr.pts = pts
+        fr.time_base = 0.001
+        return fr
+
+    def test_end_us_filters_tail(self):
+        import unittest.mock as mock
+        pkt = mock.Mock(pts=0)
+        out = self._run([pkt], [self._fr(0), self._fr(1), self._fr(3)],
+                        drain_frames=[], start_us=None, end_us=2000)
+        # 622: us=3000 >= end_us -> пропуск.
+        self.assertEqual(out, [0, 1000])
+
+    def test_invalid_data_packet_skipped(self):
+        import av
+        import unittest.mock as mock
+        pkt1 = mock.Mock(pts=0)
+        out = self._run([pkt1], av.InvalidDataError(0, "boom"),
+                        drain_frames=[])
+        # 624-625: битый пакет не роняет скан.
+        self.assertEqual(out, [])
+
+    def test_drain_keep_and_end_filters(self):
+        import unittest.mock as mock
+        pkt = mock.Mock(pts=0)
+        out = self._run(
+            [pkt], [],
+            drain_frames=[self._fr(0), self._fr(2), self._fr(5)],
+            start_us=1000, end_us=3000, keep_from_us=1000)
+        # 633: 0 < keep -> пропуск; 635: 5000 >= end -> пропуск.
+        self.assertEqual(out, [2000])
+
+    def test_drain_ffmpeg_error_swallowed(self):
+        import av
+        import unittest.mock as mock
+        pkt = mock.Mock(pts=0)
+        out = self._run([pkt], [], drain_raises=av.FFmpegError(0, "boom"))
+        # 637-638.
+        self.assertEqual(out, [])
+
+
+class IndexCachedCoverTest(SimpleTestCase):
+    """_Index из дискового кэша (783-794) + флаг unreliable (832, 837)."""
+
+    def _cached_index(self, payload, stream_params=None):
+        import unittest.mock as mock
+        tmp = tempfile.TemporaryDirectory(prefix="vcidx_")
+        self.addCleanup(tmp.cleanup)
+        dummy = os.path.join(tmp.name, "f.mp4")
+        with open(dummy, "wb") as f:
+            f.write(b"1" * 32)
+        st = os.stat(dummy)
+        base = {
+            "path": os.path.abspath(dummy),
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "packet_total": 3,
+            "visible_pts": [0, 1000, 2000],
+            "kf_pts": [0, 2000],
+            "tb": "1/1000",
+            "fps": 25.0,
+            "width": 16,
+            "height": 16,
+            "start_offset_us": 0,
+            "pts_unreliable": False,
+            "v": fp._INDEX_CACHE_VERSION,
+        }
+        base.update(payload)
+        with open(os.path.join(tmp.name, fp._cache_key(dummy)),
+                  "w", encoding="utf-8") as f:
+            json.dump(base, f)
+        with mock.patch.object(fp, "_FRAME_CACHE_DIR", tmp.name):
+            if stream_params is not None:
+                with mock.patch.object(fp, "_stream_params",
+                                       return_value=stream_params):
+                    return _Index(dummy)
+            return _Index(dummy)
+
+    def test_cached_new_format_reliable(self):
+        from fractions import Fraction
+        idx = self._cached_index({})
+        self.assertEqual(idx.tb, Fraction("1/1000"))
+        self.assertEqual(idx.total, 3)
+        self.assertFalse(idx.pts_unreliable)
+        self.assertEqual(list(idx.visible_pts), [0, 1000, 2000])
+
+    def test_cached_unreliable_keeps_order(self):
+        idx = self._cached_index({
+            "visible_pts": [2000, 0, 1000],
+            "kf_pts": [2000, 0],
+            "pts_unreliable": True,
+        })
+        # 832 (флаг из кэша) + 837 (без сортировки).
+        self.assertTrue(idx.pts_unreliable)
+        self.assertEqual(list(idx.visible_pts), [2000, 0, 1000])
+
+    def test_cached_old_format_without_tb(self):
+        from fractions import Fraction
+        payload = {"fps": None, "width": None, "height": None}
+        payload.pop("tb", None)
+        # Убираем tb полностью -> data.get("tb") is None (785) -> probe
+        # параметров через _stream_params (788-789).
+        import unittest.mock as mock
+        tmp = tempfile.TemporaryDirectory(prefix="vcidxold_")
+        self.addCleanup(tmp.cleanup)
+        dummy = os.path.join(tmp.name, "f.mp4")
+        with open(dummy, "wb") as f:
+            f.write(b"1" * 32)
+        st = os.stat(dummy)
+        data = {
+            "path": os.path.abspath(dummy),
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "packet_total": 2,
+            "visible_pts": [0, 1000],
+            "kf_pts": [0],
+            "start_offset_us": 0,
+            "pts_unreliable": False,
+            "v": fp._INDEX_CACHE_VERSION,
+        }
+        with open(os.path.join(tmp.name, fp._cache_key(dummy)),
+                  "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        with mock.patch.object(fp, "_FRAME_CACHE_DIR", tmp.name), \
+                mock.patch.object(
+                    fp, "_stream_params",
+                    return_value=(Fraction(1, 500), 30.0, 32, 24)):
+            idx = _Index(dummy)
+        self.assertEqual(idx.fps, 30.0)
+        self.assertEqual((idx.width, idx.height), (32, 24))
+
+
+class GopTaskPutCoverTest(SimpleTestCase):
+    """_GopTask.put при провале энкода (строка 893)."""
+
+    def test_put_encode_none_is_noop(self):
+        import unittest.mock as mock
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        with mock.patch.object(fp._Provider, "_encode", return_value=None):
+            task.put(7, mock.Mock())
+        self.assertEqual(task.frames, {})
+        self.assertEqual(task.puts, 0)
+
+
+class DecodeGopCoverTest(SimpleTestCase):
+    """_decode_gop: unreliable-map (1089-1091), cancel (1104),
+    stale-spec (1115-1117), vi<start (1124), InvalidData (1129-1130),
+    дренаж (1135-1140)."""
+
+    def _setup(self, g=0, pts_unreliable=False, gen=0, task_gen=0,
+               speculative=False, waiters=1):
+        import types
+        import unittest.mock as mock
+        idx = types.SimpleNamespace(
+            bounds=[0, 2, 4], total=4,
+            tb=__import__("fractions").Fraction(1, 1000),
+            visible_pts=array.array("q", [0, 1000, 2000, 3000]),
+            pts_unreliable=pts_unreliable, width=16, height=16)
+        prov = fp._Provider("/nonexistent/cover_decode_%s_%s.mp4" % (g, id(idx)))
+        prov._ensure_index = lambda: idx
+        prov._gen = gen
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.speculative = speculative
+        task.gen = task_gen
+        with task._lock:
+            task.waiters = waiters
+        return prov, idx, task
+
+    def _fr(self, pts):
+        import unittest.mock as mock
+        fr = mock.Mock()
+        fr.pts = pts
+        fr.time_base = 0.001
+        fr.to_ndarray.return_value = mock.Mock()
+        return fr
+
+    def _open(self, stream):
+        import unittest.mock as mock
+        cont = mock.Mock()
+        cont.streams.video = [stream]
+        return mock.patch.object(fp.av, "open", return_value=cont)
+
+    def test_unreliable_map_by_counter(self):
+        import unittest.mock as mock
+        prov, _, task = self._setup(g=0, pts_unreliable=True)
+        stream = mock.Mock()
+        stream.decode.side_effect = lambda pkt: (
+            [self._fr(999), self._fr(1000)] if pkt is not None else [])
+        pkt = mock.Mock()
+        with self._open(stream), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[pkt]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._BUDGET, "reserve"), \
+                mock.patch.object(fp._Provider, "_encode",
+                                  return_value=b"J"), \
+                mock.patch.object(prov, "_provider_idle",
+                                  return_value=False), \
+                mock.patch.object(prov, "_demand_alive",
+                                  return_value=False):
+            prov._decode_gop(0, task)
+        # 1089-1091: счётчик с начала (start=0).
+        self.assertEqual(sorted(task.frames), [0, 1])
+        self.assertIsNone(task.error)
+
+    def test_cancelled_mid_decode(self):
+        import unittest.mock as mock
+        prov, _, task = self._setup()
+        stream = mock.Mock()
+        pkt = mock.Mock()
+        with self._open(stream), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[pkt]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=True), \
+                mock.patch.object(fp._BUDGET, "reserve"):
+            prov._decode_gop(0, task)
+        # 1104.
+        self.assertIsInstance(task.error, fp._DecodeCancelled)
+
+    def test_stale_speculative_aborts(self):
+        import unittest.mock as mock
+        prov, _, task = self._setup(gen=5, task_gen=0, speculative=True,
+                                   waiters=1)
+        stream = mock.Mock()
+        pkt = mock.Mock()
+        with self._open(stream), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[pkt]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._BUDGET, "reserve"), \
+                mock.patch.object(prov, "_demand_alive",
+                                  return_value=False):
+            prov._decode_gop(0, task)
+        # 1115-1117.
+        self.assertTrue(task.abandoned)
+        self.assertEqual(task.frames, {})
+
+    def test_vi_before_start_skipped(self):
+        import unittest.mock as mock
+        prov, _, task = self._setup(g=1, waiters=1)
+        stream = mock.Mock()
+        # pts=0 -> vi=0 < start=2 (1123-1124 continue).
+        stream.decode.side_effect = lambda pkt: (
+            [self._fr(0)] if pkt is not None else [])
+        pkt = mock.Mock()
+        with self._open(stream), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[pkt]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._BUDGET, "reserve"), \
+                mock.patch.object(fp._Provider, "_encode",
+                                  return_value=b"J"), \
+                mock.patch.object(prov, "_demand_alive",
+                                  return_value=False):
+            prov._decode_gop(1, task)
+        self.assertEqual(task.frames, {})
+
+    def test_invalid_data_packet_skipped(self):
+        import av
+        import unittest.mock as mock
+        prov, _, task = self._setup(waiters=1)
+        stream = mock.Mock()
+
+        def _dec(pkt):
+            if pkt is None:
+                return []
+            raise av.InvalidDataError(0, "boom")
+
+        stream.decode.side_effect = _dec
+        pkt = mock.Mock()
+        with self._open(stream), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[pkt]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._BUDGET, "reserve"), \
+                mock.patch.object(prov, "_demand_alive",
+                                  return_value=False):
+            prov._decode_gop(0, task)
+        # 1129-1130: пакет пропущен, задача без ошибки.
+        self.assertIsNone(task.error)
+        self.assertTrue(task.done)
+
+    def test_drain_tail_puts_missing(self):
+        import unittest.mock as mock
+        prov, _, task = self._setup(g=1, waiters=1)
+        stream = mock.Mock()
+
+        def _dec(pkt):
+            if pkt is not None:
+                return [self._fr(2)]  # vi=2, в диапазоне [2,4)
+            # Дренаж: мимо-ниже (1136-1137), свой (put), мимо-выше (1138-1139).
+            return [self._fr(1), self._fr(2), self._fr(999)]
+
+        stream.decode.side_effect = _dec
+        pkt = mock.Mock()
+        with self._open(stream), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[pkt]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._BUDGET, "reserve"), \
+                mock.patch.object(fp._Provider, "_encode",
+                                  return_value=b"J"), \
+                mock.patch.object(prov, "_demand_alive",
+                                  return_value=True):
+            prov._decode_gop(1, task)
+        # 1135-1140.
+        self.assertIn(2, task.frames)
+
+
+class FinishPrefetchCoverTest(SimpleTestCase):
+    """_finish_task (1300-1301) и _prefetch (1325, 1359-1363)."""
+
+    def test_finish_task_prefetch_failure_swallowed(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_finish.mp4")
+        task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+        task.mark_done()
+        with mock.patch.object(prov, "_prefetch",
+                               side_effect=RuntimeError("boom")):
+            prov._finish_task((0, fp.JPEG_QUALITY, 1.0), task)
+        # 1300-1301: исключение цепочного префетча глотается.
+
+    def test_chained_pressured_returns_early(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_press.mp4")
+        with mock.patch.object(fp._BUDGET, "pressured",
+                               return_value=True), \
+                mock.patch.object(fp._PREFETCH_POOL, "submit") as sub:
+            prov._prefetch(1, fp.JPEG_QUALITY, fp.FRAME_SCALE,
+                           chained=True)
+        # 1324-1325.
+        sub.assert_not_called()
+
+    def test_prefetch_submit_failure_cleans_task(self):
+        import types
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_psub.mp4")
+        prov._ensure_index = lambda: types.SimpleNamespace(
+            bounds=[0, 1, 2, 3], total=3)
+        with mock.patch.object(fp._PREFETCH_POOL, "submit",
+                               side_effect=RuntimeError("pool down")):
+            prov._prefetch(1, fp.JPEG_QUALITY, fp.FRAME_SCALE,
+                           direction=1)
+        # 1359-1363: несостоявшаяся спекуляция убрана из учёта.
+        with prov._ilock:
+            for k in list(prov._tasks):
+                self.assertNotEqual(k[0], 2)
+
+
+class GetFrameCoverTest(SimpleTestCase):
+    """get_frame: вне диапазона (1410) и g is None (1439-1440)."""
+
+    def test_out_of_range_returns_range(self):
+        import types
+        prov = fp._Provider("/nonexistent/cover_range.mp4")
+        prov._ensure_index = lambda: types.SimpleNamespace(total=10)
+        j, info = prov.get_frame(999)
+        self.assertIsNone(j)
+        self.assertEqual(info["source"], "range")
+
+    def test_gop_none_falls_to_single(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_gnone.mp4")
+        idx = mock.Mock()
+        idx.total = 10
+        idx.gop_of.return_value = None
+        prov._ensure_index = lambda: idx
+        with mock.patch.object(prov, "_read_one",
+                               return_value=b"JPEG") as ro:
+            j, info = prov.get_frame(5)
+        ro.assert_called_once()
+        self.assertEqual(j, b"JPEG")
+        self.assertEqual(info, {"source": "single", "abandoned": False})
+
+
+class TaskForCoverTest(SimpleTestCase):
+    """_task_for: пул остановлен (1482-1489)."""
+
+    def test_decode_pool_down_returns_none(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_tfor.mp4")
+        with mock.patch.object(fp._DECODE_POOL, "submit",
+                               side_effect=RuntimeError("down")):
+            got = prov._task_for(0, fp.JPEG_QUALITY, fp.FRAME_SCALE, 1)
+        self.assertIsNone(got)
+        with prov._ilock:
+            self.assertNotIn(
+                prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE), prov._tasks)
+
+
+class ReadOneCoverTest(SimpleTestCase):
+    """_read_one целиком (1501-1549)."""
+
+    def _idx(self, unreliable=False, total=4):
+        import types
+        return types.SimpleNamespace(
+            total=total,
+            tb=__import__("fractions").Fraction(1, 1000),
+            visible_pts=array.array("q", [0, 1000, 2000, 3000][:total]),
+            bounds=[0, 2, total],
+            gop_of=(lambda i: 0 if i < 2 else 1),
+            pts_unreliable=unreliable)
+
+    def _fr(self, pts):
+        import unittest.mock as mock
+        fr = mock.Mock()
+        fr.pts = pts
+        fr.time_base = 0.001
+        fr.to_ndarray.return_value = mock.Mock()
+        return fr
+
+    def test_out_of_range(self):
+        prov = fp._Provider("/nonexistent/cover_r1.mp4")
+        prov._ensure_index = lambda: self._idx()
+        self.assertIsNone(prov._read_one(99, 78, 1.0))
+        self.assertIsNone(prov._read_one(-1, 78, 1.0))
+
+    def test_unreliable_hit_by_counter(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_r2.mp4")
+        prov._ensure_index = lambda: self._idx(unreliable=True)
+        stream = mock.Mock()
+        stream.decode.side_effect = lambda pkt: (
+            [self._fr(0), self._fr(1)] if pkt is not None else [])
+        cont = mock.Mock()
+        cont.streams.video = [stream]
+        pkt = mock.Mock()
+        with mock.patch.object(fp.av, "open", return_value=cont), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[pkt]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._Provider, "_encode",
+                                  return_value=b"J"):
+            # 1533-1536: второй выход (seq==1) возвращается.
+            self.assertEqual(prov._read_one(1, 78, 1.0), b"J")
+
+    def test_reliable_hit_by_pts(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_r3.mp4")
+        prov._ensure_index = lambda: self._idx()
+        stream = mock.Mock()
+        stream.decode.side_effect = lambda pkt: (
+            [self._fr(0), self._fr(2)] if pkt is not None else [])
+        cont = mock.Mock()
+        cont.streams.video = [stream]
+        pkt = mock.Mock()
+        with mock.patch.object(fp.av, "open", return_value=cont), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[pkt]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._Provider, "_encode",
+                                  return_value=b"J"):
+            # 1540-1542: us=2000 >= target 2000.
+            self.assertEqual(prov._read_one(2, 78, 1.0), b"J")
+
+    def test_invalid_data_continues(self):
+        import av
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_r4.mp4")
+        prov._ensure_index = lambda: self._idx()
+        stream = mock.Mock()
+        calls = {"n": 0}
+
+        def _dec(pkt):
+            if pkt is None:
+                return []
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise av.InvalidDataError(0, "boom")
+            return [self._fr(2)]
+
+        stream.decode.side_effect = _dec
+        cont = mock.Mock()
+        cont.streams.video = [stream]
+        with mock.patch.object(fp.av, "open", return_value=cont), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[mock.Mock(),
+                                                mock.Mock()]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._Provider, "_encode",
+                                  return_value=b"J"):
+            # 1543-1544.
+            self.assertEqual(prov._read_one(2, 78, 1.0), b"J")
+
+    def test_open_failure_returns_none(self):
+        import av
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_r5.mp4")
+        prov._ensure_index = lambda: self._idx()
+        with mock.patch.object(fp.av, "open",
+                               side_effect=av.FFmpegError(0, "boom")):
+            # 1547-1548.
+            self.assertIsNone(prov._read_one(1, 78, 1.0))
+
+    def test_no_match_returns_none(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_r6.mp4")
+        prov._ensure_index = lambda: self._idx()
+        stream = mock.Mock()
+        stream.decode.side_effect = lambda pkt: (
+            [self._fr(0)] if pkt is not None else [])
+        cont = mock.Mock()
+        cont.streams.video = [stream]
+        with mock.patch.object(fp.av, "open", return_value=cont), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[mock.Mock()]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=False), \
+                mock.patch.object(fp._Provider, "_encode",
+                                  return_value=b"J"):
+            # 1549: ни один выход не дотянул до target.
+            self.assertIsNone(prov._read_one(3, 78, 1.0))
+
+    def test_cancelled_raises(self):
+        import unittest.mock as mock
+        prov = fp._Provider("/nonexistent/cover_r7.mp4")
+        prov._ensure_index = lambda: self._idx()
+        cont = mock.Mock()
+        cont.streams.video = [mock.Mock()]
+        with mock.patch.object(fp.av, "open", return_value=cont), \
+                mock.patch.object(fp, "_demux_landed",
+                                  return_value=[mock.Mock()]), \
+                mock.patch.object(fp, "_cancelled",
+                                  return_value=True):
+            # 1526-1527: отмена посреди одиночного чтения пробрасывается.
+            with self.assertRaises(fp._DecodeCancelled):
+                prov._read_one(1, 78, 1.0)
+
+
+class EvictMiscCoverTest(SimpleTestCase):
+    """_evict_global без access (1599), want_info (1633),
+    warm_gop (1655, 1657-1658)."""
+
+    def test_evict_without_access_returns(self):
+        import unittest.mock as mock
+        with mock.patch.object(fp, "CACHE_GOPS", 0):
+            saved_providers = dict(fp._providers)
+            saved_access = dict(fp._ACCESS)
+            try:
+                fp._providers.clear()
+                fp._ACCESS.clear()
+                prov = fp._Provider("/nonexistent/cover_evict.mp4")
+                key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+                with prov._ilock:
+                    prov._cache[key] = {0: b"x"}
+                    prov._gop_sizes[key] = 1
+                fp._providers["/nonexistent/cover_evict.mp4"] = prov
+                fp._evict_global()
+                # 1598-1599: жертв нет в _ACCESS -> тихий возврат.
+                with prov._ilock:
+                    self.assertIn(key, prov._cache)
+            finally:
+                fp._providers.clear()
+                fp._providers.update(saved_providers)
+                fp._ACCESS.clear()
+                fp._ACCESS.update(saved_access)
+
+    def test_get_frame_jpeg_want_info(self):
+        import unittest.mock as mock
+        prov = mock.Mock()
+        prov.get_frame.return_value = (b"J", {"source": "cache",
+                                              "abandoned": False})
+        with mock.patch.object(fp, "_get_provider", return_value=prov):
+            jpeg, mime, info = fp.get_frame_jpeg("/x.mp4", 0,
+                                                 want_info=True)
+        # 1632-1633.
+        self.assertEqual(jpeg, b"J")
+        self.assertEqual(mime, "image/jpeg")
+        self.assertEqual(info["source"], "cache")
+        prov.get_frame.return_value = (None, {"source": "single",
+                                              "abandoned": False})
+        with mock.patch.object(fp, "_get_provider", return_value=prov):
+            jpeg, mime, info = fp.get_frame_jpeg("/x.mp4", 0,
+                                                 want_info=True)
+        self.assertIsNone(jpeg)
+        self.assertIsNone(mime)
+
+    def test_warm_gop_gop_none_returns(self):
+        import unittest.mock as mock
+        prov = mock.Mock()
+        idx = mock.Mock()
+        idx.total = 10
+        idx.gop_of.return_value = None
+        prov._index_if_ready.return_value = idx
+        with mock.patch.object(fp, "_get_provider", return_value=prov):
+            fp.warm_gop("/x.mp4", 3)
+        # 1654-1655.
+        prov._task_for.assert_not_called()
+
+    def test_warm_gop_exception_swallowed(self):
+        import unittest.mock as mock
+        with mock.patch.object(fp, "_get_provider",
+                               side_effect=RuntimeError("boom")):
+            fp.warm_gop("/x.mp4", 0)
+        # 1657-1658: best-effort без исключений.
+
+
+class TryMetaCoverTest(SimpleTestCase):
+    """try_get_metadata: нет файла (1792-1793), дисковый хит (1802-1805)."""
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(
+            fp.try_get_metadata("/nonexistent/definitely_missing_xyz.mp4"))
+
+    def test_disk_hit_builds_fast(self):
+        import types
+        import unittest.mock as mock
+        tmp = tempfile.TemporaryDirectory(prefix="vctry_")
+        self.addCleanup(tmp.cleanup)
+        dummy = os.path.join(tmp.name, "f.mp4")
+        with open(dummy, "wb") as f:
+            f.write(b"2" * 16)
+        idx = types.SimpleNamespace(width=16, height=12, total=5,
+                                    packet_total=5, skipped=0, fps=25.0)
+        with mock.patch.object(fp, "_cache_load",
+                               return_value=object()), \
+                mock.patch.object(fp, "_build_index",
+                                  return_value=idx):
+            got = fp.try_get_metadata(dummy)
+        # 1801-1803.
+        self.assertEqual(got["total_frames"], 5)
+
+    def test_disk_hit_build_failure_goes_background(self):
+        import unittest.mock as mock
+        tmp = tempfile.TemporaryDirectory(prefix="vctry_")
+        self.addCleanup(tmp.cleanup)
+        dummy = os.path.join(tmp.name, "f.mp4")
+        with open(dummy, "wb") as f:
+            f.write(b"2" * 16)
+        with mock.patch.object(fp, "_cache_load",
+                               return_value=object()), \
+                mock.patch.object(fp, "_build_index",
+                                  side_effect=RuntimeError("boom")), \
+                mock.patch.object(fp, "ensure_index_background") as bg:
+            got = fp.try_get_metadata(dummy)
+        # 1804-1805 (except pass) + фон.
+        self.assertIsNone(got)
+        bg.assert_called_once()
+
+
+class DebugSnapshotCoverTest(SimpleTestCase):
+    """debug_snapshot: задачи (1906-1907) и стеки (1933)."""
+
+    def test_snapshot_with_tasks(self):
+        saved = dict(fp._providers)
+        try:
+            fp._providers.clear()
+            prov = fp._Provider("/nonexistent/cover_debug.mp4")
+            task = fp._GopTask(fp.JPEG_QUALITY, fp.FRAME_SCALE)
+            key = prov._key(0, fp.JPEG_QUALITY, fp.FRAME_SCALE)
+            with prov._ilock:
+                prov._tasks[key] = task
+            fp._providers["/nonexistent/cover_debug.mp4"] = prov
+            snap = fp.debug_snapshot()
+            # 1906-1907 + 1933.
+            self.assertTrue(any(
+                t["gop"] == 0
+                for s in snap["sources"] for t in s["tasks"]))
+            self.assertIn("stacks", snap)
+            self.assertTrue(snap["stacks"])
+        finally:
+            fp._providers.clear()
+            fp._providers.update(saved)
+
+    def test_snapshot_stacks_failure(self):
+        import unittest.mock as mock
+        saved = dict(fp._providers)
+        try:
+            fp._providers.clear()
+            with mock.patch("faulthandler.dump_traceback",
+                            side_effect=RuntimeError("no stacks")):
+                snap = fp.debug_snapshot()
+            self.assertTrue(snap["stacks"].startswith("unavailable"))
+        finally:
+            fp._providers.clear()
+            fp._providers.update(saved)
+
+    def test_snapshot_stacks_success(self):
+        # 1933: настоящий faulthandler требует fileno (StringIO всегда
+        # падает), поэтому успех эмулируем моком записи в буфер.
+        import unittest.mock as mock
+        saved = dict(fp._providers)
+        try:
+            fp._providers.clear()
+            with mock.patch("faulthandler.dump_traceback",
+                            side_effect=lambda file=None: file.write("ST")):
+                snap = fp.debug_snapshot()
+            self.assertEqual(snap["stacks"], "ST")
+        finally:
+            fp._providers.clear()
+            fp._providers.update(saved)
+

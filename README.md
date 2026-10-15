@@ -286,12 +286,28 @@ python3 scripts/test_fragment_core.py
 python3 scripts/compare_fragments.py --random 50
 
 # Django API (+ GOP-движок кадров; нужен ffmpeg в PATH, иначе эти тесты скипаются)
-cd backend && python3 manage.py test
+# --parallel 4: сьют stateless (tmpdir на тест), воркеры не делят состояние.
+# DJANGO_DEBUG=0 обязателен в параллели: Python 3.14 спавнит воркеров
+# (forkserver) с переимпортом settings, а дефолт там DEBUG=1.
+cd backend && DJANGO_DEBUG=0 python3 manage.py test --parallel 4
+
+# замер покрытия бэкенда (coverage + --parallel несовместимы: сабпроцессы
+# Django-раннера не замеряются, поэтому замер — отдельным прогоном)
+cd backend && python -m coverage run --source=. --omit="*/tests*,*/migrations/*,*testdata*,*/__pycache__/*" manage.py test \
+  && python -m coverage report --show-missing
+
+# фронт: API-слой (vitest + jsdom, сеть мокается)
+cd frontend && npm test
+
+# CLI vc-add.sh: парсинг (dry-run) + живой цикл на одноразовом runserver
+./scripts/test_vc_add.sh
 ```
 
 Полный набор гоняется в **GitHub Actions** (`.github/workflows/ci.yml`) на каждый push
-в `main` и каждый PR: JS-модель, статус-бар, планировщик, Python-ядро, сверка,
-Django-тесты (с ffmpeg на раннере) и сборка фронтенда.
+в `main` и каждый PR — четырьмя параллельными джобами (ядро/скрипты, Django +
+покрытие, фронт, CLI): JS-модель, статус-бар, планировщик, Python-ядро, сверка,
+Django-тесты (с ffmpeg на раннере, воркеры x4), vitest фронта, живой цикл CLI
+и сборка фронтенда. Стена — самый долгий джоб, а не сумма.
 
 ## Лицензия
 

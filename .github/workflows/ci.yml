@@ -5,8 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Джобы независимы и идут параллельно: стена = самый долгий (django),
+# а не сумма всех. Внутри django-сьюта — воркеры (--parallel 4).
 jobs:
-  test:
+  core:
+    name: Ядро и сверки (скрипты)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,24 +17,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
       - uses: actions/setup-node@v4
         with:
           # Версия, где импорт .ts (type-stripping) включён по умолчанию (>=23.6).
           node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Установить зависимости Python
-        run: pip install -r backend/requirements.txt
-
-      - name: Установить ffmpeg (GOP-тесты frame_provider)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: Установить зависимости Node
-        run: npm ci
-        working-directory: frontend
 
       - name: Тесты ядра (JS-модель)
         run: node scripts/test_fragment_model.mjs
@@ -48,13 +38,85 @@ jobs:
       - name: Сверка Python-ядра и JS-модели
         run: python scripts/compare_fragments.py --random 50
 
-      - name: Django API-тесты
-        working-directory: backend
-        run: python manage.py test
+  django:
+    name: Django API + покрытие
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Тест vc-add.sh (парсинг + живой цикл на runserver)
-        run: ./scripts/test_vc_add.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установить зависимости Python
+        run: pip install -r backend/requirements.txt
+
+      - name: Установить coverage
+        run: pip install coverage
+
+      - name: Установить ffmpeg (GOP-тесты frame_provider)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Django API-тесты (параллельно, 4 воркера)
+        working-directory: backend
+        # DJANGO_DEBUG=0 обязателен: Python 3.14 спавнит воркеров (forkserver),
+        # они переимпортируют settings с дефолтным DEBUG=1 — и тесты, где
+        # исключение долетает до harness, падают на рендере debug-страницы 500
+        # (несовместимость шаблонов Django 4.2 + py3.14).
+        env:
+          DJANGO_DEBUG: "0"
+        run: python manage.py test --parallel 4
+
+      - name: Покрытие бэкенда (замер, последовательно)
+        working-directory: backend
+        # coverage + --parallel несовместимы (замеряются только сабпроцессы
+        # родителя), поэтому замер — отдельным прогоном. manage/wsgi/asgi —
+        # точки входа, в замер не входят.
+        run: |
+          python -m coverage run --source=. --omit="*/tests*,*/migrations/*,*testdata*,*/__pycache__/*,manage.py,*/wsgi.py,*/asgi.py" manage.py test
+          python -m coverage report --show-missing --fail-under=99
+
+  frontend:
+    name: Фронтенд (тесты + сборка)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Установить зависимости Node
+        run: npm ci
+        working-directory: frontend
+
+      - name: Тесты API-слоя (vitest)
+        working-directory: frontend
+        run: npm test
 
       - name: Сборка фронтенда
         working-directory: frontend
         run: npm run build
+
+  cli:
+    name: CLI vc-add.sh (живой цикл)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установить зависимости Python
+        run: pip install -r backend/requirements.txt
+
+      - name: Установить ffmpeg (индексация тестового видео)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Тест vc-add.sh (парсинг + живой цикл на runserver)
+        run: ./scripts/test_vc_add.sh

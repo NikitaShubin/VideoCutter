@@ -18,6 +18,9 @@ frontend/tsconfig.tsbuildinfo
 *.egg-info/
 .venv/
 venv/
+.coverage*
+coverage.xml
+htmlcov/
 
 # Окружение и конфиденциальное
 .env

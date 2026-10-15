@@ -28,6 +28,11 @@ class AuthDisabledTests(SimpleTestCase):
             resp = self.client.get("/api/v1/debug/threads")
         self.assertEqual(resp.status_code, 200)
 
+    def test_token_ok_open_when_disabled(self):
+        from vc_auth import token_ok
+        with with_token(None):
+            self.assertTrue(token_ok(None))
+
 
 class AuthEnabledTests(SimpleTestCase):
     SECRET = "s3cret-door"
@@ -50,6 +55,12 @@ class AuthEnabledTests(SimpleTestCase):
                 "/api/v1/debug/threads",
                 HTTP_AUTHORIZATION="Bearer nope")
         self.assertEqual(resp.status_code, 401)
+
+    def test_api_accepts_query_token(self):
+        with with_token(self.SECRET):
+            resp = self.client.get(
+                f"/api/v1/debug/threads?token={self.SECRET}")
+        self.assertEqual(resp.status_code, 200)
 
     def test_bearer_header_opens(self):
         with with_token(self.SECRET):
