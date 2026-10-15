@@ -99,12 +99,19 @@ VC stateless: workspace = **подпапка** в `workspaces/` с видеоф�
 (опционально) `fragments.tsv`. БД нет, всё хранится на диске. Экспортированные
 фрагменты кладутся в подпапку `exports/` workspace.
 
-1. Добавьте видео в workspace:
+1. Добавьте видео в workspace (скрипт ходит в API: работают валидация,
+   паспорт, фоновая индексация и токен из `VC_AUTH_TOKEN`):
 
    ```bash
-   ./scripts/vc-add.sh /path/to/video.mp4            # workspace с именем «video»
-   ./scripts/vc-add.sh /path/to/video.mp4 my_project # workspace «my_project»
+   ./scripts/vc-add.sh /path/to/video.mp4                 # задача с именем «video»
+   ./scripts/vc-add.sh 6.mp4 6_preview.mp4 vyezd         # пара source+preview + имя
+   ./scripts/vc-add.sh 6.mp4 vyezd --project H           # + привязка к проекту
+   ./scripts/vc-add.sh --help                            # все флаги: --source/--preview/
+                                                         # --name/--project/--url/--wait/--dry-run
    ```
+
+   Второй позиционный аргумент — файл, если существует (тогда это preview),
+   иначе имя задачи. Дубликат имени — clean 409 без перезаписи.
 
    Или вручную положите ролики в `workspaces/<имя_проекта>/`: `source.mp4`
    и `preview.mp4` (или один файл без маркера — нейтральный; суффиксные имена
