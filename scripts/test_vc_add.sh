@@ -109,24 +109,29 @@ if command -v python3 >/dev/null; then
     ok "runserver поднялся"
     URL="http://127.0.0.1:$PORT"
     VIDEO="$ROOT_DIR/backend/testdata/test.mp4"
+    LIVE_LOG="$(mktemp)"
 
     # Полный цикл: пара + имя + проект (кириллица) + ожидание.
     if "$ADD" --url "$URL" --source "$VIDEO" --name livetask \
-        --project "ЖивойПроект" --wait-timeout "$TIMEOUT" >/tmp/opencode/vcadd_live.log 2>&1; then
+        --project "ЖивойПроект" --wait-timeout "$TIMEOUT" >"$LIVE_LOG" 2>&1; then
       ok "живой цикл: создание + проект + wait"
     else
-      bad "живой цикл: создание + проект + wait"; tail -5 /tmp/opencode/vcadd_live.log
+      bad "живой цикл: создание + проект + wait"; tail -5 "$LIVE_LOG"
     fi
+    rm -f "$LIVE_LOG"
 
     # API-проверка: задача в списке, проект с task_count 1.
     CHECK="$(python3 - "$URL" <<'EOF'
 import json, sys, urllib.request
 base = sys.argv[1]
-tasks = json.load(urllib.request.urlopen(base + "/api/v1/workspaces/"))
-projs = json.load(urllib.request.urlopen(base + "/api/v1/projects/"))
-t = "livetask" in [w["id"] for w in tasks]
-p = [x for x in projs if x["name"] == "ЖивойПроект"]
-print(int(t and bool(p) and p[0]["task_count"] == 1))
+try:
+    tasks = json.load(urllib.request.urlopen(base + "/api/v1/workspaces/"))
+    projs = json.load(urllib.request.urlopen(base + "/api/v1/projects/"))
+    t = "livetask" in [w["id"] for w in tasks]
+    p = [x for x in projs if x["name"] == "ЖивойПроект"]
+    print(int(t and bool(p) and p[0]["task_count"] == 1))
+except Exception:
+    print(0)
 EOF
 )"
     [ "$CHECK" = 1 ] && ok "API: задача + проект (task_count 1)" \
