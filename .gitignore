@@ -25,5 +25,7 @@ htmlcov/
 # Окружение и конфиденциальное
 .env
 *.log
+# Локальные правки развёртывания (compose подхватывает override сам)
+docker-compose.override.yml
 # Fuse overlay orphans
 .fuse_hidden*
