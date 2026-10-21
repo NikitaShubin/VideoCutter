@@ -972,7 +972,7 @@ export function CutEditor({ pairId, onBack }: Props) {
             </label>
           </span>
           <span className="info">
-            кадр {position + 1}/{pair.total_frames} · показано {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
+            кадр {position + 1}/{pair.total_frames} · выделено {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
           </span>
           <span
             className="info"

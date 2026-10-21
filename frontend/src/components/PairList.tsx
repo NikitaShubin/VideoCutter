@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   annotationsUrl,
   attachTask,
@@ -26,6 +26,13 @@ import {
   uploadLabel,
   type UploadJob,
 } from "../model/uploads";
+import {
+  aggregateMarkStats,
+  markedFrameStats,
+  markedLabel,
+  type MarkStats,
+} from "../model/markStats";
+import { pluralCount } from "../model/plural";
 import { StatusbarPreview } from "./StatusbarPreview";
 
 interface Props {
@@ -47,6 +54,13 @@ interface Props {
 
 function fileStem(filename: string): string {
   return filename.replace(/\.[^.]+$/, "");
+}
+
+/** Мета задачи в списке: «выделено K из N кадров (X%)»; без разметки — просто кадры. */
+function taskStatsMeta(p: VideoPair): string {
+  const label = markedLabel(markedFrameStats(p.fragments, p.total_frames));
+  if (label) return label;
+  return pluralCount(p.total_frames, "кадр", "кадра", "кадров");
 }
 
 type SortMode = "updated" | "created" | "opened" | "name";
@@ -142,6 +156,31 @@ export function PairList({
 
   const [sortMode, setSortMode] = useState<SortMode>(readSortMode);
   const visible = pairs === null ? null : sortPairs(pairs, sortMode);
+
+  // Статистика выделенных кадров по проектам: агрегат по готовым задачам.
+  // Индексирующиеся не считаем — по ним ещё нет ни кадров, ни разметки.
+  const projectStats = useMemo(() => {
+    const byProject = new Map<string, MarkStats[]>();
+    for (const p of pairs ?? []) {
+      if (!p.project_id || p.indexing || !(p.total_frames > 0)) continue;
+      const list = byProject.get(p.project_id) ?? [];
+      list.push(markedFrameStats(p.fragments, p.total_frames));
+      byProject.set(p.project_id, list);
+    }
+    const out = new Map<string, MarkStats>();
+    byProject.forEach((list, pid) => out.set(pid, aggregateMarkStats(list)));
+    return out;
+  }, [pairs]);
+
+  // Мета проекта: задачи и доля выделенных по его задачам (процент — только при разметке).
+  const projectMeta = (p: Project): string => {
+    const tasks = pluralCount(p.task_count, "задача", "задачи", "задач");
+    const stats = projectStats.get(p.id);
+    if (!stats || stats.total <= 0) return tasks;
+    const label = markedLabel(stats);
+    if (label) return `${tasks} · ${label}`;
+    return `${tasks} · ${pluralCount(stats.total, "кадр", "кадра", "кадров")}`;
+  };
 
   // ─── Вкладки (как в CVAT): задачи и проекты — отдельные экраны ────────
   const [tab, setTab] = useState<Tab>(readTab);
@@ -920,7 +959,7 @@ export function PairList({
                 >
                   <span className="project-name">{p.name}</span>
                   <span className="project-meta">
-                    {p.task_count} задач →
+                    {projectMeta(p)} →
                   </span>
                 </button>
                 <div className="pair-actions">
@@ -1153,7 +1192,7 @@ export function PairList({
                     ? (p.indexing_progress != null
                       ? ` · Индексируется… ${Math.round(p.indexing_progress * 100)}%`
                       : " · ⏳ Индексируется…")
-                    : ` · ${p.total_frames} кадров · ${p.width}×${p.height}`}
+                    : ` · ${taskStatsMeta(p)} · ${p.width}×${p.height}`}
                   {p.name && p.name !== p.id ? ` · [${p.id}]` : ""}
                 </span>
                 {p.pair_warning && (
