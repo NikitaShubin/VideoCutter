@@ -18,6 +18,7 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 import project_meta
+import priority
 import task_meta
 import workspace as ws_module
 from videocutter.standalone import workspace as ws_fs
@@ -112,16 +113,19 @@ def workspace_detail(request, workspace_id: str):
     return _workspace_delete(workspace_id)
 
 
-def _validation_failed(name: str, message: str) -> None:
+def _validation_failed(name: str, message: str, path: str = "") -> None:
     """Провал проверки: broken-запись, только если задача ещё существует.
 
     Удалённую посреди проверки задачу молча отпускаем (иначе stale-ошибка
     всплывёт broken-записью у будущей задачи с тем же именем).
+
+    ``path`` — файл, о котором ошибка: по нему список понимает, какую
+    роль подсветить (источник/превью).
     """
     if get_workspace(name) is None:
         scan_workspaces()
         return
-    ws_module.note_workspace_error(name, message)
+    ws_module.note_workspace_error(name, message, path)
     scan_workspaces()
 
 
@@ -140,23 +144,34 @@ def _validate_workspace_async(name: str, join_default: bool = True) -> None:
         ws = get_workspace(name)
         if ws is None:
             return  # удалили раньше, чем проверили
-        roles = {ws.original, ws.visualization}
-        if not any(roles):
+        roles = [p for p in (ws.original, ws.visualization) if p]
+        if not roles:
             raise ValueError("видео не распознано (расширение файла не видео)")
-        for path in roles:
-            if path and not frame_provider.get_metadata(path).get("total_frames"):
-                raise ValueError("видео не содержит кадров")
-    except frame_provider._DecodeCancelled:
-        # Путь удалили посреди проверки: тихо, без broken-записи.
-        # Реестр обновляем, чтобы список сразу отразил удаление.
-        scan_workspaces()
-        return
     except OSError as e:
         _validation_failed(name, _storage_message(e))
         return
     except Exception as e:  # noqa: BLE001 — любой сбой чтения = битый файл
         _validation_failed(name, f"Не удалось прочитать видео: {e}")
         return
+
+    # Проверка ролей по очереди: сбой привязываем к файлу (по нему список
+    # понимает, какую роль подсветить).
+    for path in roles:
+        try:
+            meta = frame_provider.get_metadata(path)
+        except frame_provider._DecodeCancelled:
+            scan_workspaces()
+            return
+        except OSError as e:
+            _validation_failed(name, _storage_message(e), path)
+            return
+        except Exception as e:  # noqa: BLE001 — любой сбой чтения = битый файл
+            _validation_failed(name, f"Не удалось прочитать видео: {e}", path)
+            return
+        if not meta.get("total_frames"):
+            _validation_failed(
+                name, "Не удалось прочитать видео: видео не содержит кадров", path)
+            return
 
     # Паспорт задачи: создание — единственное место рождения created_at.
     # Перечитываем: каталог могли удалить/пересоздать, пока шёл декод.
@@ -450,6 +465,9 @@ def cache_config(request):
             "caps": frame_provider.cache_caps(),
             "usage": frame_provider.cache_usage(),
             "tuning": frame_provider.tuning_info(),
+            # Приоритет сервиса: тяжёлое понижено (nice), система получает
+            # процессор первой, ядра не резервируются.
+            "nice": priority.current_nice(),
         })
     try:
         body = json.loads(request.body or "{}")

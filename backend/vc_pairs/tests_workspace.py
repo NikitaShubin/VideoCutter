@@ -546,7 +546,7 @@ class LightStatusTests(WorkspaceApiTestBase):
             self.assertEqual(
                 set(w.keys()),
                 {"id", "indexing", "indexing_progress", "export",
-                 "updated_at", "broken", "error"})
+                 "updated_at", "broken", "error", "error_role"})
             self.assertNotIn("fragments", w)
 
 
@@ -627,6 +627,180 @@ class ListRobustnessTests(WorkspaceApiTestBase):
             time.sleep(0.1)
         self.assertFalse(item["broken"])
         self.assertGreater(item["total_frames"], 0)
+
+
+class BrokenRoleTests(WorkspaceApiTestBase):
+    """Битая задача: видно, КАКОЙ файл не читается (``error_role``).
+
+    Пользователь должен сразу понять, что заменять: превью, источник или
+    оба. Роль отдаёт бэкенд — он знает, какой файл не открылся.
+    """
+
+    def _make_ws(self, name: str, broken=()) -> str:
+        """Workspace с source.mp4 и preview.mp4; broken — роли с мусором."""
+        d = os.path.join(self._tmpdir, name)
+        os.makedirs(d, exist_ok=True)
+        src = os.path.join(os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        shutil.copy2(src, os.path.join(d, "source.mp4"))
+        shutil.copy2(src, os.path.join(d, "preview.mp4"))
+        for role in broken:
+            with open(os.path.join(d, f"{role}.mp4"), "wb") as f:
+                f.write(b"not a video")
+        return d
+
+    def _wait_role(self, name: str, expected=None, timeout: float = 30):
+        """Ждём broken-запись (и роль, если задана).
+
+        Роль выводится из файлов: пока фоновые сборки индексов не отработали
+        для всех ролей, она проявится не сразу — ждём нужного значения.
+        """
+        deadline = time.time() + timeout
+        while True:
+            items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
+            item = items.get(name)
+            self.assertIsNotNone(item)
+            if item["broken"] and (expected is None or item["error_role"] == expected):
+                return item
+            if time.time() > deadline:
+                self.fail(
+                    f"workspace {name}: ждали роль {expected!r}, "
+                    f"получили broken={item['broken']} role={item['error_role']!r}"
+                )
+            time.sleep(0.1)
+
+    def test_broken_preview_reports_preview_role(self):
+        self._make_ws("bad-preview", broken=("preview",))
+        item = self._wait_role("bad-preview", "preview")
+        self.assertEqual(item["error_role"], "preview")
+
+    def test_broken_source_reports_source_role(self):
+        self._make_ws("bad-source", broken=("source",))
+        item = self._wait_role("bad-source", "source")
+        self.assertEqual(item["error_role"], "source")
+
+    def test_broken_both_reports_both_roles(self):
+        self._make_ws("bad-both", broken=("source", "preview"))
+        item = self._wait_role("bad-both", "both")
+        self.assertEqual(item["error_role"], "both")
+
+    def test_error_without_file_has_no_role(self):
+        """Сбой не про файл (например, проверка) — роль не угадываем."""
+        import workspace as ws_module
+
+        self._make_ws("no-role-ws")
+        ws_module.note_workspace_error("no-role-ws", "что-то сломалось")
+        try:
+            items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
+            self.assertTrue(items["no-role-ws"]["broken"])
+            self.assertIsNone(items["no-role-ws"]["error_role"])
+        finally:
+            ws_module.clear_workspace_error("no-role-ws")
+
+    def test_broken_upload_pair_reports_both_roles(self):
+        """Залили два битых файла — сломаны обе роли (не только первая)."""
+        resp = self.client.post(
+            self.ws_list_url,
+            {"name": "bad-pair", "source": SimpleUploadedFile(
+                "source.mp4", b"not a video", content_type="video/mp4"),
+             "preview": SimpleUploadedFile(
+                "preview.mp4", b"not a video either", content_type="video/mp4")},
+        )
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
+        item = self._wait_role("bad-pair", "both")
+        self.assertEqual(item["error_role"], "both")
+
+    def test_healthy_task_has_no_role(self):
+        items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
+        self.assertIsNone(items[self.ws_id]["error_role"])
+
+    def test_empty_path_is_not_a_role(self):
+        """Пустой путь — не роль (у задачи без видео роли пустые)."""
+        import workspace as ws_module
+        d = os.path.join(self._tmpdir, "empty-ws")
+        os.makedirs(d, exist_ok=True)
+        ws = ws_module.Workspace(name="empty-ws", path=d)
+        self.assertEqual(ws_module.roles_of_paths(ws, [""]), "")
+
+
+class BrokenRecoveryTests(WorkspaceApiTestBase):
+    """Починка файла снимает поломку: правда — на диске, а не в памяти.
+
+    «Правило трубы»: состояние выводится из файлов. Если сломанный файл
+    заменили рабочим, задача обязана перестать быть битой без перезапуска
+    процесса — память не должна помнить поломку, которой на диске уже нет.
+    """
+
+    def _video(self, name="v.mp4") -> SimpleUploadedFile:
+        src = os.path.join(os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        with open(src, "rb") as f:
+            data = f.read()
+        return SimpleUploadedFile(name, data, content_type="video/mp4")
+
+    def _garbage(self, name="v.mp4") -> SimpleUploadedFile:
+        return SimpleUploadedFile(name, b"not a video at all", content_type="video/mp4")
+
+    def _wait_broken(self, name: str, timeout: float = 60):
+        deadline = time.time() + timeout
+        while True:
+            items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
+            item = items.get(name)
+            self.assertIsNotNone(item)
+            if item["broken"]:
+                return item
+            if time.time() > deadline:
+                self.fail(f"workspace {name} never reported as broken")
+            time.sleep(0.1)
+
+    def _wait_healthy(self, name: str, timeout: float = 30):
+        deadline = time.time() + timeout
+        while True:
+            items = {w["id"]: w for w in self.client.get(self.ws_list_url).json()}
+            item = items.get(name)
+            self.assertIsNotNone(item)
+            if not item["broken"] and not item["indexing"]:
+                return item
+            if time.time() > deadline:
+                self.fail(f"workspace {name} never recovered: {item}")
+            time.sleep(0.2)
+
+    def test_replacing_broken_upload_recovers(self):
+        """Залили битое превью (ошибка проверки живёт в памяти) → заменили."""
+        resp = self.client.post(
+            self.ws_list_url,
+            {"name": "broken-up", "source": self._video("source.mp4"),
+             "preview": self._garbage("preview.mp4")},
+        )
+        self.assertEqual(resp.status_code, HTTP_ACCEPTED)
+        self._wait_broken("broken-up")
+
+        resp = self.client.post(
+            "/api/v1/workspaces/broken-up/video/preview/",
+            {"file": self._video("preview.mp4")},
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        item = self._wait_healthy("broken-up")
+        self.assertIsNone(item["error_role"])
+
+    def test_replacing_broken_file_on_disk_recovers(self):
+        """Битый файл на диске (ошибка сборки индекса) → заменили → ожил."""
+        d = os.path.join(self._tmpdir, "broken-disk")
+        os.makedirs(d, exist_ok=True)
+        src = os.path.join(os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        shutil.copy2(src, os.path.join(d, "source.mp4"))
+        with open(os.path.join(d, "preview.mp4"), "wb") as f:
+            f.write(b"not a video at all")
+
+        self._wait_broken("broken-disk")
+
+        resp = self.client.post(
+            "/api/v1/workspaces/broken-disk/video/preview/",
+            {"file": self._video("preview.mp4")},
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        item = self._wait_healthy("broken-disk")
+        self.assertIsNone(item["error_role"])
 
 
 class DeleteRobustnessTests(WorkspaceApiTestBase):

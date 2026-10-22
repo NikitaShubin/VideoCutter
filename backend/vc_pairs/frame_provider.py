@@ -48,7 +48,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from fractions import Fraction
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import av
 import cv2
@@ -1734,7 +1734,12 @@ logger = logging.getLogger(__name__)
 # Битый файл падает быстро (на av.open), поэтому шторма потоков нет.
 _BG_INDEX_LOCK = threading.Lock()
 _BG_INDEX_STARTED: "set[str]" = set()
-_BG_INDEX_FAILED: "Dict[str, str]" = {}
+# Реестр неудачных сборок: путь -> (снимок содержимого, текст ошибки).
+# Привязка к содержимому (размер+mtime): файл подменили — прежняя ошибка
+# к нему не относится. По одному пути ошибка протухала бы после замены
+# файла: задача осталась бы «битой» при живом файле (диск — источник
+# истины, память — только кэш).
+_BG_INDEX_FAILED: "Dict[str, Tuple[Tuple[int, int], str]]" = {}
 
 
 class _DecodeCancelled(Exception):
@@ -1788,6 +1793,12 @@ def _index_meta(idx: _Index) -> dict:
 def ensure_index_background(path: str) -> None:
     """Построить индекс файла в фоне (один раз на путь; демон-поток)."""
     key = os.path.abspath(path)
+    if index_error(key) is not None:
+        # Файл уже падал с тем же содержимым — не долбим заново (на
+        # многогигабайтном битом файле каждая попытка — это чтение
+        # гигабайтов впустую). Сменили файл — отпечаток изменится, и
+        # сборка пойдёт заново.
+        return
     with _BG_INDEX_LOCK:
         if key in _BG_INDEX_STARTED:
             return
@@ -1812,14 +1823,43 @@ def _bg_index_build(key: str) -> None:
             _BG_INDEX_STARTED.discard(key)
     except Exception as e:  # noqa: BLE001 — битый файл: запомнить ошибку
         logger.warning("background index failed: %s (%r)", key, e)
+        stamp = content_stamp(key)
         with _BG_INDEX_LOCK:
             _BG_INDEX_STARTED.discard(key)
-            _BG_INDEX_FAILED[key] = f"{type(e).__name__}: {e}"[:300]
+            if stamp is not None:
+                _BG_INDEX_FAILED[key] = (
+                    stamp, f"{type(e).__name__}: {e}"[:300])
+
+
+def content_stamp(path: str) -> Optional[Tuple[int, int]]:
+    """Отпечаток содержимого файла (размер, mtime): версия файла.
+
+    None — файла нет (удалили/переехали): к такой версии ошибка не
+    привязывается.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
 
 
 def index_error(path: str) -> Optional[str]:
-    """Текст ошибки фоновой сборки индекса (None — нет ошибки)."""
-    return _BG_INDEX_FAILED.get(os.path.abspath(path))
+    """Текст ошибки фоновой сборки индекса (None — нет ошибки).
+
+    Ошибка относится к конкретному содержимому файла: подменили файл —
+    прежняя ошибка больше не его (иначе починка файла не снимала бы
+    поломку задачи до перезапуска процесса).
+    """
+    key = os.path.abspath(path)
+    with _BG_INDEX_LOCK:
+        rec = _BG_INDEX_FAILED.get(key)
+    if rec is None:
+        return None
+    stamp, text = rec
+    if stamp != content_stamp(key):
+        return None
+    return text
 
 
 def try_get_metadata(path: str) -> Optional[dict]:

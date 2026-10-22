@@ -40,6 +40,48 @@ QUALITY_MIN, QUALITY_MAX = 20, 95
 SCALE_MIN, SCALE_MAX = 0.05, 1.0
 
 
+def roles_of_paths(ws: Workspace, paths) -> str:
+    """Какие роли покрыты сломанными путями: 'source' | 'preview' | 'both' | ''.
+
+    Один файл может играть обе роли (нет отдельного превью) — тогда он и
+    сломан, а чинить надо источник: замена источника переопределит и
+    превью, замена превью оставит сломанный файл на месте.
+    """
+    src = ws.original or ""
+    prev = ws.visualization or ""
+    roles = set()
+    for path in paths:
+        if not path:
+            continue
+        if path == src:
+            roles.add("source")
+        elif path == prev:
+            roles.add("preview")
+    if not roles:
+        return ""
+    if len(roles) > 1:
+        return "both"
+    return roles.pop()
+
+
+def broken_role(ws: Workspace) -> str:
+    """Какая роль задачи сломана: 'source' | 'preview' | 'both' | ''.
+
+    Основание — файлы на диске: индекс не собрался ровно по нечитаемому
+    файлу (сборка падает на ``av.open``), и тот же путь помечен в реестре
+    фоновых сборок; плюс путь файла из записанной ошибки проверки. Роль
+    выводится сравнением с ролями workspace на диске — каждый раз заново,
+    своего хранилища ролей не заводим (у трубы памяти нет: состояние живёт
+    в файлах и в кэше индекса).
+    """
+    paths = [p for p in (ws.original, ws.visualization)
+             if p and frame_provider.index_error(p)]
+    err_path = workspace_error_path(ws.name)
+    if err_path:
+        paths.append(err_path)
+    return roles_of_paths(ws, paths)
+
+
 @dataclass
 class Workspace:
     """Один workspace: папка с видео + fragments.tsv."""
@@ -376,18 +418,29 @@ _workspaces: dict[str, Workspace] = {}
 _workspaces_lock = threading.Lock()
 
 
-# Ошибки фоновой валидации задач: имя -> текст. Выставляет асинхронная
-# проверка после создания; список показывает такую задачу broken-записью
-# (а не роняет весь список и не прячет задачу молча). Чистится при успехе,
-# удалении и переименовании (переезд ключа). Чисто память обвязки.
-_WORKSPACE_ERRORS: Dict[str, str] = {}
+# Ошибки фоновой валидации задач: имя -> (текст, путь файла, отпечаток
+# содержимого). Выставляет асинхронная проверка после создания; список
+# показывает такую задачу broken-записью (а не роняет весь список и не
+# прячет задачу молча).
+# Путь нужен, чтобы сказать пользователю, КАКОЙ файл не читается, и
+# чтобы ошибка была привязана к файлу, а не к имени задачи: отпечаток
+# содержимого протухает вместе с файлом — починили (заменили) файл, и
+# ошибка про него больше не действует (правда — на диске, не в памяти).
+# Чистится при успехе, удалении и переименовании (переезд ключа).
+# Чисто память обвязки.
+_WORKSPACE_ERRORS: Dict[str, Tuple[str, str, Optional[Tuple[int, int]]]] = {}
 _WORKSPACE_ERRORS_LOCK = threading.Lock()
 
 
-def note_workspace_error(name: str, message: str) -> None:
-    """Запомнить ошибку задачи (показывается broken-записью)."""
+def note_workspace_error(name: str, message: str, path: str = "") -> None:
+    """Запомнить ошибку задачи (показывается broken-записью).
+
+    ``path`` — файл, о котором ошибка (если ошибка про конкретный файл):
+    по нему выводится роль («источник»/«превью») для подсветки в UI.
+    """
+    stamp = frame_provider.content_stamp(path) if path else None
     with _WORKSPACE_ERRORS_LOCK:
-        _WORKSPACE_ERRORS[name] = message
+        _WORKSPACE_ERRORS[name] = (message, path, stamp)
 
 
 def clear_workspace_error(name: str) -> None:
@@ -409,10 +462,32 @@ def rename_workspace_error(old: str, new: str) -> None:
             _WORKSPACE_ERRORS[new] = _WORKSPACE_ERRORS.pop(old)
 
 
+def _live_error(name: str) -> Optional[Tuple[str, str]]:
+    """Ошибка задачи, если она ещё про текущие файлы (None — протухла).
+
+    Протухает, когда файл, о котором ошибка, заменили или убрали: память
+    не должна помнить поломку, которой на диске уже нет.
+    """
+    with _WORKSPACE_ERRORS_LOCK:
+        rec = _WORKSPACE_ERRORS.get(name)
+    if rec is None:
+        return None
+    message, path, stamp = rec
+    if path and stamp != frame_provider.content_stamp(path):
+        return None
+    return message, path
+
+
 def workspace_error(name: str) -> Optional[str]:
     """Текст ошибки задачи (None — нет)."""
-    with _WORKSPACE_ERRORS_LOCK:
-        return _WORKSPACE_ERRORS.get(name)
+    rec = _live_error(name)
+    return rec[0] if rec is not None else None
+
+
+def workspace_error_path(name: str) -> str:
+    """Путь файла, о котором записана ошибка (пусто — ошибка не про файл)."""
+    rec = _live_error(name)
+    return rec[1] if rec is not None else ""
 
 
 # Недозалитые workspace-ы (идёт streaming тела запроса): имя -> отметка
@@ -674,9 +749,22 @@ def _index_state(ws) -> Tuple[dict, dict, bool, Optional[float]]:
 
     Общее для полной записи и лёгкого статуса: прогресс — минимум
     по неготовым ролям; None — сборка ещё не отметилась (пульс без %).
+
+    Обе роли опрашиваются даже если одна битая: иначе сборка индекса
+    второй роли не запустится и поломка «прячется» (в списке осталось бы
+    «сломан только превью», хотя сломаны оба файла).
     """
-    preview, preview_ready = _fast_role_meta(ws, "preview")
-    source, source_ready = _fast_role_meta(ws, "source")
+    broken = None
+    try:
+        preview, preview_ready = _fast_role_meta(ws, "preview")
+    except ValueError as e:
+        preview, preview_ready = _empty_meta(), False
+        broken = e
+    try:
+        source, source_ready = _fast_role_meta(ws, "source")
+    except ValueError as e:
+        source, source_ready = _empty_meta(), False
+        broken = broken or e
     indexing = not (preview_ready and source_ready)
     progress = None
     if indexing:
@@ -690,7 +778,22 @@ def _index_state(ws) -> Tuple[dict, dict, bool, Optional[float]]:
                 if p is not None:
                     vals.append(p)
         progress = min(vals) if vals else None
+    if broken is not None:
+        raise broken
     return preview, source, indexing, progress
+
+
+def _probe_roles(ws: Workspace) -> None:
+    """Запустить фоновую сборку индекса для обеих ролей (без ожидания).
+
+    Нужно там, где запись уже признана битой: без пробы второй роли её
+    поломка не попадёт в реестр ошибок индекса, и список знал бы только
+    о первом сбойном файле («сломан источник», хотя сломаны оба).
+    """
+    try:
+        _index_state(ws)
+    except ValueError:
+        pass
 
 
 def workspace_status_entry(ws: Workspace) -> dict:
@@ -704,21 +807,24 @@ def workspace_status_entry(ws: Workspace) -> dict:
     """
     err = workspace_error(ws.name)
     if err is not None:
+        _probe_roles(ws)
         return {"id": ws.name, "indexing": False, "indexing_progress": None,
                 "export": _export_state(ws.name),
                 "updated_at": _workspace_updated_at(ws),
-                "broken": True, "error": str(err)[:300]}
+                "broken": True, "error": str(err)[:300],
+                "error_role": broken_role(ws) or None}
     try:
         _, _, indexing, progress = _index_state(ws)
     except ValueError as e:
         return {"id": ws.name, "indexing": False, "indexing_progress": None,
                 "export": _export_state(ws.name),
                 "updated_at": _workspace_updated_at(ws),
-                "broken": True, "error": f"{type(e).__name__}: {e}"[:300]}
+                "broken": True, "error": f"{type(e).__name__}: {e}"[:300],
+                "error_role": broken_role(ws) or None}
     return {"id": ws.name, "indexing": indexing, "indexing_progress": progress,
             "export": _export_state(ws.name),
             "updated_at": _workspace_updated_at(ws),
-            "broken": False, "error": ""}
+            "broken": False, "error": "", "error_role": None}
 
 
 def list_workspaces_status() -> List[dict]:
@@ -742,6 +848,7 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
     """
     err = workspace_error(ws.name)
     if err is not None:
+        _probe_roles(ws)
         raise ValueError(err)
     if fast:
         preview, source, indexing, indexing_progress = _index_state(ws)
@@ -784,6 +891,7 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
         "indexing_progress": indexing_progress,
         "broken": False,
         "error": "",
+        "error_role": None,
     }
 
 
@@ -825,6 +933,7 @@ def _broken_entry(ws: Workspace, err: Exception) -> dict:
         "indexing_progress": None,
         "broken": True,
         "error": f"{type(err).__name__}: {err}"[:300],
+        "error_role": broken_role(ws) or None,
     }
 
 
