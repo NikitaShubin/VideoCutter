@@ -18,6 +18,7 @@ import {
 import { FragmentModel } from "../model/fragmentModel";
 import { CacheControl } from "./CacheControl";
 import { HelpModal } from "./HelpModal";
+import { Hint } from "./Hint";
 import {
   FrameScheduler,
   nextPlayPosition,
@@ -1006,70 +1007,86 @@ export function CutEditor({ pairId, onBack }: Props) {
                 : "Экспорт (E)"}
             </span>
           </button>
-          <button
+          <Hint
             className="toolbar-btn"
-            disabled={dlState !== null || annBusy}
-            onClick={() =>
-              handleDownload(
-                "ann",
-                annotationsUrl(pairId),
-                `${pairId}-annotations.zip`,
-              )
-            }
-            title="Скачать разметку задачи (fragments.tsv + манифест)"
+            text="Экспорт разметки — скачать fragments.tsv + манифест (без видео)"
+            pin={false}
+            focusable={false}
           >
-            {dlState?.key === "ann" ? (
-              <>
-                <span className="btn-spin" />
-                {dlState.frac !== null
-                  ? ` ${Math.round(dlState.frac * 100)}%`
-                  : ""}
-              </>
-            ) : (
-              "⤓ Разметка"
-            )}
-          </button>
-          <label
+            <button
+              className="toolbar-btn-plain"
+              disabled={dlState !== null || annBusy}
+              onClick={() =>
+                handleDownload(
+                  "ann",
+                  annotationsUrl(pairId),
+                  `${pairId}-annotations.zip`,
+                )
+              }
+            >
+              {dlState?.key === "ann" ? (
+                <>
+                  <span className="btn-spin" />
+                  {dlState.frac !== null
+                    ? ` ${Math.round(dlState.frac * 100)}%`
+                    : ""}
+                </>
+              ) : (
+                "⤓ Разметка"
+              )}
+            </button>
+          </Hint>
+          <Hint
             className="toolbar-btn"
-            title="Применить архив разметки к этой задаче (видео не трогается)"
+            text="Импорт разметки — применить архив разметки к задаче (видео не трогается)"
+            pin={false}
+            focusable={false}
           >
-            {annProgress !== null
-              ? `Разметка ${Math.round(annProgress * 100)}%`
-              : "Импорт разметки…"}
-            <input
-              type="file"
-              hidden
-              accept=".zip,application/zip"
-              onChange={(e) => {
-                const f = e.target.files?.[0] ?? null;
-                if (f) handleAnnotationsImport(f);
-                e.target.value = "";
-              }}
-            />
-          </label>
-          <button
+            <label className="toolbar-btn-plain">
+              {annProgress !== null
+                ? `Разметка ${Math.round(annProgress * 100)}%`
+                : "⤒ Импорт"}
+              <input
+                type="file"
+                hidden
+                accept=".zip,application/zip"
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  if (f) handleAnnotationsImport(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          </Hint>
+          <Hint
             className="toolbar-btn"
-            disabled={dlState !== null || annBusy}
-            onClick={() =>
-              handleDownload(
-                "bak",
-                taskBackupUrl(pairId),
-                `${pairId}-backup.zip`,
-              )
-            }
-            title="Скачать полный бэкап задачи (видео + разметка + паспорт)"
+            text="Экспорт бэкапа — скачать задачу целиком (видео + разметка + паспорт)"
+            pin={false}
+            focusable={false}
           >
-            {dlState?.key === "bak" ? (
-              <>
-                <span className="btn-spin" />
-                {dlState.frac !== null
-                  ? ` ${Math.round(dlState.frac * 100)}%`
-                  : ""}
-              </>
-            ) : (
-              "⤓ Бэкап"
-            )}
-          </button>
+            <button
+              className="toolbar-btn-plain"
+              disabled={dlState !== null || annBusy}
+              onClick={() =>
+                handleDownload(
+                  "bak",
+                  taskBackupUrl(pairId),
+                  `${pairId}-backup.zip`,
+                )
+              }
+            >
+              {dlState?.key === "bak" ? (
+                <>
+                  <span className="btn-spin" />
+                  {dlState.frac !== null
+                    ? ` ${Math.round(dlState.frac * 100)}%`
+                    : ""}
+                </>
+              ) : (
+                "⤓ Бэкап"
+              )}
+            </button>
+          </Hint>
           <button
             className="toolbar-help"
             onClick={() => setHelpOpen(true)}

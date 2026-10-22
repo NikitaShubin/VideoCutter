@@ -6,6 +6,6 @@ export default defineConfig({
     // Без URL у jsdom opaque origin — нет localStorage.
     environmentOptions: { jsdom: { url: "http://localhost/" } },
     setupFiles: ["./vitest.setup.ts"],
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 });

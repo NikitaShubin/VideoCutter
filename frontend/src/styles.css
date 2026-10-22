@@ -410,7 +410,9 @@ select option {
 .pair-list .pair-row {
   display: flex;
   gap: 6px;
-  align-items: stretch;
+  /* Кнопки ✎/🗑 — по центру по вертикали относительно кнопки задачи
+   * (иначе они прилипают к верху строки и «висят» над длинной задачей). */
+  align-items: center;
 }
 
 /* Кнопка-строка и её div-двойник (строка заливки): полный сброс + рамка. */
@@ -494,6 +496,8 @@ select option {
   padding: 1px 8px;
   font-size: 0.8em;
   color: var(--warn);
+  /* Текст ошибки — длинный путь без пробелов: рвём, иначе кадр обрезает. */
+  overflow-wrap: anywhere;
 }
 
 /* Квадратные кнопки действий задачи: «изменить» и «удалить» рядом.
@@ -585,8 +589,8 @@ select option {
 }
 
 .pair-edit .role-field.unassigned {
-  border-left: 3px solid #8a6d3b;
-  padding-left: 8px;
+  border-color: #6b5330;
+  background: rgba(120, 90, 40, 0.1);
 }
 
 .pair-edit .role-name {
@@ -620,6 +624,30 @@ select option {
 .pair-edit .role-action:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Внутренняя кнопка/label внутри «чипа» (подсказка-обёртка): вид чипа
+ * задаёт обёртка, сама кнопка не дублирует рамку и отступы. */
+.pair-edit .role-action-plain {
+  display: inline-block;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.pair-edit .role-action-plain:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Ряд «Готово» — справа (управление закрытием панели по умолчанию). */
+.pair-edit .pair-edit-row-right {
+  justify-content: flex-end;
 }
 
 .pair-edit .pair-edit-btn-text {
@@ -674,8 +702,106 @@ select option {
   text-align: center;
 }
 
-.pair-list li.broken .pair-row {
-  align-items: center;
+/* ─── Битая задача: «мягко-болезненно», без растягивания рамки ───────────── */
+
+/* Треугольник с полным текстом ошибки в подсказке (своей, не нативной:
+ * нативный title не срабатывает по клику и обрезается рамкой строки).
+ * Клик по треугольнику «залипает» — текст ошибки можно прочитать. */
+.pair-list li.broken .pair-bad-mark {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 2px;
+  color: var(--warn);
+  cursor: help;
+  outline-offset: 2px;
+}
+
+/* Подсказка: слой поверх страницы (не режется рамкой строки). */
+.hint-pop {
+  position: fixed;
+  z-index: 100;
+  max-width: min(460px, calc(100vw - 24px));
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101018;
+  color: var(--text);
+  font-size: 0.85em;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+/* Имя сломанного файла в строке — сразу видно, что чинить. */
+.pair-list li.broken .pair-role-bad {
+  color: var(--warn);
+  font-weight: 600;
+  text-decoration: underline wavy rgba(220, 170, 60, 0.6);
+  text-underline-offset: 3px;
+}
+
+/* Приглушённая «болезненная» рамка: задача заметна, но не кричит. */
+.pair-list li.broken .pair-open {
+  border-color: #6d3a3a;
+  background: rgba(120, 40, 40, 0.16);
+}
+
+.pair-list li.broken .pair-label {
+  color: #f3c9c9;
+}
+
+/* ─── Панель ролей: битая роль подсвечена ────────────────────────────────── */
+
+/* У всех ролей одинаковая геометрия (рамка прозрачная) — битая роль
+ * подсвечивается, но ничего не сдвигает: имена файлов и кнопки стоят
+ * ровно так же, как у здоровых. */
+.pair-edit .role-field {
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.pair-edit .role-field.role-bad {
+  border-color: #6d3a3a;
+  background: rgba(120, 40, 40, 0.14);
+}
+
+.pair-edit .role-field.role-bad .role-name {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.pair-edit .role-bad-hint {
+  flex: 0 0 auto;
+  color: var(--warn);
+  font-size: 0.85em;
+}
+
+/* Кнопка «Заменить…» у битой роли — акцент: это и есть починка. */
+.pair-edit .role-action.role-action-bad {
+  border-color: #8a5a3a;
+  background: rgba(150, 70, 40, 0.35);
+  color: #ffd9c0;
+  font-weight: 600;
+}
+
+.pair-edit .role-action.role-action-bad:hover {
+  background: rgba(170, 80, 45, 0.5);
+}
+
+/* ─── Проекты: мягкая подсветка проекта с проблемными задачами ────────────── */
+
+.project-panel .project-rows li.project-bad .project-open {
+  border-color: #6d3a3a;
+  background: rgba(120, 40, 40, 0.14);
+}
+
+.project-panel .project-rows .project-defect {
+  margin-right: 6px;
+  color: var(--warn);
+  cursor: help;
 }
 
 /* ─── Редактор ───────────────────────────────────────────────────────────── */
@@ -732,6 +858,7 @@ select option {
 }
 
 /* Ссылки/лейблы/кнопки тулбара (обмен разметкой и бэкапом): та же геометрия. */
+.editor-toolbar span.toolbar-btn,
 .editor-toolbar a.toolbar-btn,
 .editor-toolbar label.toolbar-btn,
 .editor-toolbar button.toolbar-btn {
@@ -748,6 +875,27 @@ select option {
   white-space: nowrap;
   text-decoration: none;
   cursor: pointer;
+}
+
+/* Внутренняя кнопка/label внутри «чипа» (обёртка подсказки): вид задаёт
+ * обёртка, сама кнопка не дублирует рамку и отступы. */
+.editor-toolbar .toolbar-btn-plain {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.editor-toolbar .toolbar-btn-plain:disabled {
+  opacity: 0.7;
+  cursor: wait;
 }
 
 .editor-toolbar a.toolbar-btn:hover,

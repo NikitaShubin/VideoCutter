@@ -119,6 +119,8 @@ export interface WorkspaceStatus {
   updated_at: number;
   broken: boolean;
   error: string;
+  /** Какая роль сломана (null — про задачу в целом или всё цело). */
+  error_role: VideoPair["error_role"];
 }
 
 export function getWorkspacesStatus(): Promise<WorkspaceStatus[]> {

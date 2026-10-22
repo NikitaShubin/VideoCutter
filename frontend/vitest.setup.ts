@@ -1,7 +1,11 @@
+// React 18: act() требует явного флага окружения, иначе тесты с
+// createRoot ругаются предупреждением «not configured to support act».
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
+  .IS_REACT_ACT_ENVIRONMENT = true;
+
 // jsdom-окружение vitest не пробрасывает window.localStorage в globals
 // (зависит от версий связки) — даём детерминированный in-memory стаб.
-class MemoryStorage implements Storage {
-  private data = new Map<string, string>();
+class MemoryStorage implements Storage {  private data = new Map<string, string>();
 
   get length(): number {
     return this.data.size;

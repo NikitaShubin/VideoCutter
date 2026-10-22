@@ -4,6 +4,9 @@ export interface Fragment {
   comment?: string;
 }
 
+/** Роль сломанного файла задачи: что именно не читается. */
+export type DefectRole = "source" | "preview" | "both";
+
 export interface VideoPair {
   id: string;
   /** Отображаемое имя (как task.name в CVAT): дубли разрешены, пусто — id. */
@@ -32,6 +35,8 @@ export interface VideoPair {
   indexing_progress: number | null;
   broken: boolean;
   error: string;
+  /** Какая роль сломана (null — про задачу в целом или всё цело). */
+  error_role: DefectRole | null;
   created_at: string | null;
   last_opened_at: string | null;
   /** Проект задачи (null — standalone); состав — реестр проектов. */

@@ -32,8 +32,12 @@ import {
   markedLabel,
   type MarkStats,
 } from "../model/markStats";
+import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
 import { pluralCount } from "../model/plural";
 import { StatusbarPreview } from "./StatusbarPreview";
+import { PairRowFrame } from "./PairRowFrame";
+import { RoleField } from "./RoleFields";
+import { Hint } from "./Hint";
 
 interface Props {
   pairs: VideoPair[] | null;
@@ -260,6 +264,9 @@ export function PairList({
     return (projects ?? []).find((p) => p.id === pid)?.name ?? pid;
   };
 
+  // Битые задачи по проектам: проект с проблемами помечаем (мягко).
+  const defectTasks = useMemo(() => projectDefects(pairs), [pairs]);
+
   const [query, setQuery] = useState("");
 
   const listed =
@@ -473,6 +480,11 @@ export function PairList({
   // ─── Редактирование задачи (inline в списке) ─────────────────────────────
 
   const openEdit = (p: VideoPair) => {
+    // Повторное нажатие карандаша закрывает панель (тумблер).
+    if (editingId === p.id) {
+      setEditingId(null);
+      return;
+    }
     setEditingId(p.id);
     setEditName(p.name || p.id);
     setEditProject(p.project_id ?? "");
@@ -648,71 +660,91 @@ export function PairList({
         </select>
       </div>
 
-      <div className="role-field">
-        <b>Источник</b>
-        <span className="role-name">
-          {p.source_name === p.preview_name ? "(то же видео)" : p.source_name}
-        </span>
-        {p.source_name && (
-          <>
-            <label className="role-action">
-              Заменить…
-              <input
-                type="file"
-                hidden
-                accept={VIDEO_ACCEPT}
-                onChange={(e) => {
-                  const f = e.target.files?.[0] ?? null;
-                  if (f) doUploadRole(p.id, "source", f);
-                  e.target.value = "";
-                }}
-              />
-            </label>
-            {p.source_name !== p.preview_name && (
-              <button
-                className="role-action"
-                onClick={() => doRemoveRole(p.id, "source")}
-                disabled={editBusy}
+      <RoleField
+        role="source"
+        name={p.source_name}
+        shared={p.source_name === p.preview_name}
+        broken={isRoleBroken(p.error_role, "source")}
+        hint={defectHint(p.error_role)}
+        error={p.error}
+        actions={
+          p.source_name ? (
+            <>
+              <label
+                className={
+                  isRoleBroken(p.error_role, "source")
+                    ? "role-action role-action-bad"
+                    : "role-action"
+                }
               >
-                Убрать
-              </button>
-            )}
-          </>
-        )}
-      </div>
+                Заменить…
+                <input
+                  type="file"
+                  hidden
+                  accept={VIDEO_ACCEPT}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null;
+                    if (f) doUploadRole(p.id, "source", f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+              {p.source_name !== p.preview_name && (
+                <button
+                  className="role-action"
+                  onClick={() => doRemoveRole(p.id, "source")}
+                  disabled={editBusy}
+                >
+                  Убрать
+                </button>
+              )}
+            </>
+          ) : null
+        }
+      />
 
-      <div className="role-field">
-        <b>Превью</b>
-        <span className="role-name">
-          {p.preview_name === p.source_name ? "(то же видео)" : p.preview_name}
-        </span>
-        {p.preview_name && (
-          <>
-            <label className="role-action">
-              Заменить…
-              <input
-                type="file"
-                hidden
-                accept={VIDEO_ACCEPT}
-                onChange={(e) => {
-                  const f = e.target.files?.[0] ?? null;
-                  if (f) doUploadRole(p.id, "preview", f);
-                  e.target.value = "";
-                }}
-              />
-            </label>
-            {p.preview_name !== p.source_name && (
-              <button
-                className="role-action"
-                onClick={() => doRemoveRole(p.id, "preview")}
-                disabled={editBusy}
+      <RoleField
+        role="preview"
+        name={p.preview_name}
+        shared={p.preview_name === p.source_name}
+        broken={isRoleBroken(p.error_role, "preview")}
+        hint={defectHint(p.error_role)}
+        error={p.error}
+        actions={
+          p.preview_name ? (
+            <>
+              <label
+                className={
+                  isRoleBroken(p.error_role, "preview")
+                    ? "role-action role-action-bad"
+                    : "role-action"
+                }
               >
-                Убрать
-              </button>
-            )}
-          </>
-        )}
-      </div>
+                Заменить…
+                <input
+                  type="file"
+                  hidden
+                  accept={VIDEO_ACCEPT}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null;
+                    if (f) doUploadRole(p.id, "preview", f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+              {p.preview_name !== p.source_name && (
+                <button
+                  className="role-action"
+                  onClick={() => doRemoveRole(p.id, "preview")}
+                  disabled={editBusy}
+                >
+                  Убрать
+                </button>
+              )}
+            </>
+          ) : null
+        }
+      />
 
       {p.unassigned_name && (
         <div className="role-field unassigned">
@@ -759,41 +791,57 @@ export function PairList({
 
       <div className="pair-edit-row">
         <span className="pair-edit-label">Бэкап</span>
-        <button
+        <Hint
           className="role-action"
-          disabled={editBusy}
-          onClick={() => doDownloadTask(p.id, "backup")}
-          title="Скачать полный бэкап задачи (видео + разметка + паспорт)"
+          text="Экспорт бэкапа — скачать задачу целиком (видео + разметка + паспорт)"
+          pin={false}
+          focusable={false}
         >
-          ⤓ Бэкап
-        </button>
-        <button
+          <button
+            className="role-action-plain"
+            disabled={editBusy}
+            onClick={() => doDownloadTask(p.id, "backup")}
+          >
+            ⤓ Бэкап
+          </button>
+        </Hint>
+        <Hint
           className="role-action"
-          disabled={editBusy}
-          onClick={() => doDownloadTask(p.id, "annotations")}
-          title="Скачать разметку (fragments.tsv + манифест)"
+          text="Экспорт разметки — скачать fragments.tsv + манифест (без видео)"
+          pin={false}
+          focusable={false}
         >
-          ⤓ Разметка
-        </button>
-        <label
+          <button
+            className="role-action-plain"
+            disabled={editBusy}
+            onClick={() => doDownloadTask(p.id, "annotations")}
+          >
+            ⤓ Разметка
+          </button>
+        </Hint>
+        <Hint
           className="role-action"
-          title="Применить архив разметки к этой задаче (видео не трогается)"
+          text="Импорт разметки — применить архив разметки к задаче (видео не трогается)"
+          pin={false}
+          focusable={false}
         >
-          Импорт разметки…
-          <input
-            type="file"
-            hidden
-            accept=".zip,application/zip"
-            onChange={(e) => {
-              const f = e.target.files?.[0] ?? null;
-              if (f) doImportAnnotations(p.id, f);
-              e.target.value = "";
-            }}
-          />
-        </label>
+          <label className="role-action-plain">
+            ⤒ Импорт
+            <input
+              type="file"
+              hidden
+              accept=".zip,application/zip"
+              onChange={(e) => {
+                const f = e.target.files?.[0] ?? null;
+                if (f) doImportAnnotations(p.id, f);
+                e.target.value = "";
+              }}
+            />
+          </label>
+        </Hint>
       </div>
 
-      <div className="pair-edit-row">
+      <div className="pair-edit-row pair-edit-row-right">
         <button
           className="pair-edit-btn-text"
           onClick={() => { setEditingId(null); onChanged(); }}
@@ -950,14 +998,26 @@ export function PairList({
           )}
           {projError && <div className="pair-edit-error">{projError}</div>}
           <ul className="project-rows">
-            {(projects ?? []).map((p) => (
-              <li key={p.id}>
+            {(projects ?? []).map((p) => {
+              const bad = defectTasks.get(p.id) ?? [];
+              return (
+              <li key={p.id} className={bad.length ? "project-bad" : undefined}>
                 <button
                   className="project-open"
                   title="Показать задачи проекта"
                   onClick={() => openProject(p.id)}
                 >
-                  <span className="project-name">{p.name}</span>
+                  <span className="project-name">
+                    {bad.length > 0 && (
+                      <Hint
+                        className="project-defect"
+                        text={`Проблемные задачи: ${bad.join(", ")}`}
+                      >
+                        ⚠
+                      </Hint>
+                    )}
+                    {p.name}
+                  </span>
                   <span className="project-meta">
                     {projectMeta(p)} →
                   </span>
@@ -994,7 +1054,8 @@ export function PairList({
                   </button>
                 </div>
               </li>
-            ))}
+              );
+            })}
             {projects !== null && projects.length === 0 && (
               <li className="empty">Проектов пока нет.</li>
             )}
@@ -1087,46 +1148,45 @@ export function PairList({
                     : 0,
                 };
           return (
-            <li key={u.key}>
-              <div className="pair-row">
-                <div className="pair-open" aria-disabled="true">
-                  <StatusbarPreview
-                    className="pair-bg"
-                    progress={layers}
-                  />
-                  <span className="pair-label">{u.name}</span>
-                  <span className="pair-meta">{meta}</span>
-                </div>
-                <div className="pair-actions">
-                  {u.error ? (
+            <PairRowFrame
+              key={u.key}
+              label={u.name}
+              meta={meta}
+              background={
+                <StatusbarPreview
+                  className="pair-bg"
+                  progress={layers}
+                />
+              }
+              actions={
+                u.error ? (
+                  <button
+                    className="pair-edit-btn"
+                    title="Убрать из списка"
+                    onClick={() => onDismissUpload(u.key)}
+                  >
+                    ✕
+                  </button>
+                ) : (
+                  <>
                     <button
                       className="pair-edit-btn"
-                      title="Убрать из списка"
-                      onClick={() => onDismissUpload(u.key)}
+                      title="Переименовать задачу"
+                      onClick={() => renameUpload(u)}
                     >
-                      ✕
+                      ✎
                     </button>
-                  ) : (
-                    <>
-                      <button
-                        className="pair-edit-btn"
-                        title="Переименовать задачу"
-                        onClick={() => renameUpload(u)}
-                      >
-                        ✎
-                      </button>
-                      <button
-                        className="pair-delete"
-                        title="Отменить создание задачи"
-                        onClick={() => onCancelUpload(u.key)}
-                      >
-                        🗑
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </li>
+                    <button
+                      className="pair-delete"
+                      title="Отменить создание задачи"
+                      onClick={() => onCancelUpload(u.key)}
+                    >
+                      🗑
+                    </button>
+                  </>
+                )
+              }
+            />
           );
         })}
         {listed !== null &&
@@ -1142,13 +1202,60 @@ export function PairList({
           )}
         {shownPairs.map((p) =>
           p.broken ? (
-            <li key={p.id} className="broken">
-              <div className="pair-row">
-                <span className="pair-label">{p.name || p.id}</span>
-                <span className="pair-meta">
-                  ⚠ {p.error || "Не удалось прочитать задачу"}
-                </span>
-                <div className="pair-actions">
+            <PairRowFrame
+              key={p.id}
+              className="broken"
+              label={
+                <>
+                  <Hint
+                    className="pair-bad-mark"
+                    text={p.error || "Не удалось прочитать задачу"}
+                  >
+                    ⚠
+                  </Hint>
+                  {p.name || p.id}
+                </>
+              }
+              meta={
+                <>
+                  {isRoleBroken(p.error_role, "source") ? (
+                    <Hint
+                      className="pair-role-bad"
+                      text={p.error || "Файл не читается"}
+                    >
+                      {p.source_name}
+                    </Hint>
+                  ) : (
+                    <span>{p.source_name}</span>
+                  )}
+                  {p.preview_name && p.preview_name !== p.source_name ? (
+                    <>
+                      {" → "}
+                      {isRoleBroken(p.error_role, "preview") ? (
+                        <Hint
+                          className="pair-role-bad"
+                          text={p.error || "Файл не читается"}
+                        >
+                          {p.preview_name}
+                        </Hint>
+                      ) : (
+                        <span>{p.preview_name}</span>
+                      )}
+                    </>
+                  ) : null}
+                  {projectName(p.project_id) !== null &&
+                    ` · ⧉ ${projectName(p.project_id)}`}
+                </>
+              }
+              actions={
+                <>
+                  <button
+                    className="pair-edit-btn"
+                    title="Изменить"
+                    onClick={() => openEdit(p)}
+                  >
+                    ✎
+                  </button>
                   <button
                     className="pair-delete"
                     title="Удалить workspace"
@@ -1156,9 +1263,11 @@ export function PairList({
                   >
                     🗑
                   </button>
-                </div>
-              </div>
-            </li>
+                </>
+              }
+            >
+              {editingId === p.id && renderEdit(p)}
+            </PairRowFrame>
           ) : (
           <li key={p.id} className={editingId === p.id ? "editing" : undefined}>
             <div className="pair-row">
