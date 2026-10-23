@@ -1003,17 +1003,44 @@ select option {
   transition: opacity 0.15s ease;
 }
 
-.frame-spinner {
+/* Ожидание кадра: кольцо в центре кадра (как в CVAT), поверх затемнения. */
+.frame-wait {
   position: absolute;
-  right: 14px;
-  bottom: 14px;
-  width: 22px;
-  height: 22px;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+
+.frame-ring {
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   border: 3px solid rgba(255, 255, 255, 0.25);
   border-top-color: #fff;
   animation: frame-spin 0.8s linear infinite;
-  pointer-events: none;
+}
+
+.frame-wait-text {
+  color: #eee;
+  font-size: 0.9em;
+  text-align: center;
+  padding: 0 12px;
+}
+
+/* До первого кадра — заглушка вместо пустой «сломанной» картинки. */
+.frame-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 0.95em;
 }
 
 @keyframes frame-spin {

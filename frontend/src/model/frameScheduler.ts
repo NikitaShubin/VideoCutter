@@ -108,24 +108,6 @@ export class FrameScheduler {
   }
 }
 
-// Тип прерывистой навигации: «drain» — показ всех промежуточных кадров по пути
-// к позиции (накопленные тапы), «jump» — сразу к цели, без промежуточных.
-export type NavMode = "drain" | "jump";
-
-// Какой кадр грузить следующим. В режиме drain при отставании экрана грузится
-// следующий по пути кадр (shown+sign(position-shown)) — каждый кадр по пути
-// будет показан. В режиме jump — сразу целевая позиция.
-export function pickLoadTarget(a: {
-  shown: number;
-  position: number;
-  mode: NavMode;
-}): number {
-  if (a.mode === "drain" && a.shown !== a.position) {
-    return a.shown + Math.sign(a.position - a.shown);
-  }
-  return a.position;
-}
-
 // Позиция следующего кадра при воспроизведении. Логика границ сохранена
 // как в оригинале: на стыках разворот + остановка.
 export function nextPlayPosition(

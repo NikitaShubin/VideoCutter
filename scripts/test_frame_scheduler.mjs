@@ -12,7 +12,6 @@ import {
   FrameScheduler,
   nextPlayPosition,
   overlayStart,
-  pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
   sweepStaleInflight,
@@ -192,39 +191,50 @@ check("streaming назад: направление удержания учит�
   assert.equal(s.shownIndex, 4);
 });
 
-// --- pickLoadTarget: drain/jump ---
-check("pickLoadTarget: drain грузит следующий кадр по пути, не целевой", () => {
-  assert.equal(pickLoadTarget({ shown: 4, position: 9, mode: "drain" }), 5);
-  assert.equal(pickLoadTarget({ shown: 4, position: 4, mode: "drain" }), 4);
-  assert.equal(pickLoadTarget({ shown: 9, position: 4, mode: "drain" }), 8); // влево
-});
-
-check("pickLoadTarget: jump грузит сразу целевую позицию", () => {
-  assert.equal(pickLoadTarget({ shown: 4, position: 120, mode: "jump" }), 120);
-  assert.equal(pickLoadTarget({ shown: 120, position: 4, mode: "jump" }), 4);
-});
-
-check("drain: серия тапов показывает ВСЕ промежуточные кадры без пропуска", () => {
+// --- целевая загрузка: только актуальный кадр (серия тапов = прыжок) ---
+check("серия тапов: показывается строго последний кадр, промежуточные не рисуются", () => {
   const s = new FrameScheduler();
   s.show(3);
-  let pos = 3;
-  // Пользователь быстро нажал «→» 3 раза: позиция мгновенно 6.
-  pos = 6;
-  const shownOrder = [s.shownIndex];
-  while (pos !== s.shownIndex) {
-    const target = pickLoadTarget({ shown: s.shownIndex, position: pos, mode: "drain" });
-    const { gen } = s.begin(target);
-    assert.equal(s.deliver(target, gen, `u${target}`), true);
-    s.show(target);
-    shownOrder.push(s.shownIndex);
-  }
-  assert.deepEqual(shownOrder, [3, 4, 5, 6]);
+  // Пользователь быстро нажал «→» 3 раза: позиция 6. Каждый тап — новый
+  // строгий запрос; промежуточные ответы на экран не идут.
+  const a = s.begin(4);
+  const b = s.begin(5);
+  const c = s.begin(6);
+  // Ответы даже в порядке запросов не показываются: цель теперь 6.
+  assert.equal(s.deliver(4, a.gen, "u4"), false);
+  assert.equal(s.deliver(5, b.gen, "u5"), false);
+  assert.equal(s.shownIndex, 3); // экран на месте до прихода целевого
+  assert.equal(s.deliver(6, c.gen, "u6"), true);
+  s.show(6);
+  assert.equal(s.shownIndex, 6);
 });
 
-check("drain: стрим-догоняние после буфера допустимо с дропом (chase не ждёт дренаж)", () => {
+check("прыжок назад-вперёд: целевой кадр показывается сразу после ответа", () => {
+  const s = new FrameScheduler();
+  s.show(9);
+  const a = s.begin(4); // PageUp — прыжок к границе 4
+  assert.equal(s.deliver(4, a.gen, "u4"), true);
+  s.show(4);
+  assert.equal(s.shownIndex, 4);
+});
+
+check("дренаж удалён: промежуточный кадр не считается целевым даже при возврате", () => {
+  // Вернулись на кадр, который уже качался в прошлом запросе: старый ответ
+  // с устаревшим gen не показывается — новый запрос перевыпускает кадр.
+  const s = new FrameScheduler();
+  const stale = s.begin(7);
+  const fresh = s.begin(8);
+  assert.equal(s.deliver(7, stale.gen, "u7-old"), false);
+  assert.equal(s.deliver(8, fresh.gen, "u8"), true);
+  s.show(8);
+  const again = s.begin(7); // возврат на 7 после прыжка вперёд
+  assert.equal(again.cached, false); // устаревший ответ не закэшировался
+});
+
+check("chase: подтверждённый обход допустим с дропом (чужие кадры не ждём)", () => {
   const s = new FrameScheduler();
   s.show(2);
-  const pos = 8; // позиция убежала, буфер тапов «брошен» (переход на удержание)
+  const pos = 8; // позиция убежала при удержании, промкадры не нужны
   // Chase: показывается любой продвигающий кадр, даже если 3,4,5 не пришли.
   assert.equal(s.deliverStreaming(6, "u6", 1), true);
   assert.equal(s.shownIndex, 6);

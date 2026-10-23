@@ -14,8 +14,11 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+from fractions import Fraction
+from unittest import mock
 
 from django.test import SimpleTestCase
 
@@ -301,7 +304,7 @@ class FrameProviderTest(SimpleTestCase):
         j_half, _ = fp.get_frame_jpeg(self.path, 2, scale=0.5)
         self.assertIsNotNone(j_full)
         self.assertIsNotNone(j_half)
-        # Даунскейл缩小 размер JPEG, но JPEG-кодировщик
+        # Даунскейл уменьшает размер JPEG, но JPEG-кодировщик
         # может по-разному кодировать; проверяем что размер < 70% от оригинала.
         self.assertLess(len(j_half), len(j_full) * 0.7,
                         f"scale=0.5 JPEG ({len(j_half)}) не намного меньше полного ({len(j_full)})")
@@ -2384,3 +2387,100 @@ class DebugSnapshotCoverTest(SimpleTestCase):
             fp._providers.clear()
             fp._providers.update(saved)
 
+
+
+class BgIndexThreadsTest(SimpleTestCase):
+    """Лимит одновременных фоновых сборок индекса.
+
+    Каждая сборка читает файл целиком: на HDD горсть одновременных сборок
+    забивает диск, и кадры открытых задач долго не появляются (
+    VC_INDEX_BG_THREADS). Без лимита — SSD: сборки не мешают друг другу.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(prefix="vcbgidx_")
+        self.paths = [
+            os.path.join(self.tmpdir.name, f"f{i}.mp4") for i in range(4)
+        ]
+        # Файл должен существовать (os.stat в _Index); содержимое не нужно:
+        # сканы сборки подменяются заглушками.
+        for p in self.paths:
+            open(p, "wb").close()
+        self.active = 0
+        self.max_active = 0
+        self.done = 0
+        self.lock = threading.Lock()
+        self._cleanup_registry()
+
+    def tearDown(self):
+        for p in self.paths:
+            fp.close_source(p)
+        self._cleanup_registry()
+        self.tmpdir.cleanup()
+
+    @staticmethod
+    def _cleanup_registry():
+        with fp._BG_INDEX_LOCK:
+            fp._BG_INDEX_STARTED.clear()
+            fp._BG_INDEX_FAILED.clear()
+
+    def _fake_scan_packets(self, path, progress=None):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.1)
+        finally:
+            with self.lock:
+                self.active -= 1
+                self.done += 1
+        return Fraction(1, 25000), 24.0, 64, 48, 1, array.array("q", [0]), 0
+
+    @staticmethod
+    def _fake_scan_visible(path, tb, kf_us, n_seg, progress=None):
+        return ([0], True)
+
+    def _run_all_and_wait(self):
+        for p in self.paths:
+            fp.ensure_index_background(p)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            with self.lock:
+                if self.done >= len(self.paths):
+                    return
+            time.sleep(0.02)
+        self.fail(f"сборки не завершились: done={self.done}, "
+                  f"max_active={self.max_active}")
+
+    def test_no_limit_by_default_builds_run_parallel(self):
+        """Без env сборки свежих задач не ждут друг друга (SSD)."""
+        with mock.patch.object(fp, "_scan_packets", self._fake_scan_packets), \
+                mock.patch.object(fp, "_scan_visible", self._fake_scan_visible):
+            self._run_all_and_wait()
+        self.assertEqual(self.done, 4)
+        self.assertEqual(self.max_active, 4)
+
+    def test_sem_caps_concurrent_builds(self):
+        """С лимитом 2 одновременно строятся только две сборки."""
+        with mock.patch.object(fp, "_BG_INDEX_SEM",
+                               threading.BoundedSemaphore(2)), \
+                mock.patch.object(fp, "_scan_packets", self._fake_scan_packets), \
+                mock.patch.object(fp, "_scan_visible", self._fake_scan_visible):
+            self._run_all_and_wait()
+        self.assertEqual(self.done, 4)
+        self.assertEqual(self.max_active, 2)
+
+    def test_threads_env_parsed(self):
+        """env VC_INDEX_BG_THREADS: отсутствует/мусор — без лимита."""
+        cases = [
+            (None, 0),       # не задан — без лимита
+            ("", 0),
+            ("2", 2),
+            ("abc", 0),      # мусор — без лимита, не падает
+            ("-3", 0),
+        ]
+        for raw, want in cases:
+            env = {} if raw is None else {"VC_INDEX_BG_THREADS": raw}
+            with self.subTest(raw=raw):
+                with mock.patch.dict(os.environ, env, clear=False):
+                    self.assertEqual(fp._bg_index_threads(), want)

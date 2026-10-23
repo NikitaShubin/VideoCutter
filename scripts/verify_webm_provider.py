@@ -59,7 +59,7 @@ def run_one(name: str, rel: str) -> bool:
     path = SEARCH_DIR + rel
     print(f"\n===== {path}", flush=True)
 
-    # Метadata первого уровня (не форсирует pts_map для файлов с frames>0).
+    # Метаданные первого уровня (не форсирует pts_map для файлов с frames>0).
     t0 = time.perf_counter()
     meta = frame_provider.get_metadata(path)
     dt_meta = time.perf_counter() - t0

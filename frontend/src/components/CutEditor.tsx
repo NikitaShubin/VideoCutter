@@ -22,7 +22,6 @@ import { Hint } from "./Hint";
 import {
   FrameScheduler,
   nextPlayPosition,
-  pickLoadTarget,
   retargetOnDirectionChange,
   segmentBoundaryForward,
   sweepStaleInflight,
@@ -108,25 +107,34 @@ export function CutEditor({ pairId, onBack }: Props) {
   // Клиентский кэш кадров + предзагрузка: кадр подставляется в <img> только
   // после загрузки, поэтому пустой/чёрный экран при перемотке не моргает.
   //
-  // Три режима показа (номер/полоса всегда обновляются мгновенно):
-  //  - тапы (accumulate) → drain: показ каждого кадра по пути к позиции;
-  //  - прыжки (таймлайн, PageUp/Down, )Home/End, одиночный Ctrl+→) → jump:
-  //    сразу целевой кадр, без промежуточных;
+  // Режимы показа (номер/полоса всегда обновляются мгновенно):
+  //  - тапы и прыжки (таймлайн, PageUp/Down, Home/End, одиночный Ctrl+→):
+  //    сразу целевой кадр, без промежуточных (серия быстрых тапов — тоже
+  //    прыжок, к позиции последнего тапа);
   //  - удержание стрелки (e.repeat, в т.ч. Ctrl+) → chase: позиция бежит,
   //    экран догоняет, дропая кадры, с маркером до догона. Переход на
-  //    удержание отменяет незаконченный буфер тапов (epoch++).
+  //    удержание отменяет незаконченные запросы тапов (bumpEpoch).
   const MAX_CACHE = 60;
   const SEEK_STEP = 10;
   const CHASE_CAP = 6;
-  const DRAIN_CAP = 8;
+  // Тик pump: свип протухших запросов и повтор попытки загрузки — экран
+  // не «залипает», даже если ответ завис (медленный сервер, длинный GOP).
+  const PUMP_TICK_MS = 1200;
+  // Столько неудачных попыток подряд ждём по одному кадру, прежде чем
+  // прекратить долбёжку до нового нав-действия (bumpEpoch сбрасывает).
+  const FRAME_FAIL_MAX = 3;
   const schedRef = useRef<FrameScheduler | null>(null);
   if (!schedRef.current) schedRef.current = new FrameScheduler(MAX_CACHE);
   const [shownFrame, setShownFrame] = useState(-1);
-  const modeRef = useRef<"drain" | "jump">("jump");
   const chaseRef = useRef(false);
   const heldDirRef = useRef<1 | -1>(1);
   const epochRef = useRef(0);
   const inflightRef = useRef<Set<number>>(new Set());
+  // Счётчик неудачных попыток загрузки кадра (по индексу кадра).
+  const failsRef = useRef<Map<number, number>>(new Map());
+  // Истина, когда терпели неудачи до предела: показываем сообщение о
+  // застрявшем кадре и не долбим сервер до нового нав-действия.
+  const [frameStuck, setFrameStuck] = useState(false);
   const rightHeldRef = useRef(false);
   const leftHeldRef = useRef(false);
   // Замер клиента (диагностика тормозов, поведения не меняет): load — мс
@@ -172,10 +180,8 @@ export function CutEditor({ pairId, onBack }: Props) {
     setPosition(saved);
     schedRef.current = new FrameScheduler(MAX_CACHE);
     setShownFrame(-1);
-    modeRef.current = "jump";
     chaseRef.current = false;
-    epochRef.current++;
-    inflightRef.current.clear();
+    bumpEpoch();
     rightHeldRef.current = false;
     leftHeldRef.current = false;
     modelRef.current = new FragmentModel(p.total_frames);
@@ -313,7 +319,10 @@ export function CutEditor({ pairId, onBack }: Props) {
   );
 
   // Единая точка загрузки/показа кадра. Вызывается реактивно (смена позиции
-  // или показанного кадра) и императивно при смене режима навигации.
+  // или показанного кадра) и по тику таймера (ниже). Строгий режим:
+  // грузится и показывается только актуальная позиция — серия тапов и
+  // прыжки дают целевой кадр без промежуточных; удержание — отдельный
+  // стрим (chase).
   const pump = useCallback(() => {
     const sched = schedRef.current;
     if (!pair || !sched) return;
@@ -328,18 +337,20 @@ export function CutEditor({ pairId, onBack }: Props) {
     sweepStaleInflight(
       inflightRef.current, issueT0Ref.current, performance.now());
 
-    const target = chase
-      ? pos
-      : pickLoadTarget({ shown, position: pos, mode: modeRef.current });
+    const target = pos;
     if (target === shown) return;
+
+    // Предельное число неудач по кадру — крест на попытках: не долбим
+    // сервер до нового нав-действия (bumpEpoch чистит счётчик).
+    if ((failsRef.current.get(target) ?? 0) >= FRAME_FAIL_MAX) return;
 
     // Дедупликация: кадр уже грузится.
     const inflight = inflightRef.current;
     if (inflight.has(target)) return;
-    // Chase/drain: ограничиваем поток одновременных запросов — остальные кадры
-    // «пропускаются» (следующее изменение позиции запросит новее). Без колпачка
-    // на drain скраб по большому файлу ставит сотни декодов в очередь сервера.
-    if (inflight.size >= (chase ? CHASE_CAP : DRAIN_CAP)) return;
+    // Chase: ограничиваем поток одновременных запросов — остальные кадры
+    // «пропускаются» (следующее изменение позиции запросит новее). Без
+    // колпачка скраб по большому файлу ставит сотни декодов в очередь.
+    if (chase && inflight.size >= CHASE_CAP) return;
 
     const { gen, cached } = sched.begin(target);
     if (cached) {
@@ -374,6 +385,9 @@ export function CutEditor({ pairId, onBack }: Props) {
         shownIt = true;
       }
       if (shownIt) {
+        // Кадр показан: счётчик неудач по нему отработал.
+        failsRef.current.delete(target);
+        setFrameStuck(false);
         acc.shown++;
         acc.shownN++;
         requestAnimationFrame(() => {
@@ -385,9 +399,12 @@ export function CutEditor({ pairId, onBack }: Props) {
       inflight.delete(target);
       issueT0Ref.current.delete(target);
       if (myEpoch !== epochRef.current) return;
-      // Кадр не загрузился: разблокируем покадровое воспроизведение/догон,
-      // иначе воспроизведение залипнет на битом кадре.
-      if (!myChase && gen === sched.generation) setShownFrame(pos);
+      // Кадр не загрузился: кольцо остаётся, повтор — по тику pump.
+      // Подменять показ (setShownFrame) нельзя: «фейковый» кадр убирает
+      // кольцо, пока кадр фактически не загружен.
+      const fails = (failsRef.current.get(target) ?? 0) + 1;
+      failsRef.current.set(target, fails);
+      if (fails >= FRAME_FAIL_MAX) setFrameStuck(true);
     };
     img.src = frameUrl(pair.id, target, "visualization", ver, viewScale, viewQuality);
   }, [pair, position, shownFrame, showFrame, viewScale, viewQuality]);
@@ -398,6 +415,16 @@ export function CutEditor({ pairId, onBack }: Props) {
   useEffect(() => {
     pump();
   }, [pump]);
+
+  // Тик pump: свип протухших запросов и повтор попытки. Без него зависший
+  // ответ (медленный сервер, сборка индекса) висит на экране навсегда:
+  // свип и повтор работают только пока pump кто-то зовёт.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      pumpRef.current();
+    }, PUMP_TICK_MS);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Агрегатор клиентского замера: раз в секунду сворачиваем аккумулятор
   // в perf (один рендер в секунду вместо рендера на кадр).
@@ -433,44 +460,38 @@ export function CutEditor({ pairId, onBack }: Props) {
       setPairSettings(pairId, quality, scale).catch(() => {});
       setViewScale(scale);
       setViewQuality(quality);
-      epochRef.current++;
-      inflightRef.current.clear();
+      bumpEpoch();
       schedRef.current = new FrameScheduler(MAX_CACHE);
       setShownFrame(-1);
     }, 400);
     return () => window.clearTimeout(id);
   }, [pair, pairId, quality, scale]);
 
-  // --- Режимы навигации (утдерживание vs тапы vs прыжки) ---
-  // Прыжок: сразу целевой кадр, буфер/стрим отменяются.
+  // --- Режимы навигации (удержание vs тапы/прыжки) ---
+  // Любое новое нав-действие сбрасывает накопленное: старые ответы — в
+  // пустоту, счётчик неудач и сообщение о застрявшем кадре — в ноль.
+  const bumpEpoch = useCallback(() => {
+    epochRef.current++;
+    inflightRef.current.clear();
+    failsRef.current.clear();
+    setFrameStuck(false);
+  }, []);
+
+  // Прыжок/тап: сразу целевой кадр, незаконченные запросы отменяются.
+  // pump здесь НЕ зовётся: все вызовы jumpMode идут парой с setPosition,
+  // который сам запускает pump с уже новой позицией (вызов с протухшей
+  // позицией пере-запрашивал бы тот же кадр — двойной HTTP на каждый тап).
   const jumpMode = () => {
-    if (chaseRef.current || modeRef.current !== "jump") {
-      epochRef.current++;
-      inflightRef.current.clear();
-    }
     chaseRef.current = false;
-    modeRef.current = "jump";
-    pumpRef.current();
+    bumpEpoch();
   };
 
-  // Тап: накопление — показ всех промежуточных кадров по пути (drain).
-  const tapMode = () => {
-    if (chaseRef.current || modeRef.current !== "drain") {
-      epochRef.current++;
-      inflightRef.current.clear();
-    }
-    chaseRef.current = false;
-    modeRef.current = "drain";
-    pumpRef.current();
-  };
-
-  // Удержание: real-time стрим с дропом, буфер тапов отбрасывается сразу.
+  // Удержание: real-time стрим с дропом, незаконченные запросы тапов
+  // отбрасываются сразу (первый repeat-тек по кнопке).
   const startChase = (dir: 1 | -1) => {
     if (!chaseRef.current) {
-      epochRef.current++;
-      inflightRef.current.clear();
       chaseRef.current = true;
-      modeRef.current = "jump"; // хвост после отпускания — строгая докачка
+      bumpEpoch(); // хвост после отпускания — строгая докачка
     }
     heldDirRef.current = dir;
     pumpRef.current();
@@ -480,17 +501,13 @@ export function CutEditor({ pairId, onBack }: Props) {
   const endChase = () => {
     if (!chaseRef.current) return;
     chaseRef.current = false;
-    epochRef.current++;
-    inflightRef.current.clear();
-    modeRef.current = "jump";
+    bumpEpoch();
     pumpRef.current();
   };
 
-  // Отмена накопления (пробел — переход к воспроизведению).
+  // Отмена незаконченных запросов (пробел — переход к воспроизведению).
   const cancelPending = () => {
-    epochRef.current++;
-    inflightRef.current.clear();
-    modeRef.current = "jump";
+    bumpEpoch();
     // Новое обычное воспроизведение не должно упираться в протухшую цель J.
     playTargetRef.current = null;
     pumpRef.current();
@@ -609,12 +626,12 @@ export function CutEditor({ pairId, onBack }: Props) {
       } else if (rightKey) {
         setPlaying(false);
         if (e.repeat) startChase(1);
-        else tapMode();
+        else jumpMode(); // тап — сразу целевой кадр (без «анимации» промкадров)
         setPosition((pos) => Math.min(p.totalFrames - 1, pos + 1));
       } else if (leftKey) {
         setPlaying(false);
         if (e.repeat) startChase(-1);
-        else tapMode();
+        else jumpMode();
         setPosition((pos) => Math.max(0, pos - 1));
       } else if (is("PageDown")) {
         e.preventDefault();
@@ -1100,15 +1117,28 @@ export function CutEditor({ pairId, onBack }: Props) {
       <div className="video-area">
         <img
           ref={imageRef}
-          alt={`кадр ${position}`}
+          alt=""
           className={frameLoading ? "frame-loading" : undefined}
           style={{
             objectFit: preserveAspect ? "contain" : "fill",
             width: "100%",
             height: "100%",
+            // До первого кадра пустой <img> не рисуем (иначе вместо кадра
+            // виден «сломанный» значок с alt-текстом).
+            visibility: shownFrame < 0 ? "hidden" : undefined,
           }}
         />
-        {frameLoading && <div className="frame-spinner" aria-hidden />}
+        {shownFrame < 0 && <div className="frame-empty">Кадр загружается…</div>}
+        {frameLoading && (
+          <div className="frame-wait" aria-hidden>
+            <span className="frame-ring" />
+            {frameStuck && (
+              <span className="frame-wait-text">
+                Кадр не загрузился — перейдите на соседний кадр и вернитесь
+              </span>
+            )}
+          </div>
+        )}
         {(!isFullscreen || editingComment) && (
           editingComment ? (
             <div className="editor-comment">

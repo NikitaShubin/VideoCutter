@@ -10,6 +10,7 @@ HTTP-слой и работа с процессным реестром workspace
 
 import errno
 import json
+import logging
 import os
 import threading
 import time
@@ -35,6 +36,14 @@ from workspace import (
 
 def _ws_404(name: str) -> JsonResponse:
     return JsonResponse({"error": f"Workspace '{name}' не найден"}, status=404)
+
+
+logger = logging.getLogger(__name__)
+
+#: Кадр дольше порога (сек) — предупреждение в журнал (env
+#: VC_FRAME_SLOW_LOG_S). Диагностика медленного хранения: на HDD первый
+#: кадр свежей задачи может ждать сборку индекса — надо видеть это в логах.
+_SLOW_FRAME_LOG_S = float(os.environ.get("VC_FRAME_SLOW_LOG_S") or "5.0")
 
 
 #: Нет места/доступа при записи видео (507 Insufficient Storage, RFC 4918).
@@ -442,7 +451,17 @@ def workspace_frame(request, workspace_id: str, index: int):
     response = HttpResponse(jpeg, content_type=mime)
     # Наблюдаемость: источник кадра и время отдачи (диагностика stall'ов).
     response["X-Cache"] = info.get("source", "?")
-    response["X-Decode-Ms"] = str(int((time.monotonic() - t0) * 1000))
+    elapsed = time.monotonic() - t0
+    response["X-Decode-Ms"] = str(int(elapsed * 1000))
+    if elapsed >= _SLOW_FRAME_LOG_S:
+        # Медленный кадр — это минуты сборки индекса или забитый HDD:
+        # без этой строки на удалённом сервере не видно, что чинить.
+        logger.warning(
+            "медленный кадр workspace %s: индекс %s за %.2f с "
+            "(source=%s, abandoned=%s)",
+            workspace_id, index, elapsed, info.get("source", "?"),
+            info.get("abandoned", False),
+        )
     if info.get("abandoned"):
         response["X-Abandoned"] = "1"
     # Кадры неизменны в рамках сессии и параметров просмотра: браузер кэширует

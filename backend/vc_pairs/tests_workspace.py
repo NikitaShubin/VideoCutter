@@ -1114,6 +1114,41 @@ class FrameCoverageTests(WorkspaceApiTestBase):
         resp = self.client.get("/api/v1/workspaces/nonexistent/frame/0/")
         self.assertEqual(resp.status_code, 404)
 
+    def test_frame_slow_logged(self):
+        """Кадр дольше порога — предупреждение в журнал (диагностика HDD)."""
+        import vc_pairs.views as views
+
+        def slow_get(path, index, **kwargs):
+            time.sleep(0.15)
+            return (b"jpeg", "image/jpeg",
+                    {"source": "task", "abandoned": False})
+
+        with mock.patch.object(views.frame_provider, "get_frame_jpeg",
+                               slow_get), \
+                mock.patch.object(views, "_SLOW_FRAME_LOG_S", 0.05), \
+                self.assertLogs("vc_pairs.views", level="WARNING") as logs:
+            resp = self.client.get(self.ws_frame_url)
+        self.assertEqual(resp.status_code, 200)
+        text = "\n".join(logs.output)
+        self.assertIn("медленный кадр", text)
+        self.assertIn(self.ws_id, text)
+        self.assertIn("source=task", text)
+
+    def test_frame_fast_not_logged(self):
+        """Обычный кадр не засоряет журнал."""
+        import vc_pairs.views as views
+
+        def fast_get(path, index, **kwargs):
+            return (b"jpeg", "image/jpeg",
+                    {"source": "cache", "abandoned": False})
+
+        with mock.patch.object(views.frame_provider, "get_frame_jpeg",
+                               fast_get), \
+                mock.patch.object(views, "_SLOW_FRAME_LOG_S", 0.05), \
+                self.assertNoLogs("vc_pairs.views", level="WARNING"):
+            resp = self.client.get(self.ws_frame_url)
+        self.assertEqual(resp.status_code, 200)
+
     def test_frame_no_video_404(self):
         empty = os.path.join(self._tmpdir, "novid-ws")
         os.makedirs(empty, exist_ok=True)

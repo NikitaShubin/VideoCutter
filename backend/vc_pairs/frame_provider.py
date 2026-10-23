@@ -1742,6 +1742,32 @@ _BG_INDEX_STARTED: "set[str]" = set()
 _BG_INDEX_FAILED: "Dict[str, Tuple[Tuple[int, int], str]]" = {}
 
 
+def _bg_index_threads() -> int:
+    """Лимит одновременных фоновых сборок индекса (env VC_INDEX_BG_THREADS).
+
+    Каждая сборка читает файл целиком: на HDD несколько одновременных
+    сборок забивают диск, и первый кадр открытой задачи ждёт минутами.
+    По умолчанию лимита нет — SSD параллельные сборки не мешают.
+    0 (и мусор в env) — без лимита: не ломаем лучшие SSD-сценарии.
+    """
+    raw = os.environ.get("VC_INDEX_BG_THREADS")
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("VC_INDEX_BG_THREADS=%r не число — фоновые сборки "
+                       "без лимита", raw)
+        return 0
+
+
+#: Семафор на _bg_index_build; None — сборки без ограничения.
+_BG_INDEX_SEM: Optional[threading.BoundedSemaphore] = None
+_threads = _bg_index_threads()
+if _threads > 0:
+    _BG_INDEX_SEM = threading.BoundedSemaphore(_threads)
+
+
 class _DecodeCancelled(Exception):
     """Путь удалён посреди декода: бросаем работу, хендлы закрываются.
 
@@ -1808,7 +1834,19 @@ def ensure_index_background(path: str) -> None:
 
 def _bg_index_build(key: str) -> None:
     try:
-        _get_provider(key)._ensure_index()
+        # Лимит параллельных сборок: каждая читает файл целиком, на HDD
+        # горсть сборок забивает диск и кадры открытых задач ждут.
+        # Ожидание семафора — в потоке сборки (не в вызывающем): очередь
+        # честная, single-flight реестр под неё не удерживается, поэтому
+        # повторный ensure_index_background для того же пути всё ещё no-op.
+        sem = _BG_INDEX_SEM
+        if sem is not None:
+            sem.acquire()
+        try:
+            _get_provider(key)._ensure_index()
+        finally:
+            if sem is not None:
+                sem.release()
         with _BG_INDEX_LOCK:
             _BG_INDEX_FAILED.pop(key, None)
             # Single-flight — только на время сборки: готовый индекс
