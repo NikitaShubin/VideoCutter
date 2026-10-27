@@ -87,6 +87,10 @@ export function HelpModal({ open, onClose }: Props) {
                 <td>клик по таймлайну</td>
                 <td>переход к выбранному кадру</td>
               </tr>
+              <tr>
+                <td>поле номера кадра (тулбар)</td>
+                <td>введите 1…N и нажмите Enter — переход без промежуточных кадров; Esc — отмена</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -164,6 +168,7 @@ export function HelpModal({ open, onClose }: Props) {
             <span><i className="help-swatch" style={{ background: "#00bebe" }} /> бирюза — приём сервером (ложится поверх синего)</span>
             <span><i className="help-swatch" style={{ background: "#8b5cf6" }} /> фиолет — проверка/индексация поверх предыдущего (не разметка)</span>
             <span><i className="help-swatch" style={{ background: "#ff0000" }} /> фрагмент</span>
+            <span><i className="help-swatch" style={{ background: "#ff8c00" }} /> фрагмент с комментарием</span>
             <span><i className="help-swatch" style={{ background: "rgba(0,0,0,0.5)" }} /> затемнение — кадры после текущего</span>
             <span><i className="help-swatch" style={{ background: "#ffffff" }} /> маркер текущего кадра</span>
             <span><i className="help-swatch" style={{ background: "#00ffff" }} /> выбранный диапазон (на зелёном)</span>

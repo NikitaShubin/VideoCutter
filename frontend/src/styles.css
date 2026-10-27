@@ -954,6 +954,24 @@ select option {
   color: var(--warn);
 }
 
+/* Поле ввода номера кадра (тулбар редактора): в тон .info. Ширина задаётся
+   в JSX (ch), поэтому content-box: паддинги не съедают запас разрядов. */
+.frame-input {
+  box-sizing: content-box;
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--inset);
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+}
+
+.frame-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
 /* Ползунки качества/масштаба в тулбаре редактора. */
 .view-settings {
   display: flex;

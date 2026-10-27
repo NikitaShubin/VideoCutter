@@ -51,6 +51,36 @@ check("фрагменты — красные, правая граница вкл
   assert.deepEqual({ x: reds[1].x, w: reds[1].w }, { x: 55, w: 45 });
 });
 
+check("фрагмент с комментарием — оранжевый, обычный остаётся красным", () => {
+  const ops = statusbarOps({
+    ...base,
+    fragments: [
+      { start: 0, end: 3, comment: "*dt* инструкция" },
+      { start: 5, end: 9 },
+    ],
+  });
+  const orange = ops.find((o) => o.fill === "#ff8c00");
+  assert.ok(orange, "оранжевый сегмент должен быть нарисован");
+  // timelinePix(0)=0, timelinePix(3)=33 → ширина 34
+  assert.deepEqual({ x: orange.x, w: orange.w }, { x: 0, w: 34 });
+  const reds = ops.filter((o) => o.fill === "#ff0000");
+  assert.equal(reds.length, 1);
+  // timelinePix(5)=55, timelinePix(9)=99 → ширина 45
+  assert.deepEqual({ x: reds[0].x, w: reds[0].w }, { x: 55, w: 45 });
+});
+
+check("пустой или пробельный комментарий — подсветки нет (красный)", () => {
+  const ops = statusbarOps({
+    ...base,
+    fragments: [
+      { start: 0, end: 3, comment: "   " },
+      { start: 5, end: 9, comment: "" },
+    ],
+  });
+  assert.equal(ops.filter((o) => o.fill === "#ff8c00").length, 0);
+  assert.equal(ops.filter((o) => o.fill === "#ff0000").length, 2);
+});
+
 check("затемнение стартует на колонку правее позиции (overlayStart)", () => {
   const dim = statusbarOps(base).find((o) => o.fill === "rgba(0,0,0,0.5)");
   // timelinePix(7)=77 → 78, w = 100-78 = 22

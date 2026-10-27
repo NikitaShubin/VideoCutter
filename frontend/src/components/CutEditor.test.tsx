@@ -127,6 +127,27 @@ function release(code: string): void {
   });
 }
 
+/** Управляемый input React'а: setter прототипа + событие input. */
+function typeInto(input: HTMLInputElement, text: string): void {
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    setter.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+function keyPress(input: HTMLInputElement, key: string): void {
+  act(() => {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  });
+}
+
+const frameInput = (host: HTMLElement): HTMLInputElement =>
+  host.querySelector<HTMLInputElement>("input.frame-input")!;
+
 beforeEach(() => {
   vi.stubGlobal("Image", FakeImage as unknown as typeof Image);
   vi.stubGlobal("requestAnimationFrame", () => {});
@@ -276,6 +297,96 @@ describe("навигация", () => {
     expect(host.querySelector("img")?.getAttribute("src"))
       .toContain(`/frame/${target}/`);
     release("ArrowRight");
+    unmount();
+  });
+});
+
+describe("поле номера кадра", () => {
+  it("показывает текущий кадр (1-based) и следует за навигацией", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(frameInput(host)).toBeTruthy();
+    expect(frameInput(host).value).toBe("1");
+    await act(async () => {
+      FakeImage.issued[0].onload?.();
+    });
+    tap("ArrowRight");
+    expect(frameInput(host).value).toBe("2");
+    unmount();
+  });
+
+  it("ввод номера + Enter — переход ровно на целевой кадр", async () => {
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      FakeImage.issued[0].onload?.();
+    });
+    typeInto(frameInput(host), "7");
+    expect(frameInput(host).value).toBe("7");
+    keyPress(frameInput(host), "Enter");
+    expect(frameIdx(FakeImage.last().src)).toBe(6);
+    expect(frameInput(host).value).toBe("7"); // актуальный кадр, не черновик
+    unmount();
+  });
+
+  it("ввод клампится в 1..N; пусто/мусор — откат", async () => {
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      FakeImage.issued[0].onload?.();
+    });
+    const input = () => frameInput(host);
+    typeInto(input(), "999");
+    keyPress(input(), "Enter");
+    expect(frameIdx(FakeImage.last().src)).toBe(49); // последний из 50
+    expect(input().value).toBe("50");
+    typeInto(input(), "0");
+    keyPress(input(), "Enter");
+    // кадр 0 уже в кэше планировщика — новый запрос не выпускается,
+    // показ мгновенный
+    expect(host.querySelector("img")?.getAttribute("src")).toContain("/frame/0/");
+    expect(input().value).toBe("1");
+    typeInto(input(), "abc");
+    expect(input().value).toBe(""); // не-цифры отброшены
+    keyPress(input(), "Enter");
+    expect(input().value).toBe("1"); // откат к текущему, без прыжка
+    unmount();
+  });
+
+  it("ширина поля следует числу цифр (ввод длиннее total не обрезается)", async () => {
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      FakeImage.issued[0].onload?.();
+    });
+    const input = () => frameInput(host);
+    // total=50 → 2 цифры + 1 запас
+    expect(input().style.width).toBe("3ch");
+    typeInto(input(), "9999");
+    expect(input().style.width).toBe("5ch"); // подрастает под ввод
+    keyPress(input(), "Enter");
+    expect(input().style.width).toBe("3ch"); // клампинг → снова 2 цифры
+    unmount();
+  });
+
+  it("Esc откатывает ввод к текущему кадру", async () => {
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      FakeImage.issued[0].onload?.();
+    });
+    typeInto(frameInput(host), "9");
+    expect(frameInput(host).value).toBe("9");
+    keyPress(frameInput(host), "Escape");
+    expect(frameInput(host).value).toBe("1");
+    unmount();
+  });
+
+  it("во время проигрывания поле обновляется вместе с позицией", async () => {
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      FakeImage.issued[0].onload?.();
+    });
+    tap("Space"); // начало воспроизведения
+    act(() => {
+      vi.advanceTimersByTime(1); // тик планировщика воспроизведения
+    });
+    expect(frameInput(host).value).toBe("2"); // позиция 1, кадр грузится
     unmount();
   });
 });

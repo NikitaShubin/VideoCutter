@@ -31,7 +31,7 @@ export interface StatusbarState {
   width: number;
   height: number;
   totalFrames: number;
-  fragments: ReadonlyArray<{ start: number; end: number }>;
+  fragments: ReadonlyArray<{ start: number; end: number; comment?: string }>;
   position: number;
   keyPose?: number | null;
   /** Палитра: timeline — состояние разметки (зелёный/красный, как в
@@ -44,7 +44,7 @@ export interface StatusbarState {
   progress?: ProgressLayers;
 }
 
-// Цвета палитр: различается только фон (остаток затемняется сам,
+// Цвета палитры: различается только фон (остаток затемняется сам,
 // маркер белый во всех). Фрагментов вне timeline-режима не бывает.
 const SCHEME_BG: Record<StatusbarScheme, string> = {
   timeline: "#00ff00",
@@ -52,6 +52,11 @@ const SCHEME_BG: Record<StatusbarScheme, string> = {
   receipt: "#00bebe",
   indexing: "#8b5cf6",
 };
+
+// Красный — простая разметка, оранжевый — фрагмент с комментарием
+// (легенда совпадает в справке редактора и README).
+const FRAGMENT_FILL = "#ff0000";
+const COMMENTED_FILL = "#ff8c00";
 
 // Одна операция отрисовки; op "lighter" включает globalCompositeOperation.
 export interface StatusbarOp {
@@ -98,12 +103,13 @@ export function statusbarOps(s: StatusbarState): StatusbarOp[] {
     x: 0, y: 0, w: width, h: height,
   });
 
-  // Фрагменты — красные (BGR (255,0,0)).
+  // Фрагменты — красные (BGR (255,0,0)); с комментарием — оранжевые:
+  // видно, где оставлены пояснения, и в редакторе, и в превью списка.
   ops.push(
     ...fragments.map((f) => {
       const x = timelinePix(f.start, width, totalFrames);
       return {
-        fill: "#ff0000",
+        fill: f.comment?.trim() ? COMMENTED_FILL : FRAGMENT_FILL,
         x,
         y: 0,
         w: seg(timelinePix(f.end, width, totalFrames), x),

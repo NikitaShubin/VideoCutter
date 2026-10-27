@@ -71,6 +71,11 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [viewQuality, setViewQuality] = useState(78);
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
+  // Поле номера кадра: null — значение привязано к позиции (обновляется
+  // при тапах/прыжках/проигрывании); строка — черновик ручного ввода
+  // (пишется только под фокусом). Коммит — Enter или клик мимо поля,
+  // Esc — откат черновика.
+  const [frameDraft, setFrameDraft] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const helpOpenRef = useRef(false);
   helpOpenRef.current = helpOpen;
@@ -557,6 +562,23 @@ export function CutEditor({ pairId, onBack }: Props) {
     window.setTimeout(() => setMessage(""), 2000);
   };
 
+  // Ввод номера кадра (1-based, как на экране): клампинг в 1..N, переход
+  // как прыжок (строго целевой кадр, незаконченные запросы отменяются),
+  // пауза воспроизведения. Пусто/мусор — откат без прыжка; уже на этом
+  // кадре — тоже без лишнего прыжка.
+  const commitFrameInput = () => {
+    if (frameDraft === null) return;
+    setFrameDraft(null);
+    if (!pair) return;
+    const n = parseInt(frameDraft, 10);
+    if (!Number.isFinite(n)) return;
+    const target = Math.min(pair.total_frames, Math.max(1, n)) - 1;
+    if (target === position) return;
+    setPlaying(false);
+    jumpMode();
+    setPosition(target);
+  };
+
   const commentRef = useRef<HTMLTextAreaElement | null>(null);
   const committedRef = useRef(false);
 
@@ -990,7 +1012,40 @@ export function CutEditor({ pairId, onBack }: Props) {
             </label>
           </span>
           <span className="info">
-            кадр {position + 1}/{pair.total_frames} · выделено {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
+            кадр{" "}
+            <input
+              className="frame-input"
+              type="text"
+              inputMode="numeric"
+              aria-label="Номер кадра"
+              title="Номер кадра: введите число и нажмите Enter (Esc — отмена)"
+              style={{
+                // Адаптивная ширина: запас по max длине total, черновика и
+                // позиции, +1 разряд под курсор — ввод не обрезается.
+                width: `${Math.max(
+                  (frameDraft ?? String(position + 1)).length,
+                  String(pair.total_frames).length,
+                ) + 1}ch`,
+              }}
+              value={frameDraft ?? String(position + 1)}
+              onFocus={(e) => {
+                setFrameDraft(String(position + 1));
+                e.currentTarget.select();
+              }}
+              onChange={(e) => setFrameDraft(e.target.value.replace(/\D/g, ""))}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  e.currentTarget.select(); // повторный ввод заменит, а не допишет
+                  commitFrameInput();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setFrameDraft(null); // откат; фокус остаётся
+                }
+              }}
+              onBlur={commitFrameInput}
+            />{" "}
+            /{pair.total_frames} · выделено {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
           </span>
           <span
             className="info"
