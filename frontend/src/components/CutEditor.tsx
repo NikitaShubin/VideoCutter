@@ -31,6 +31,11 @@ import {
 import { paintStatusbar } from "../model/statusbar";
 import { type ExportItem, type ExportStatus, type VideoPairDetail } from "../types";
 
+// Логический размер таймлайна. CSS задаёт высоту 36px; backing store
+// умножается на devicePixelRatio в эффекте ниже.
+const STATUS_W = 800;
+const STATUS_H = 36;
+
 interface Props {
   pairId: string;
   onBack: () => void;
@@ -293,21 +298,38 @@ export function CutEditor({ pairId, onBack }: Props) {
   // зелёный фон, красные фрагменты, затемнение от позиции до конца,
   // выбранный диапазон добавляет синий канал (globalCompositeOperation).
   // Отрисовка вынесена в чистый model/statusbar.ts (общий с превью списка).
+  //
+  // Канва рисуется в логических 800×36 и масштабируется под DPR: на
+  // Retina/HiDPI полоса остаётся резкой, а не мыльной.
   const drawStatusbar = useCallback(() => {
     const canvas = statusRef.current;
     const p = modelRef.current;
     if (!canvas || !p) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const width = canvas.width / dpr;
+    const height = canvas.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     paintStatusbar(ctx, {
-      width: canvas.width,
-      height: canvas.height,
+      width,
+      height,
       totalFrames: p.totalFrames,
       fragments: p.fragments,
       position,
       keyPose,
     });
   }, [keyPose, position]);
+
+  useEffect(() => {
+    const canvas = statusRef.current;
+    if (!canvas) return;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const width = Math.round(STATUS_W * dpr);
+    const height = Math.round(STATUS_H * dpr);
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+  }, [pair]);
 
   useEffect(() => {
     drawStatusbar();
@@ -493,6 +515,16 @@ export function CutEditor({ pairId, onBack }: Props) {
   const jumpMode = () => {
     chaseRef.current = false;
     bumpEpoch();
+  };
+
+  // Переход по таймлайну (клик и клавиатура): всегда прыжок, без
+  // промежуточных кадров; позиция клампится в границы задачи.
+  const seekTo = (frame: number) => {
+    const p = modelRef.current;
+    if (!p) return;
+    setPlaying(false);
+    jumpMode();
+    setPosition(Math.min(p.totalFrames - 1, Math.max(0, frame)));
   };
 
   // Удержание: real-time стрим с дропом, незаконченные запросы тапов
@@ -1344,8 +1376,53 @@ export function CutEditor({ pairId, onBack }: Props) {
       <canvas
         ref={statusRef}
         className="statusbar"
-        width={800}
-        height={20}
+        width={STATUS_W}
+        height={STATUS_H}
+        role="slider"
+        tabIndex={0}
+        aria-label="Позиция на таймлайне"
+        aria-orientation="horizontal"
+        aria-valuemin={1}
+        aria-valuemax={pair.total_frames}
+        aria-valuenow={Math.min(pair.total_frames, position + 1)}
+        aria-valuetext={`Кадр ${Math.min(pair.total_frames, position + 1)} из ${pair.total_frames}`}
+        title="Клик или стрелки — переход по кадрам; Home/End — начало и конец"
+        onKeyDown={(e) => {
+          const p = modelRef.current;
+          if (!p) return;
+          // PageUp/PageDown — те же «прыжки по границам фрагментов», что
+          // и в остальном редакторе (README/справка), а не ±10 кадров.
+          if (e.key === "PageUp" || e.key === "PageDown") {
+            e.preventDefault();
+            e.stopPropagation();
+            setPlaying(false);
+            jump(e.key === "PageDown" ? 1 : -1);
+            return;
+          }
+          const step = e.shiftKey ? SEEK_STEP : 1;
+          let target: number;
+          switch (e.key) {
+            case "ArrowLeft":
+            case "ArrowDown":
+              target = position - step;
+              break;
+            case "ArrowRight":
+            case "ArrowUp":
+              target = position + step;
+              break;
+            case "Home":
+              target = 0;
+              break;
+            case "End":
+              target = p.totalFrames - 1;
+              break;
+            default:
+              return;
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          seekTo(target);
+        }}
         onClick={(e) => {
           const p = modelRef.current;
           const canvas = e.currentTarget;
@@ -1353,13 +1430,7 @@ export function CutEditor({ pairId, onBack }: Props) {
           const rect = canvas.getBoundingClientRect();
           const x = (e.clientX - rect.left) * (canvas.width / rect.width);
           const pixel = Math.min(canvas.width - 1, Math.max(0, x));
-          const target = Math.min(
-            p.totalFrames - 1,
-            timelineFrame(pixel, canvas.width, p.totalFrames),
-          );
-          setPlaying(false);
-          jumpMode();
-          setPosition(target);
+          seekTo(timelineFrame(pixel, canvas.width, p.totalFrames));
         }}
       />
 

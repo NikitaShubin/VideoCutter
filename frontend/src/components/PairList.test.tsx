@@ -327,3 +327,12 @@ describe("кнопки-иконки названы словами", () => {
     unmount();
   });
 });
+
+describe("превью таймлайна в списке", () => {
+  it("декоративно и не попадает в дерево доступности", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const html = renderList([makePair({ broken: false })]);
+    expect(html).toContain('class="pair-bg"');
+    expect(html).toContain('aria-hidden="true"');
+  });
+});

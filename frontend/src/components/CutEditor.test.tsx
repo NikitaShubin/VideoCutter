@@ -555,3 +555,74 @@ describe("кнопка справки", () => {
     unmount();
   });
 });
+
+function statusbar(host: HTMLElement): HTMLCanvasElement {
+  const canvas = host.querySelector<HTMLCanvasElement>("canvas.statusbar");
+  if (!canvas) throw new Error("таймлайн не найден");
+  return canvas;
+}
+
+function keyOn(el: HTMLElement, key: string): KeyboardEvent {
+  const e = new KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+  });
+  act(() => {
+    el.dispatchEvent(e);
+  });
+  return e;
+}
+
+describe("таймлайн редактора", () => {
+  it("фокусируемый слайдер: минимум, максимум и текущий кадр", async () => {
+    const { host, unmount } = await mountEditor();
+    const tl = statusbar(host);
+    expect(tl.getAttribute("role")).toBe("slider");
+    expect(tl.tabIndex).toBe(0);
+    expect(tl.getAttribute("aria-valuemin")).toBe("1");
+    expect(tl.getAttribute("aria-valuemax")).toBe("50");
+    expect(tl.getAttribute("aria-valuenow")).toBe("1");
+    expect(tl.getAttribute("aria-valuetext")).toBe("Кадр 1 из 50");
+    unmount();
+  });
+
+  it("стрелки двигают на кадр, Home/End — к краям", async () => {
+    const { host, unmount } = await mountEditor();
+    const tl = statusbar(host);
+    expect(keyOn(tl, "ArrowRight").defaultPrevented).toBe(true);
+    expect(tl.getAttribute("aria-valuenow")).toBe("2");
+    keyOn(tl, "End");
+    expect(tl.getAttribute("aria-valuenow")).toBe("50");
+    keyOn(tl, "Home");
+    expect(tl.getAttribute("aria-valuenow")).toBe("1");
+    keyOn(tl, "ArrowLeft");
+    expect(tl.getAttribute("aria-valuenow")).toBe("1");
+    unmount();
+  });
+
+  it("PageUp/PageDown прыгают по границам фрагментов", async () => {
+    pairDetail.fragments = [
+      { start: 0, end: 10, comment: "" },
+      { start: 20, end: 30, comment: "" },
+    ];
+    const { host, unmount } = await mountEditor();
+    const tl = statusbar(host);
+    keyOn(tl, "PageDown");
+    expect(tl.getAttribute("aria-valuenow")).toBe("11");
+    keyOn(tl, "PageDown");
+    expect(tl.getAttribute("aria-valuenow")).toBe("21");
+    keyOn(tl, "PageUp");
+    expect(tl.getAttribute("aria-valuenow")).toBe("11");
+    unmount();
+  });
+
+  it("канва учитывает плотность пикселей (DPR)", async () => {
+    vi.spyOn(window, "devicePixelRatio", "get").mockReturnValue(2);
+    const { host, unmount } = await mountEditor();
+    const tl = statusbar(host);
+    expect(tl.width).toBe(1600);
+    expect(tl.height).toBe(72);
+    unmount();
+  });
+});
