@@ -16,24 +16,16 @@ export function PlaybackMenu({
 }: Props) {
   return (
     <div className="menu-stack">
-      <div
-        className="menu-segments"
-        role="group"
-        aria-label="Направление воспроизведения"
-      >
+      <div className="menu-direction">
+        <span className="menu-direction-label">Направление</span>
         <button
           type="button"
-          aria-pressed={direction === 1}
-          onClick={() => onDirection(1)}
+          aria-label={`Направление: ${direction === -1 ? "назад" : "вперёд"}. Сменить`}
+          title="Сменить направление (R)"
+          onClick={() => onDirection(direction === 1 ? -1 : 1)}
         >
-          <span aria-hidden="true">▶</span> Вперёд
-        </button>
-        <button
-          type="button"
-          aria-pressed={direction === -1}
-          onClick={() => onDirection(-1)}
-        >
-          <span aria-hidden="true">◀</span> Назад
+          <span aria-hidden="true">{direction === -1 ? "◀" : "▶"}</span>
+          {direction === -1 ? "Назад" : "Вперёд"}
         </button>
       </div>
       <label className="menu-slider">

@@ -481,6 +481,16 @@ function playbackSettings(host: HTMLElement): HTMLButtonElement {
   return btn;
 }
 
+function directionButton(): HTMLButtonElement {
+  const panel = menuPanel("Направление и скорость");
+  if (!panel) throw new Error("меню воспроизведения не открыто");
+  const btn = [...panel.querySelectorAll<HTMLButtonElement>("button")].find(
+    (b) => b.textContent?.includes("Вперёд") || b.textContent?.includes("Назад"),
+  );
+  if (!btn) throw new Error("переключатель направления не найден");
+  return btn;
+}
+
 function lastSaved(): { start: number; end: number; comment: string }[] {
   const calls = vi.mocked(replaceFragments).mock.calls;
   return calls[calls.length - 1][1] as {
@@ -672,12 +682,13 @@ describe("управление воспроизведением", () => {
     expect(
       panel!.querySelector('input[aria-label="Скорость воспроизведения"]'),
     ).toBeTruthy();
+    expect(panel!.textContent).toContain("Направление");
     expect(panel!.textContent).toContain("Вперёд");
-    expect(panel!.textContent).toContain("Назад");
+    expect(panel!.querySelectorAll("button")).toHaveLength(1);
     unmount();
   });
 
-  it("«Назад» меняет направление и подпись кнопки", async () => {
+  it("переключатель направления уводит воспроизведение назад", async () => {
     const { host, unmount } = await mountEditor();
     expect(playButton(host).getAttribute("aria-label")).toContain(
       "Воспроизвести вперёд",
@@ -685,16 +696,30 @@ describe("управление воспроизведением", () => {
     act(() => {
       playbackSettings(host).click();
     });
-    const back = [
-      ...menuPanel("Направление и скорость")!.querySelectorAll<HTMLButtonElement>(
-        "button",
-      ),
-    ].find((b) => b.textContent?.includes("Назад"))!;
+    const toggle = directionButton();
+    expect(toggle.textContent).toContain("Вперёд");
     act(() => {
-      back.click();
+      toggle.click();
     });
-    expect(back.getAttribute("aria-pressed")).toBe("true");
+    expect(toggle.textContent).toContain("Назад");
     expect(playButton(host).getAttribute("aria-label")).toContain("назад");
+    unmount();
+  });
+
+  it("повторное нажатие возвращает направление вперёд", async () => {
+    const { host, unmount } = await mountEditor();
+    act(() => {
+      playbackSettings(host).click();
+    });
+    const toggle = directionButton();
+    act(() => {
+      toggle.click();
+    });
+    act(() => {
+      toggle.click();
+    });
+    expect(toggle.textContent).toContain("Вперёд");
+    expect(playButton(host).getAttribute("aria-label")).toContain("вперёд");
     unmount();
   });
 

@@ -1127,19 +1127,25 @@ select option {
   gap: 8px;
 }
 
-/* Направление — два взаимоисключающих сегмента. */
-.menu-segments {
+/* Направление — один переключатель: двух кнопок «вперёд/назад» много. */
+.menu-direction {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.menu-segments button {
+.menu-direction-label {
+  color: var(--muted);
+}
+
+.menu-direction button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  flex: 1 1 0;
-  padding: 6px 8px;
+  min-width: 118px;
+  padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: var(--r-s);
   background: var(--btn);
@@ -1148,15 +1154,8 @@ select option {
   cursor: pointer;
 }
 
-.menu-segments button:hover {
+.menu-direction button:hover {
   background: var(--btn-hover);
-}
-
-.menu-segments button[aria-pressed="true"] {
-  border-color: var(--accent);
-  background: var(--btn-hover);
-  color: var(--accent);
-  font-weight: 600;
 }
 
 .menu-slider {
