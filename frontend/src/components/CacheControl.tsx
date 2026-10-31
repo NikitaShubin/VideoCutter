@@ -57,9 +57,11 @@ export function CacheControl() {
       <button
         className="toolbar-help"
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={`GOP-кэш: ${u.mb} из ${u.mb_cap} МБ, ${u.gops} из ${u.gops_cap} групп. ${open ? "Свернуть лимиты" : "Открыть лимиты"}`}
         title={`GOP-кэш (RAM): ${u.gops}/${u.gops_cap} групп, ${u.mb}/${u.mb_cap}МБ на ${u.sources} источниках${perSource ? ` (${perSource})` : ""}. Лимиты: МБ [${srcMb}], GOP [${srcGops}] (auto — из автотюна). Раскрыть ручку лимитов.`}
       >
-        💾 {u.mb}/{u.mb_cap}МБ
+        <span aria-hidden="true">💾</span> {u.mb}/{u.mb_cap}МБ
       </button>
       <span
         style={{
@@ -90,10 +92,23 @@ export function CacheControl() {
               style={{ width: 48 }}
             />
           </label>
-          <button className="toolbar-help" onClick={apply} title="Применить лимиты без рестарта">
-            ✓
+          <button
+            className="toolbar-help"
+            onClick={apply}
+            title="Применить лимиты без рестарта"
+            aria-label="Применить лимиты"
+          >
+            <span aria-hidden="true">✓</span>
           </button>
-          {error && <span title={error}>⚠</span>}
+          {error && (
+            <span
+              role="status"
+              aria-label={`Ошибка кэша: ${error}`}
+              title={error}
+            >
+              <span aria-hidden="true">⚠</span>
+            </span>
+          )}
         </span>
       )}
     </span>

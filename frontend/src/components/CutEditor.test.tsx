@@ -543,3 +543,15 @@ describe("обратная связь о сохранении", () => {
     unmount();
   });
 });
+
+describe("кнопка справки", () => {
+  it("названа словами, знак вопроса скрыт от скринридера", async () => {
+    const { host, unmount } = await mountEditor();
+    const help = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Справка"]',
+    );
+    expect(help).toBeTruthy();
+    expect(help?.querySelector('[aria-hidden="true"]')?.textContent).toBe("?");
+    unmount();
+  });
+});

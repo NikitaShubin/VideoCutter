@@ -38,6 +38,7 @@ import { StatusbarPreview } from "./StatusbarPreview";
 import { PairRowFrame } from "./PairRowFrame";
 import { RoleField } from "./RoleFields";
 import { Hint } from "./Hint";
+import { FileButton } from "./FileButton";
 
 interface Props {
   pairs: VideoPair[] | null;
@@ -670,25 +671,19 @@ export function PairList({
         actions={
           p.source_name ? (
             <>
-              <label
+              <FileButton
                 className={
                   isRoleBroken(p.error_role, "source")
                     ? "role-action role-action-bad"
                     : "role-action"
                 }
+                accept={VIDEO_ACCEPT}
+                disabled={editBusy}
+                title="Заменить видеофайл источника"
+                onFile={(f) => doUploadRole(p.id, "source", f)}
               >
                 Заменить…
-                <input
-                  type="file"
-                  hidden
-                  accept={VIDEO_ACCEPT}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0] ?? null;
-                    if (f) doUploadRole(p.id, "source", f);
-                    e.target.value = "";
-                  }}
-                />
-              </label>
+              </FileButton>
               {p.source_name !== p.preview_name && (
                 <button
                   className="role-action"
@@ -713,25 +708,19 @@ export function PairList({
         actions={
           p.preview_name ? (
             <>
-              <label
+              <FileButton
                 className={
                   isRoleBroken(p.error_role, "preview")
                     ? "role-action role-action-bad"
                     : "role-action"
                 }
+                accept={VIDEO_ACCEPT}
+                disabled={editBusy}
+                title="Заменить видеофайл превью"
+                onFile={(f) => doUploadRole(p.id, "preview", f)}
               >
                 Заменить…
-                <input
-                  type="file"
-                  hidden
-                  accept={VIDEO_ACCEPT}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0] ?? null;
-                    if (f) doUploadRole(p.id, "preview", f);
-                    e.target.value = "";
-                  }}
-                />
-              </label>
+              </FileButton>
               {p.preview_name !== p.source_name && (
                 <button
                   className="role-action"
@@ -825,19 +814,15 @@ export function PairList({
           pin={false}
           focusable={false}
         >
-          <label className="role-action-plain">
+          <FileButton
+            className="role-action-plain"
+            accept=".zip,application/zip"
+            disabled={editBusy}
+            title="Импорт разметки из архива"
+            onFile={(f) => doImportAnnotations(p.id, f)}
+          >
             ⤒ Импорт
-            <input
-              type="file"
-              hidden
-              accept=".zip,application/zip"
-              onChange={(e) => {
-                const f = e.target.files?.[0] ?? null;
-                if (f) doImportAnnotations(p.id, f);
-                e.target.value = "";
-              }}
-            />
-          </label>
+          </FileButton>
         </Hint>
       </div>
 
@@ -971,22 +956,14 @@ export function PairList({
             >
               Создать проект
             </button>
-            <label
+            <FileButton
               className="btn"
+              accept=".zip,application/zip"
               title="Восстановить задачу/проект из zip-бэкапа (совпадающие имена получат суффикс _1)"
+              onFile={doRestoreBackup}
             >
               Восстановить из бэкапа…
-              <input
-                type="file"
-                hidden
-                accept=".zip,application/zip"
-                onChange={(e) => {
-                  const f = e.target.files?.[0] ?? null;
-                  if (f) doRestoreBackup(f);
-                  e.target.value = "";
-                }}
-              />
-            </label>
+            </FileButton>
           </div>
           {projRestoreProgress !== null && (
             <div className="pair-edit-progress">
@@ -1026,31 +1003,39 @@ export function PairList({
                   <button
                     className="pair-edit-btn"
                     title="Скачать бэкап проекта"
+                    aria-label="Скачать бэкап проекта"
                     disabled={dlKey !== null}
                     onClick={() => doDownloadProject(p)}
                   >
-                    {dlKey === p.id ? <span className="btn-spin" /> : "⤓"}
+                    {dlKey === p.id ? (
+                      <span className="btn-spin" aria-hidden="true" />
+                    ) : (
+                      <span aria-hidden="true">⤓</span>
+                    )}
                   </button>
                   <button
                     className="pair-edit-btn"
                     title="Переименовать проект"
+                    aria-label="Переименовать проект"
                     onClick={() => void editProjectName(p)}
                   >
-                    ✎
+                    <span aria-hidden="true">✎</span>
                   </button>
                   <button
                     className="pair-edit-btn"
                     title="Удалить проект (задачи останутся без проекта)"
+                    aria-label="Удалить проект (задачи останутся без проекта)"
                     onClick={() => void removeProject(p, "keep")}
                   >
-                    ✕
+                    <span aria-hidden="true">✕</span>
                   </button>
                   <button
                     className="pair-delete"
                     title="Удалить проект ВМЕСТЕ с задачами и видео"
+                    aria-label="Удалить проект вместе с задачами и видео"
                     onClick={() => void removeProject(p, "cascade")}
                   >
-                    🗑
+                    <span aria-hidden="true">🗑</span>
                   </button>
                 </div>
               </li>
@@ -1163,25 +1148,28 @@ export function PairList({
                   <button
                     className="pair-edit-btn"
                     title="Убрать из списка"
+                    aria-label="Убрать из списка"
                     onClick={() => onDismissUpload(u.key)}
                   >
-                    ✕
+                    <span aria-hidden="true">✕</span>
                   </button>
                 ) : (
                   <>
                     <button
                       className="pair-edit-btn"
                       title="Переименовать задачу"
+                      aria-label="Переименовать задачу"
                       onClick={() => renameUpload(u)}
                     >
-                      ✎
+                      <span aria-hidden="true">✎</span>
                     </button>
                     <button
                       className="pair-delete"
                       title="Отменить создание задачи"
+                      aria-label="Отменить создание задачи"
                       onClick={() => onCancelUpload(u.key)}
                     >
-                      🗑
+                      <span aria-hidden="true">🗑</span>
                     </button>
                   </>
                 )
@@ -1252,16 +1240,18 @@ export function PairList({
                   <button
                     className="pair-edit-btn"
                     title="Изменить"
+                    aria-label="Изменить"
                     onClick={() => openEdit(p)}
                   >
-                    ✎
+                    <span aria-hidden="true">✎</span>
                   </button>
                   <button
                     className="pair-delete"
                     title="Удалить workspace"
+                    aria-label="Удалить workspace"
                     onClick={() => remove(p)}
                   >
-                    🗑
+                    <span aria-hidden="true">🗑</span>
                   </button>
                 </>
               }
@@ -1338,16 +1328,18 @@ export function PairList({
                 <button
                   className="pair-edit-btn"
                   title="Изменить"
+                  aria-label="Изменить"
                   onClick={() => openEdit(p)}
                 >
-                  ✎
+                  <span aria-hidden="true">✎</span>
                 </button>
                 <button
                   className="pair-delete"
                   title="Удалить workspace"
+                  aria-label="Удалить workspace"
                   onClick={() => remove(p)}
                 >
-                  🗑
+                  <span aria-hidden="true">🗑</span>
                 </button>
               </div>
             </div>

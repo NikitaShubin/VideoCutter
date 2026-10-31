@@ -295,3 +295,35 @@ describe("карандаш открывает и закрывает панель
     unmount();
   });
 });
+
+describe("кнопки-иконки названы словами", () => {
+  it("карандаш и корзина строки имеют доступные имена, значки скрыты", () => {
+    const { host, unmount } = mountList([makePair({ broken: false })]);
+    const edit = host.querySelector<HTMLButtonElement>(
+      '.pair-edit-btn[title="Изменить"]',
+    )!;
+    expect(edit.getAttribute("aria-label")).toBe("Изменить");
+    expect(edit.querySelector('[aria-hidden="true"]')?.textContent).toBe("✎");
+    const del = host.querySelector<HTMLButtonElement>(
+      '.pair-delete[title="Удалить workspace"]',
+    )!;
+    expect(del.getAttribute("aria-label")).toBe("Удалить workspace");
+    expect(del.querySelector('[aria-hidden="true"]')?.textContent).toBe("🗑");
+    unmount();
+  });
+
+  it("восстановление из бэкапа — настоящая кнопка, доступная с клавиатуры", () => {
+    const { host, unmount } = mountList([makePair({ broken: false })]);
+    const projectsTab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((b) => b.textContent?.includes("Проекты"))!;
+    act(() => {
+      projectsTab.click();
+    });
+    const restore = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent?.includes("Восстановить из бэкапа"),
+    );
+    expect(restore).toBeTruthy();
+    expect(restore?.type).toBe("button");
+    unmount();
+  });
+});

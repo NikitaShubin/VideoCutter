@@ -19,6 +19,7 @@ import { FragmentModel } from "../model/fragmentModel";
 import { CacheControl } from "./CacheControl";
 import { HelpModal } from "./HelpModal";
 import { Hint } from "./Hint";
+import { FileButton } from "./FileButton";
 import {
   FrameScheduler,
   nextPlayPosition,
@@ -1166,21 +1167,16 @@ export function CutEditor({ pairId, onBack }: Props) {
             pin={false}
             focusable={false}
           >
-            <label className="toolbar-btn-plain">
+            <FileButton
+              className="toolbar-btn-plain"
+              accept=".zip,application/zip"
+              disabled={annBusy}
+              onFile={handleAnnotationsImport}
+            >
               {annProgress !== null
                 ? `Разметка ${Math.round(annProgress * 100)}%`
                 : "⤒ Импорт"}
-              <input
-                type="file"
-                hidden
-                accept=".zip,application/zip"
-                onChange={(e) => {
-                  const f = e.target.files?.[0] ?? null;
-                  if (f) handleAnnotationsImport(f);
-                  e.target.value = "";
-                }}
-              />
-            </label>
+            </FileButton>
           </Hint>
           <Hint
             className="toolbar-btn"
@@ -1215,8 +1211,9 @@ export function CutEditor({ pairId, onBack }: Props) {
             className="toolbar-help"
             onClick={() => setHelpOpen(true)}
             title="Справка (H)"
+            aria-label="Справка"
           >
-            ?
+            <span aria-hidden="true">?</span>
           </button>
         </div>
       )}
