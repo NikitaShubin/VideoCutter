@@ -390,3 +390,33 @@ describe("поле номера кадра", () => {
     unmount();
   });
 });
+
+describe("клавиатура не отбирает Tab", () => {
+  it("Tab не перехватывается и не меняет пропорции кадра", async () => {
+    const { host, unmount } = await mountEditor();
+    const img = host.querySelector("img")!;
+    expect(img.style.objectFit).toBe("contain");
+    const e = new KeyboardEvent("keydown", {
+      key: "Tab",
+      code: "Tab",
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      window.dispatchEvent(e);
+    });
+    expect(e.defaultPrevented).toBe(false);
+    expect(img.style.objectFit).toBe("contain");
+    unmount();
+  });
+
+  it("A переключает «сохранять пропорции / растягивать»", async () => {
+    const { host, unmount } = await mountEditor();
+    const img = host.querySelector("img")!;
+    tap("KeyA");
+    expect(img.style.objectFit).toBe("fill");
+    tap("KeyA");
+    expect(img.style.objectFit).toBe("contain");
+    unmount();
+  });
+});

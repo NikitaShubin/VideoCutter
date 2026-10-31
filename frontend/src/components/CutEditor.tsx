@@ -689,8 +689,7 @@ export function CutEditor({ pairId, onBack }: Props) {
         setSpeed(Math.pow(2, parseInt(code.slice(5), 10)));
       } else if (is("KeyF")) {
         toggleFullscreen();
-      } else if (is("Tab")) {
-        e.preventDefault();
+      } else if (is("KeyA")) {
         setPreserveAspect((v) => !v);
       } else if (is("KeyH") || (is("Slash") && e.shiftKey)) {
         setHelpOpen(true);
