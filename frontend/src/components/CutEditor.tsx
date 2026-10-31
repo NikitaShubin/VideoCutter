@@ -619,12 +619,10 @@ export function CutEditor({ pairId, onBack }: Props) {
       // Физическая клавиша: кнопка не зависит от раскладки (KeyR ~ R на любой раскладке).
       const is = (physical: string) => code === physical || k === physical;
 
-      // Справка закрывает все остальные горячие клавиши, пока открыта.
-      if (helpOpenRef.current) {
-        if (is("Escape") || is("KeyQ") || is("KeyH")) setHelpOpen(false);
-        else e.preventDefault();
-        return;
-      }
+      // Справка — настоящий диалог: клавиши обрабатывает HelpModal
+      // (Esc/H/Q, focus trap), редактор не перехватывает их и не мешает
+      // прокрутке панели.
+      if (helpOpenRef.current) return;
 
       const isEditing = (e.target as HTMLElement)?.tagName === "INPUT" || (e.target as HTMLElement)?.tagName === "TEXTAREA";
       if (isEditing) return;
