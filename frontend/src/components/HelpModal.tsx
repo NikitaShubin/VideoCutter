@@ -95,7 +95,7 @@ export function HelpModal({ open, onClose }: Props) {
           <a href="#help-playback">Воспроизведение</a>
           <a href="#help-markup">Разметка</a>
           <a href="#help-view">Вид</a>
-          <a href="#help-exchange">Обмен</a>
+          <a href="#help-data">Данные</a>
           <a href="#help-diagnostics">Диагностика</a>
           <a href="#help-misc">Прочее</a>
           <a href="#help-timeline">Таймлайн</a>
@@ -173,11 +173,17 @@ export function HelpModal({ open, onClose }: Props) {
 
         <div className="help-section">
           <h3 id="help-playback">Воспроизведение</h3>
+          <p>
+            Кнопка <b>▷ / ◁</b> у таймлайна запускает и ставит на паузу;
+            соседняя <b>xN ▾</b> открывает направление и скорость. Скорость
+            — это шаг: x8 проходит восемь кадров за тик (прореживание для
+            быстрого просмотра).
+          </p>
           <table className="help-table">
             <tbody>
               <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
               <tr><td><span className="kbd">Пробел</span></td><td>воспроизведение / пауза</td></tr>
-              <tr><td>{k("0 – 9")}</td><td>скорость воспроизведения</td></tr>
+              <tr><td>{k("0 – 9")}</td><td>скорость воспроизведения (x1…x512)</td></tr>
               <tr><td><span className="kbd">R</span></td><td>направление: вперёд / назад</td></tr>
               <tr><td><span className="kbd">J</span></td><td>прокрутить до ближайшей границы фрагмента (начало/конец) и остановиться (на краю видео направление разворачивается)</td></tr>
             </tbody>
@@ -219,9 +225,9 @@ export function HelpModal({ open, onClose }: Props) {
         </div>
 
         <div className="help-section">
-          <h3 id="help-exchange">Обмен разметкой и бэкапы</h3>
+          <h3 id="help-data">Данные: разметка и бэкапы</h3>
           <p>
-            Меню <b>«Обмен»</b> в шапке редактора: <b>Скачать разметку</b> —
+            Меню <b>«Данные»</b> в шапке редактора: <b>Скачать разметку</b> —
             экспорт разметки задачи (fragments.tsv + манифест, без видео);
             <b> Импортировать разметку</b> — применить такой архив к задаче
             (чужое видео отклоняется сверкой кадров); <b>Скачать бэкап</b> —
