@@ -1431,6 +1431,28 @@ select option {
   background: var(--btn-hover);
 }
 
+/* Оглавление: длинную справку можно листать по разделам, а не читать
+ * подряд. Ссылки — обычные якоря, работают и с клавиатуры. */
+.help-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 8px 0 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--edge);
+  font-size: 0.9em;
+}
+
+.help-toc a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.help-toc a:hover,
+.help-toc a:focus-visible {
+  text-decoration: underline;
+}
+
 .help-section {
   margin-top: 16px;
 }
@@ -1441,6 +1463,7 @@ select option {
   border-bottom: 1px solid var(--edge);
   color: var(--accent);
   font-size: 1em;
+  scroll-margin-top: 8px;
 }
 
 .help-section p {

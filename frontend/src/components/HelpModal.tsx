@@ -89,8 +89,19 @@ export function HelpModal({ open, onClose }: Props) {
           </button>
         </div>
 
+        <nav className="help-toc" aria-label="Разделы справки">
+          <a href="#help-frames">Кадры</a>
+          <a href="#help-nav">Клавиши</a>
+          <a href="#help-playback">Воспроизведение</a>
+          <a href="#help-markup">Разметка</a>
+          <a href="#help-view">Вид</a>
+          <a href="#help-exchange">Обмен</a>
+          <a href="#help-misc">Прочее</a>
+          <a href="#help-timeline">Таймлайн</a>
+        </nav>
+
         <div className="help-section">
-          <h3>Навигация по кадрам</h3>
+          <h3 id="help-frames">Навигация по кадрам</h3>
           <p>
             Номер кадра и полоса позиции обновляются <b>мгновенно</b> при
             любом вводе. Сам кадр грузится асинхронно и встаёт после загрузки;
@@ -124,7 +135,7 @@ export function HelpModal({ open, onClose }: Props) {
         </div>
 
         <div className="help-section">
-          <h3>Навигация</h3>
+          <h3 id="help-nav">Навигация</h3>
           <table className="help-table">
             <tbody>
               <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
@@ -160,7 +171,7 @@ export function HelpModal({ open, onClose }: Props) {
         </div>
 
         <div className="help-section">
-          <h3>Воспроизведение</h3>
+          <h3 id="help-playback">Воспроизведение</h3>
           <table className="help-table">
             <tbody>
               <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
@@ -173,7 +184,7 @@ export function HelpModal({ open, onClose }: Props) {
         </div>
 
         <div className="help-section">
-          <h3>Разметка фрагментов</h3>
+          <h3 id="help-markup">Разметка фрагментов</h3>
           <table className="help-table">
             <tbody>
               <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
@@ -187,7 +198,7 @@ export function HelpModal({ open, onClose }: Props) {
         </div>
 
         <div className="help-section">
-          <h3>Вид и интерфейс</h3>
+          <h3 id="help-view">Вид и интерфейс</h3>
           <table className="help-table">
             <tbody>
               <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
@@ -201,7 +212,7 @@ export function HelpModal({ open, onClose }: Props) {
         </div>
 
         <div className="help-section">
-          <h3>Обмен разметкой и бэкапы</h3>
+          <h3 id="help-exchange">Обмен разметкой и бэкапы</h3>
           <p>
             Кнопки тулбара: <b>⤓ Разметка</b> — <b>экспорт</b> разметки
             задачи (fragments.tsv + манифест, без видео); <b>⤒ Импорт</b> —
@@ -215,7 +226,7 @@ export function HelpModal({ open, onClose }: Props) {
         </div>
 
         <div className="help-section">
-          <h3>Прочее</h3>
+          <h3 id="help-misc">Прочее</h3>
           <table className="help-table">
             <tbody>
               <tr><th scope="col">Клавиша</th><th scope="col">Действие</th></tr>
@@ -225,7 +236,7 @@ export function HelpModal({ open, onClose }: Props) {
         </div>
 
         <div className="help-section">
-          <h3>Таймлайн</h3>
+          <h3 id="help-timeline">Таймлайн</h3>
           <div className="help-legend">
             <span><i className="help-swatch" style={{ background: "#00ff00" }} /> фон — вся последовательность кадров</span>
             <span><i className="help-swatch" style={{ background: "#0077ff" }} /> синий фон — отправка файла</span>

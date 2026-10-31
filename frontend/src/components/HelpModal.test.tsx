@@ -52,10 +52,28 @@ describe("справка как диалог", () => {
 
   it("Tab не выпускает фокус из диалога", () => {
     const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const dialog = el.querySelector('[role="dialog"]')!;
+    const first = dialog.querySelector<HTMLElement>(".help-close")!;
+    const links = dialog.querySelectorAll<HTMLAnchorElement>(".help-toc a");
+    const last = links[links.length - 1];
+    last.focus();
     press("Tab");
-    expect(document.activeElement).toBe(el.querySelector(".help-close"));
+    expect(document.activeElement).toBe(first);
     press("Tab", true);
-    expect(document.activeElement).toBe(el.querySelector(".help-close"));
+    expect(document.activeElement).toBe(last);
+    unmount();
+  });
+
+  it("оглавление ведёт к существующим разделам", () => {
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const links = Array.from(
+      el.querySelectorAll<HTMLAnchorElement>(".help-toc a"),
+    );
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) {
+      const id = link.getAttribute("href")!.slice(1);
+      expect(el.querySelector(`#${id}`)).not.toBeNull();
+    }
     unmount();
   });
 
