@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 
 import project_meta
 import task_meta
+from export_ledger import LEDGER
 from vc_pairs import frame_provider
 from videocutter.standalone import workspace as ws_fs
 from videocutter.standalone.workspace import VIDEO_EXTS
@@ -657,15 +658,7 @@ def _export_outputs_present(ws_name: str, files) -> bool:
     файлов), поэтому сверяемся с самими файлами, а не с ним.
     """
     out_dir = os.path.join(WORKSPACE_ROOT, ws_name, "exports")
-    for item in files or []:
-        name = item.get("filename", "") if isinstance(item, dict) else item
-        full = os.path.join(out_dir, os.path.basename(name or ""))
-        try:
-            if not os.path.isfile(full) or os.path.getsize(full) == 0:
-                return False
-        except OSError:
-            return False
-    return True
+    return LEDGER.outputs_present(out_dir, files)
 
 
 def _export_state(name: str):
@@ -677,42 +670,14 @@ def _export_state(name: str):
     Проверка только для done-задач (редкость), а не для всех строк.
     """
     try:
-        from vc_fragments.views import (
-            EXPORTS, EXPORTS_LOCK, _task_hash as _disk_hash,
-            _video_identity as _disk_video,
-        )
+        # Контракт деградации: без слоя views состояние не отдаём.
+        import vc_fragments.views  # noqa: F401
     except Exception:
-        # Деградация: без views ни память, ни свежесть недоступны.
         return None
-    with EXPORTS_LOCK:
-        exp = EXPORTS.get(name)
-    if exp is None:
-        return None
-    badge = {"state": exp.get("state"), "index": exp.get("index", 0),
-             "total": exp.get("total", 1), "error": exp.get("error", "")}
-    if badge["state"] != "done":
-        return badge
     ws = get_workspace(name)
-    if ws is None or not _export_outputs_present(name, exp.get("files")):
-        with EXPORTS_LOCK:
-            EXPORTS.pop(name, None)
+    if ws is None:
         return None
-    # Предмет экспорта цел: непустая разметка и видео на месте. Хеш
-    # сверяем, только если запись его несёт (без хеша — служебные done
-    # без файлов, их честность — файлами выше).
-    frags = ws.load_fragments()
-    vid = _disk_video(ws.original)
-    if not frags or vid is None:
-        with EXPORTS_LOCK:
-            EXPORTS.pop(name, None)
-        return None
-    if "hash" in exp:
-        want = _disk_hash(frags, vid["size"], vid["mtime_ns"])
-        if want != exp["hash"]:
-            with EXPORTS_LOCK:
-                EXPORTS.pop(name, None)
-            return None
-    return badge
+    return LEDGER.status(ws)
 
 
 def _fast_role_meta(ws: Workspace, role: str):
@@ -809,7 +774,7 @@ def workspace_status_entry(ws: Workspace) -> dict:
     if err is not None:
         _probe_roles(ws)
         return {"id": ws.name, "indexing": False, "indexing_progress": None,
-                "export": _export_state(ws.name),
+                "export": LEDGER.status(ws),
                 "updated_at": _workspace_updated_at(ws),
                 "broken": True, "error": str(err)[:300],
                 "error_role": broken_role(ws) or None}
@@ -817,12 +782,12 @@ def workspace_status_entry(ws: Workspace) -> dict:
         _, _, indexing, progress = _index_state(ws)
     except ValueError as e:
         return {"id": ws.name, "indexing": False, "indexing_progress": None,
-                "export": _export_state(ws.name),
+                "export": LEDGER.status(ws),
                 "updated_at": _workspace_updated_at(ws),
                 "broken": True, "error": f"{type(e).__name__}: {e}"[:300],
                 "error_role": broken_role(ws) or None}
     return {"id": ws.name, "indexing": indexing, "indexing_progress": progress,
-            "export": _export_state(ws.name),
+            "export": LEDGER.status(ws),
             "updated_at": _workspace_updated_at(ws),
             "broken": False, "error": "", "error_role": None}
 
@@ -886,7 +851,7 @@ def _pair_entry(ws: Workspace, fast: bool = False) -> dict:
         "updated_at": _workspace_updated_at(ws),
         "created_at": created_at,
         "last_opened_at": last_opened_at,
-        "export": _export_state(ws.name),
+        "export": LEDGER.status(ws),
         "indexing": indexing,
         "indexing_progress": indexing_progress,
         "broken": False,
@@ -928,7 +893,7 @@ def _broken_entry(ws: Workspace, err: Exception) -> dict:
         "updated_at": _workspace_updated_at(ws),
         "created_at": created_at,
         "last_opened_at": last_opened_at,
-        "export": _export_state(ws.name),
+        "export": LEDGER.status(ws),
         "indexing": False,
         "indexing_progress": None,
         "broken": True,

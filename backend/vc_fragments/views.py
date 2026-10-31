@@ -4,7 +4,6 @@
 Фрагменты хранятся как fragments.tsv в директории workspace.
 """
 
-import hashlib
 import json
 import os
 import subprocess
@@ -15,6 +14,7 @@ import numpy as np
 from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods
 
+from export_ledger import LEDGER
 from videocutter.core.exporter import (
     Exporter,
     ExportCancelled,
@@ -37,12 +37,12 @@ except (TypeError, ValueError):
 VERIFY_SSD_MAX = float(os.environ.get("VC_EXPORT_VERIFY_SSD", "100"))
 
 
-# Прогресс экспортов в памяти процесса: workspace_id -> {"state": ...}.
-EXPORTS: dict[str, dict] = {}
-EXPORTS_LOCK = threading.Lock()
-# Запросы на отмену: cancel ставится кнопкой/клавишей во время running;
-# фоновый поток проверяет флаг перед каждым фрагментом и прерывается.
-EXPORT_CANCEL: set[str] = set()
+# Совместимость с прежним interface: те же объекты, но владеет ими
+# ExportLedger. Новый код ходит через LEDGER; алиасы оставлены для тестов
+# и внешних импортов.
+EXPORTS = LEDGER.states
+EXPORTS_LOCK = LEDGER.lock
+EXPORT_CANCEL = LEDGER.cancel_set
 
 
 # --- очередь экспортов (CVAT-style, in-process, без Redis) ---
@@ -62,22 +62,9 @@ def _export_capacity() -> int:
     return max(1, min(4, (os.cpu_count() or 4) // 4))
 
 
-# FIFO workspace_id ожидающих (под EXPORTS_LOCK). Состояние каждого —
-# в EXPORTS ("queued" + position). POST никогда не блокируется.
-_EXPORT_QUEUE: list = []
-
-
-def _running_count() -> int:
-    """Число бегущих экспортов (вызывать под EXPORTS_LOCK)."""
-    return sum(1 for s in EXPORTS.values() if s.get("state") == "running")
-
-
-def _requeue_positions() -> None:
-    """Пересчитать position очереди (вызывать под EXPORTS_LOCK)."""
-    for pos, ws_id in enumerate(_EXPORT_QUEUE, 1):
-        st = EXPORTS.get(ws_id)
-        if st is not None and st.get("state") == "queued":
-            st["position"] = pos
+# FIFO workspace_id ожидающих. Владеет очередью ExportLedger; алиас
+# оставлен для тестов и внешних импортов.
+_EXPORT_QUEUE = LEDGER.queue
 
 
 def _run_export_guarded(ws_id: str) -> None:
@@ -96,21 +83,10 @@ def _spawn_export(ws_id: str) -> None:
 def _promote_exports() -> None:
     """Занять освободившиеся слоты первыми из очереди.
 
-    Под lock — только решить и пометить; spawn потоков снаружи, чтобы
+    Решение и пометка — внутри ExportLedger; spawn потоков снаружи, чтобы
     не держать lock на создании потоков.
     """
-    to_start = []
-    with EXPORTS_LOCK:
-        running = _running_count()
-        while running < _export_capacity() and _EXPORT_QUEUE:
-            nxt = _EXPORT_QUEUE.pop(0)
-            prev = EXPORTS.get(nxt) or {}
-            EXPORTS[nxt] = {"state": "running", "index": 0,
-                            "total": prev.get("total", 1)}
-            to_start.append(nxt)
-            running += 1
-        _requeue_positions()
-    for ws_id in to_start:
+    for ws_id in LEDGER.promote(_export_capacity()):
         _spawn_export(ws_id)
 
 
@@ -121,16 +97,12 @@ class _ExportCancelled(Exception):
 # Sidecar готового экспорта (рядом с файлами): переживает рестарт процесса.
 # Без него повторное открытие задачи после рестарта видело бы idle и гнало
 # экспорт заново, хотя файлы на месте.
-_SIDECAR = ".export-state.json"
+_SIDECAR = LEDGER.sidecar_name
 
 
 def _video_identity(path: str):
     """Идентичность видео {size, mtime_ns} (None — файла нет)."""
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+    return LEDGER.video_identity(path)
 
 
 # Допуск границ frame_ts-диапазона (c): float-неточность представления меток.
@@ -153,57 +125,22 @@ def _frame_ts_bounds(vpts, start: int, end: int):
 
 
 def _task_hash(frags, size: int, mtime_ns: int) -> str:
-    """Хеш состояния нарезки: границы (порядок не важен) + видео.
-
-    Совпал — файлы соответствуют нынешнему состоянию, отдаём готовое.
-    """
-    canon = json.dumps({
-        "fragments": sorted([f["start"], f["end"]] for f in frags),
-        "video": {"size": size, "mtime_ns": mtime_ns},
-    }, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+    """Хеш состояния нарезки: границы (порядок не важен) + видео."""
+    return LEDGER.task_hash(frags, size, mtime_ns)
 
 
 def _export_finished_ok(ws_id: str, created: list[str], task_hash) -> None:
-    urls = []
-    for i, path in enumerate(created, 1):
-        filename = os.path.basename(path)
-        urls.append({
-            "index": i,
-            "filename": filename,
-            "url": f"/api/v1/pairs/{ws_id}/export/{filename}",
-        })
-    with EXPORTS_LOCK:
-        EXPORTS[ws_id] = {"state": "done", "files": urls, "hash": task_hash}
-    # Sidecar для восстановления статуса после рестарта (имена файлов без
-    # ws_id — переименование задачи его не инвалидирует).
-    if created:
-        try:
-            with open(os.path.join(os.path.dirname(created[0]), _SIDECAR),
-                      "w", encoding="utf-8") as f:
-                json.dump({
-                    "hash": task_hash,
-                    "files": [os.path.basename(p) for p in created],
-                }, f)
-        except OSError:
-            pass
+    """Совместимость: фиксация готового экспорта живёт в ExportLedger."""
+    LEDGER.finish(ws_id, created, task_hash)
 
 
 def _export_failed(ws_id: str, message: str) -> None:
-    with EXPORTS_LOCK:
-        EXPORTS[ws_id] = {"state": "error", "error": message}
+    LEDGER.fail(ws_id, message)
 
 
 def _export_cancelled(ws_id: str, created_now: list[str]) -> None:
     """Отмена пользователем: зачищаем частичные файлы этого запуска."""
-    for path in created_now:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-    with EXPORTS_LOCK:
-        EXPORTS[ws_id] = {"state": "cancelled"}
-        EXPORT_CANCEL.discard(ws_id)
+    LEDGER.cancel(ws_id, created_now)
 
 
 def _ffprobe_frame_count(path: str):
@@ -368,18 +305,11 @@ def _run_export(ws_id: str) -> None:
                         f"[0, {len(vpts)})")
             frame_ts_ranges = None
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
-            with EXPORTS_LOCK:
-                if ws_id in EXPORT_CANCEL:
-                    raise _ExportCancelled()
-                EXPORTS[ws_id] = {
-                    "state": "running",
-                    "index": fragment_ind,
-                    "total": total,
-                }
+            if not LEDGER.progress(ws_id, fragment_ind, total):
+                raise _ExportCancelled()
 
         def cancelled() -> bool:
-            with EXPORTS_LOCK:
-                return ws_id in EXPORT_CANCEL
+            return LEDGER.cancelled(ws_id)
 
         created = exporter.extract_fragments(
             fragments, progress=progress, cancelled=cancelled,
@@ -415,8 +345,7 @@ def _run_export(ws_id: str) -> None:
     except Exception as e:
         _export_failed(ws_id, str(e))
     finally:
-        with EXPORTS_LOCK:
-            EXPORT_CANCEL.discard(ws_id)
+        LEDGER.clear_cancel(ws_id)
 
 
 @require_http_methods(["GET", "PUT"])
@@ -597,25 +526,21 @@ def fragment_export(request, pair_id: str):
         return JsonResponse({"error": "Нет фрагментов для экспорта"}, status=400)
 
     force = request.GET.get("force") == "1"
-    with EXPORTS_LOCK:
-        current = EXPORTS.get(pair_id)
-        if current and current["state"] in ("running", "queued"):
-            if not force:
-                return JsonResponse(
-                    {"error": "Экспорт уже выполняется/ожидает для этого "
-                              "workspace (state: %s)" % current["state"]},
-                    status=409,
-                )
-            # Force поверх активной заявки: бегущей — cancel, queued —
-            # из очереди; ниже встанет свежая (сериализация на workspace:
-            # два потока один ws никогда не режут параллельно).
-            if current["state"] == "running":
-                EXPORT_CANCEL.add(pair_id)
-            else:
-                if pair_id in _EXPORT_QUEUE:
-                    _EXPORT_QUEUE.remove(pair_id)
-                EXPORTS.pop(pair_id, None)
-                _requeue_positions()
+    current = LEDGER.snapshot(pair_id)
+    if current and current["state"] in ("running", "queued"):
+        if not force:
+            return JsonResponse(
+                {"error": "Экспорт уже выполняется/ожидает для этого "
+                          "workspace (state: %s)" % current["state"]},
+                status=409,
+            )
+        # Force поверх активной заявки: бегущей — cancel, queued —
+        # из очереди; ниже встанет свежая (сериализация на workspace:
+        # два потока один ws никогда не режут параллельно).
+        if current["state"] == "running":
+            LEDGER.request_cancel(pair_id)
+        else:
+            LEDGER.forget(pair_id)
 
     if not force:
         done = _current_done(pair_id)
@@ -625,27 +550,9 @@ def fragment_export(request, pair_id: str):
     # Несоответствие — сносим прежние наши нарезки и запускаем новое.
     _drop_previous_outputs(ws)
 
-    to_start = []
-    with EXPORTS_LOCK:
-        # Бегущий force-отменённый предшественник ещё держит слот до выхода
-        # (guard продвинет очередь) — честная сериализация без параллели.
-        if _running_count() < _export_capacity():
-            EXPORTS[pair_id] = {"state": "running", "index": 0,
-                                "total": len(frags)}
-            to_start.append(pair_id)
-            body = {"state": "running", "index": 0, "total": len(frags)}
-        else:
-            if pair_id not in _EXPORT_QUEUE:
-                _EXPORT_QUEUE.append(pair_id)
-            EXPORTS[pair_id] = {
-                "state": "queued",
-                "position": _EXPORT_QUEUE.index(pair_id) + 1,
-                "total": len(frags),
-            }
-            body = dict(EXPORTS[pair_id])
-
-    for ws_id in to_start:
-        _spawn_export(ws_id)
+    body = LEDGER.submit(pair_id, len(frags), _export_capacity())
+    if body["state"] == "running":
+        _spawn_export(pair_id)
     return JsonResponse(body)
 
 
@@ -661,28 +568,23 @@ def fragment_export_cancel(request, pair_id: str):
     if ws is None:
         return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
 
-    with EXPORTS_LOCK:
-        current = EXPORTS.get(pair_id)
-        if current and current["state"] == "queued":
-            if pair_id in _EXPORT_QUEUE:
-                _EXPORT_QUEUE.remove(pair_id)
-            EXPORTS[pair_id] = {"state": "cancelled"}
-            _requeue_positions()
-            return JsonResponse({"state": "cancelled"})
-        if not current or current["state"] != "running":
-            return JsonResponse(
-                {"error": "Экспорт не выполняется для этого workspace"},
-                status=409,
-            )
-        EXPORT_CANCEL.add(pair_id)
+    current = LEDGER.snapshot(pair_id)
+    if current and current["state"] == "queued":
+        LEDGER.cancel(pair_id, [])
+        return JsonResponse({"state": "cancelled"})
+    if not current or current["state"] != "running":
+        return JsonResponse(
+            {"error": "Экспорт не выполняется для этого workspace"},
+            status=409,
+        )
+    LEDGER.request_cancel(pair_id)
     return JsonResponse({"state": "cancelling"})
 
 
 @require_GET
 def fragment_export_status(request, pair_id: str):
     """Текущий статус экспорта."""
-    with EXPORTS_LOCK:
-        state = EXPORTS.get(pair_id)
+    state = LEDGER.snapshot(pair_id)
     if state and state.get("state") != "done":
         # Бегущий/упавший/отменённый/ждущий — как есть (память).
         if state["state"] == "error":
@@ -713,26 +615,8 @@ def _current_done(pair_id: str):
     ws = get_workspace(pair_id)
     if ws is None:
         return None
-    frags = ws.load_fragments()
-    if not frags or not ws.original:
-        return None
-    vid = _video_identity(ws.original)
-    if vid is None:
-        return None
-    want = _task_hash(frags, vid["size"], vid["mtime_ns"])
-    with EXPORTS_LOCK:
-        state = EXPORTS.get(pair_id)
-    if state and state.get("state") == "done" and state.get("hash") == want:
-        # Файлы могли снести вручную (хеш-то совпадает — он про границы
-        # и видео, а не про наличие файлов): сверяем сами файлы, иначе
-        # отдадим битые ссылки. Протухшую запись выкидываем.
-        from workspace import _export_outputs_present
-        if _export_outputs_present(pair_id, state.get("files")):
-            return {"state": "done", "files": state["files"]}
-        with EXPORTS_LOCK:
-            EXPORTS.pop(pair_id, None)
-        return None
-    return _status_from_disk(pair_id, want)
+    return LEDGER.current_done(
+        ws, video_identity=_video_identity, task_hash=_task_hash)
 
 
 def _drop_previous_outputs(ws) -> None:
@@ -740,26 +624,7 @@ def _drop_previous_outputs(ws) -> None:
 
     Только файлы из sidecar и нашего именного шаблона; чужие (keep.txt) целы.
     """
-    out_dir = os.path.join(ws.path, "exports")
-    victims = set()
-    try:
-        with open(os.path.join(out_dir, _SIDECAR), encoding="utf-8") as f:
-            saved = json.load(f)
-        for filename in saved.get("files") or []:
-            victims.add(os.path.basename(filename))
-    except (OSError, ValueError):
-        pass
-    try:
-        for filename in os.listdir(out_dir):
-            if "_fragment_" in filename:
-                victims.add(filename)
-    except OSError:
-        return
-    for filename in victims:
-        try:
-            os.remove(os.path.join(out_dir, filename))
-        except OSError:
-            pass
+    LEDGER.drop_outputs(ws, remove=os.remove)
 
 
 def _status_from_disk(pair_id: str, want: str):
@@ -771,31 +636,7 @@ def _status_from_disk(pair_id: str, want: str):
     ws = get_workspace(pair_id)
     if ws is None:
         return None
-    out_dir = os.path.join(ws.path, "exports")
-    try:
-        with open(os.path.join(out_dir, _SIDECAR), encoding="utf-8") as f:
-            saved = json.load(f)
-    except (OSError, ValueError):
-        return None
-    if not saved.get("hash") or saved["hash"] != want:
-        return None
-    urls = []
-    for i, filename in enumerate(saved.get("files") or [], 1):
-        full = os.path.join(out_dir, os.path.basename(filename))
-        try:
-            # Нулевой размер — недописанный файл убитого экспорта, не готовый.
-            if not os.path.isfile(full) or os.path.getsize(full) == 0:
-                return None
-        except OSError:
-            return None
-        urls.append({
-            "index": i,
-            "filename": os.path.basename(filename),
-            "url": f"/api/v1/pairs/{pair_id}/export/{os.path.basename(filename)}",
-        })
-    if not urls:
-        return None
-    return {"state": "done", "files": urls}
+    return LEDGER.status_from_disk(ws, want)
 
 
 @require_GET

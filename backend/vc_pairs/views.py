@@ -22,6 +22,7 @@ import project_meta
 import priority
 import task_meta
 import workspace as ws_module
+from export_ledger import LEDGER
 from videocutter.standalone import workspace as ws_fs
 from vc_pairs import frame_provider
 from workspace import (
@@ -323,16 +324,13 @@ def _workspace_rename(request, name: str) -> JsonResponse:
         return JsonResponse(
             {"error": "Имя зарезервировано под реестр проектов"}, status=400)
 
-    from vc_fragments.views import EXPORTS, EXPORTS_LOCK
-
     # Переезд под работающим ffmpeg убивает экспорт (пути захвачены
     # потоком): требуем дождаться завершения или отмены.
-    with EXPORTS_LOCK:
-        if EXPORTS.get(name, {}).get("state") == "running":
-            return JsonResponse(
-                {"error": "Экспорт выполняется — дождитесь завершения или отмените его"},
-                status=409,
-            )
+    if LEDGER.is_running(name):
+        return JsonResponse(
+            {"error": "Экспорт выполняется — дождитесь завершения или отмените его"},
+            status=409,
+        )
     try:
         renamed = ws_fs.rename_workspace(ws_module.WORKSPACE_ROOT, name, new_id)
     except ws_fs.WorkspaceExistsError as e:
@@ -342,11 +340,8 @@ def _workspace_rename(request, name: str) -> JsonResponse:
         return JsonResponse({"error": str(e)}, status=404 if is_not_found else 400)
 
     if renamed != name:
-        # Освобождаем провайдеры кадров (перезаймётся по новому имени файлов —
-        # здесь пути не меняются, только имя каталога, поэтому кэш кадров жив).
-        with EXPORTS_LOCK:
-            if name in EXPORTS:
-                EXPORTS[renamed] = EXPORTS.pop(name)
+        # Состояние и очередь экспорта переезжают вместе с задачей.
+        LEDGER.rename(name, renamed)
         ws_module.rename_workspace_error(name, renamed)
         scan_workspaces()
     else:
@@ -374,12 +369,9 @@ def _workspace_delete(name: str) -> JsonResponse:
         if path:
             frame_provider.close_source(path)
 
-    from vc_fragments.views import EXPORTS, EXPORTS_LOCK, EXPORT_CANCEL
-
     # Останавливаем фон экспорта (проверяется между фрагментами).
-    with EXPORTS_LOCK:
-        if EXPORTS.get(name, {}).get("state") == "running":
-            EXPORT_CANCEL.add(name)
+    if LEDGER.is_running(name):
+        LEDGER.request_cancel(name)
 
     # На FUSE удаление при открытых хендлах (декод/префетч в полёте) оставляет
     # .fuse_hidden и роняет rmdir (ENOTEMPTY): повторяем с паузой, чтобы
@@ -399,8 +391,7 @@ def _workspace_delete(name: str) -> JsonResponse:
         return JsonResponse(
             {"error": f"Не удалось удалить '{name}': {last_err}"}, status=500)
 
-    with EXPORTS_LOCK:
-        EXPORTS.pop(name, None)
+    LEDGER.forget(name, keep_cancel=True)
     ws_module.clear_workspace_error(name)
 
     scan_workspaces()
