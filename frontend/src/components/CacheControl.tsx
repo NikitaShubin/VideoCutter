@@ -54,47 +54,65 @@ export function CacheControl() {
     .join(", ");
 
   return (
-    <span className="info" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+    <div className="cache-control">
       <button
-        className="toolbar-help"
+        type="button"
+        className="cache-summary"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-label={`GOP-кэш: ${formatNumber(u.mb)} из ${formatNumber(u.mb_cap)} МБ, ${formatNumber(u.gops)} из ${formatNumber(u.gops_cap)} групп. ${open ? "Свернуть лимиты" : "Открыть лимиты"}`}
         title={`GOP-кэш (RAM): ${formatNumber(u.gops)} / ${formatNumber(u.gops_cap)} групп, ${formatNumber(u.mb)} / ${formatNumber(u.mb_cap)} МБ на ${formatNumber(u.sources)} источниках${perSource ? ` (${perSource})` : ""}. Лимиты: МБ [${srcMb}], GOP [${srcGops}] (auto — из автотюна). Раскрыть ручку лимитов.`}
       >
-        <span aria-hidden="true">💾</span> {formatNumber(u.mb)} / {formatNumber(u.mb_cap)} МБ
+        <span aria-hidden="true">💾</span>
+        <span className="cache-summary-title">GOP-кэш</span>
+        <span className="cache-summary-value">
+          {formatNumber(u.mb)} / {formatNumber(u.mb_cap)} МБ
+        </span>
+        <span className="cache-summary-value">
+          {formatNumber(u.gops)} / {formatNumber(u.gops_cap)} групп
+        </span>
       </button>
-      <span
-        style={{
-          display: "inline-block", width: 48, height: 6,
-          background: "#333", borderRadius: 3, overflow: "hidden",
-        }}
+      <div
+        className="cache-meter"
         title={`Заполнение кэша: ${formatPercent(pct)}`}
+        aria-hidden="true"
       >
-        <span style={{ display: "block", width: `${pct}%`, height: "100%", background: pct > 90 ? "#c33" : "#6a6" }} />
-      </span>
+        <span
+          style={{
+            width: `${pct}%`,
+            background: pct > 90 ? "#c33" : "#6a6",
+          }}
+        />
+      </div>
       {open && (
-        <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+        <div className="cache-limits">
           <label title="Лимит МБ (1–16384). Уменьшение тут же вытесняет лишнее.">
             МБ
             <input
-              type="number" min={16} max={16384} step={64}
-              value={mbDraft} placeholder={String(cache.caps.mb)}
+              type="number"
+              min={16}
+              max={16384}
+              step={64}
+              value={mbDraft}
+              placeholder={String(cache.caps.mb)}
               onChange={(e) => setMbDraft(e.target.value)}
-              style={{ width: 64 }}
             />
           </label>
           <label title="Лимит групп (1–1024)">
             GOP
             <input
-              type="number" min={1} max={1024} step={1}
-              value={gopsDraft} placeholder={String(cache.caps.gops)}
+              type="number"
+              min={1}
+              max={1024}
+              step={1}
+              value={gopsDraft}
+              placeholder={String(cache.caps.gops)}
               onChange={(e) => setGopsDraft(e.target.value)}
-              style={{ width: 48 }}
             />
           </label>
           <button
-            className="toolbar-help"
+            type="button"
+            className="cache-apply"
             onClick={apply}
             title="Применить лимиты без рестарта"
             aria-label="Применить лимиты"
@@ -103,6 +121,7 @@ export function CacheControl() {
           </button>
           {error && (
             <span
+              className="cache-error"
               role="status"
               aria-label={`Ошибка кэша: ${error}`}
               title={error}
@@ -110,8 +129,8 @@ export function CacheControl() {
               <span aria-hidden="true">⚠</span>
             </span>
           )}
-        </span>
+        </div>
       )}
-    </span>
+    </div>
   );
 }

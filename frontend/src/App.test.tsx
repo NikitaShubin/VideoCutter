@@ -138,7 +138,7 @@ describe("кнопка «Назад» браузера", () => {
     });
     await flush();
     act(() => {
-      host.querySelector<HTMLButtonElement>(".editor-toolbar button")!.click();
+      host.querySelector<HTMLButtonElement>(".editor-back")!.click();
     });
     expect(back).toHaveBeenCalled();
     back.mockRestore();

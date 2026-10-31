@@ -7,7 +7,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CutEditor } from "./CutEditor";
 import type { VideoPairDetail } from "../types";
-import { replaceFragments, type CacheState } from "../api";
+import { getCache, replaceFragments, type CacheState } from "../api";
 
 let resolvePair: (p: VideoPairDetail) => void = () => {};
 let pairDetail: VideoPairDetail;
@@ -20,7 +20,7 @@ vi.mock("../api", async (importOriginal) => {
       new Promise<VideoPairDetail>((res) => {
         resolvePair = res;
       }),
-    getCache: () =>
+    getCache: vi.fn(() =>
       Promise.resolve({
         caps: { gops: 0, mb: 0 },
         usage: {
@@ -32,6 +32,7 @@ vi.mock("../api", async (importOriginal) => {
         },
         tuning: { ncpu: 0, ram_mb: 0, auto: {}, source: {} },
       } as CacheState),
+    ),
     setPairSettings: () => Promise.resolve().then(() => undefined),
     replaceFragments: vi.fn(() => Promise.resolve()),
   };
@@ -97,12 +98,12 @@ class FakeImage {
   }
 }
 
-async function mountEditor() {
+async function mountEditor(onBack: () => void = () => {}) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
   act(() => {
-    root.render(<CutEditor pairId="ws-test" onBack={() => {}} />);
+    root.render(<CutEditor pairId="ws-test" onBack={onBack} />);
   });
   await act(async () => {
     resolvePair(pairDetail);
@@ -438,6 +439,34 @@ function clickFragment(host: HTMLElement, text: string): void {
   });
 }
 
+function topButton(host: HTMLElement, text: string): HTMLButtonElement {
+  const btn = [...host.querySelectorAll<HTMLButtonElement>(".editor-top button")].find(
+    (b) => b.textContent?.includes(text),
+  );
+  if (!btn) throw new Error(`кнопка «${text}» в шапке не найдена`);
+  return btn;
+}
+
+function menuTrigger(host: HTMLElement, name: string): HTMLButtonElement {
+  const btn = [...host.querySelectorAll<HTMLButtonElement>("button[aria-expanded]")].find(
+    (b) => b.textContent?.includes(name),
+  );
+  if (!btn) throw new Error(`меню «${name}» не найдено`);
+  return btn;
+}
+
+function openMenu(host: HTMLElement, name: string): void {
+  act(() => {
+    menuTrigger(host, name).click();
+  });
+}
+
+function menuPanel(name: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    `[role="dialog"][aria-label="${name}"]`,
+  );
+}
+
 function lastSaved(): { start: number; end: number; comment: string }[] {
   const calls = vi.mocked(replaceFragments).mock.calls;
   return calls[calls.length - 1][1] as {
@@ -504,6 +533,123 @@ describe("видимая панель разметки", () => {
     clickFragment(host, "Начало");
     clickFragment(host, "Отменить");
     expect(lastSaved()).toEqual([]);
+    unmount();
+  });
+});
+
+describe("смысловые зоны верха редактора", () => {
+  it("главные действия видны без раскрытия меню", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(topButton(host, "Назад")).toBeTruthy();
+    expect(topButton(host, "Экспорт")).toBeTruthy();
+    expect(host.querySelector('button[aria-label="Справка"]')).toBeTruthy();
+    expect(frameInput(host)).toBeTruthy();
+    for (const name of [
+      "Начало",
+      "Конец",
+      "Создать",
+      "Удалить",
+      "Комментарий",
+      "Отменить",
+      "Повторить",
+    ]) {
+      expect(fragmentButton(host, name)).toBeTruthy();
+    }
+    unmount();
+  });
+
+  it("«Вид» открывает масштаб, качество и пропорции", async () => {
+    const { host, unmount } = await mountEditor();
+    const trigger = menuTrigger(host, "Вид");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(menuPanel("Вид")).toBeNull();
+    openMenu(host, "Вид");
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    const panel = menuPanel("Вид");
+    expect(panel).toBeTruthy();
+    expect(panel!.querySelector('input[aria-label="Масштаб кадров"]')).toBeTruthy();
+    expect(panel!.querySelector('input[aria-label="Качество JPEG"]')).toBeTruthy();
+    expect(panel!.textContent).toContain("Сохранять пропорции");
+    unmount();
+  });
+
+  it("галочка пропорций переключает режим кадра", async () => {
+    const { host, unmount } = await mountEditor();
+    const img = host.querySelector("img")!;
+    openMenu(host, "Вид");
+    const checkbox = menuPanel("Вид")!.querySelector<HTMLInputElement>(
+      'input[type="checkbox"]',
+    )!;
+    expect(checkbox.checked).toBe(true);
+    act(() => {
+      checkbox.click();
+    });
+    expect(img.style.objectFit).toBe("fill");
+    unmount();
+  });
+
+  it("«Обмен» открывает действия с разметкой и бэкапом", async () => {
+    const { host, unmount } = await mountEditor();
+    openMenu(host, "Обмен");
+    const panel = menuPanel("Обмен");
+    expect(panel).toBeTruthy();
+    expect(panel!.textContent).toContain("Скачать разметку");
+    expect(panel!.textContent).toContain("Импортировать разметку");
+    expect(panel!.textContent).toContain("Скачать бэкап");
+    unmount();
+  });
+
+  it("«Диагностика» монтирует кэш только при открытии", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(getCache).not.toHaveBeenCalled();
+    openMenu(host, "Диагностика");
+    await act(async () => {});
+    expect(getCache).toHaveBeenCalledTimes(1);
+    expect(
+      menuPanel("Диагностика")!.querySelector('button[aria-label^="GOP-кэш"]'),
+    ).toBeTruthy();
+    unmount();
+  });
+
+  it("Escape закрывает меню и не уводит из редактора", async () => {
+    const onBack = vi.fn();
+    const { host, unmount } = await mountEditor(onBack);
+    const trigger = menuTrigger(host, "Вид");
+    act(() => {
+      trigger.focus();
+      trigger.click();
+    });
+    expect(menuPanel("Вид")).toBeTruthy();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(menuPanel("Вид")).toBeNull();
+    expect(onBack).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(trigger);
+    unmount();
+  });
+
+  it("при открытом меню горячие клавиши редактора не срабатывают", async () => {
+    pairDetail.fragments = [{ start: 0, end: 10, comment: "" }];
+    const { host, unmount } = await mountEditor();
+    openMenu(host, "Вид");
+    tap("Delete");
+    expect(replaceFragments).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("предупреждение пары остаётся видимым в шапке", async () => {
+    pairDetail.pair_warning = "источник и превью не совпадают";
+    const { host, unmount } = await mountEditor();
+    const warning = host.querySelector(".editor-warning");
+    expect(warning?.getAttribute("title")).toContain("не совпадают");
+    expect(host.textContent).toContain("не совпадают");
     unmount();
   });
 });
@@ -655,6 +801,39 @@ describe("полноэкранный режим", () => {
     });
     const exit = host.querySelector<HTMLButtonElement>(".fullscreen-exit");
     expect(exit?.textContent).toContain("Выйти");
+    unmount();
+  });
+
+  it("вход в полноэкранный режим фокусирует кнопку выхода", async () => {
+    const { host, unmount } = await mountEditor();
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => host.querySelector(".editor"),
+    });
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    expect(document.activeElement).toBe(
+      host.querySelector(".fullscreen-exit"),
+    );
+    unmount();
+  });
+
+  it("выход из полноэкранного режима возвращает фокус в шапку", async () => {
+    const { host, unmount } = await mountEditor();
+    let full = true;
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => (full ? host.querySelector(".editor") : null),
+    });
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    full = false;
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    expect(document.activeElement).toBe(host.querySelector(".editor-back"));
     unmount();
   });
 

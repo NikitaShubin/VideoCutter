@@ -17,10 +17,11 @@ import {
 } from "../api";
 import { formatNumber, formatPercent } from "../model/format";
 import { FragmentModel } from "../model/fragmentModel";
-import { CacheControl } from "./CacheControl";
+import { DiagnosticsMenu } from "./DiagnosticsMenu";
+import { ExchangeMenu } from "./ExchangeMenu";
 import { HelpModal } from "./HelpModal";
-import { Hint } from "./Hint";
-import { FileButton } from "./FileButton";
+import { Popover } from "./Popover";
+import { ViewMenu } from "./ViewMenu";
 import {
   FrameScheduler,
   nextPlayPosition,
@@ -92,6 +93,14 @@ export function CutEditor({ pairId, onBack }: Props) {
   const helpOpenRef = useRef(false);
   helpOpenRef.current = helpOpen;
 
+  // Верх редактора: открыто максимум одно меню. Пока оно открыто,
+  // глобальные горячие клавиши не срабатывают — иначе «D» в меню
+  // «Вид» удалила бы фрагмент, а Escape увёл бы из редактора.
+  type EditorMenu = "view" | "exchange" | "diagnostics" | null;
+  const [openMenu, setOpenMenu] = useState<EditorMenu>(null);
+  const openMenuRef = useRef<EditorMenu>(null);
+  openMenuRef.current = openMenu;
+
   // Состояние экспорта дублируем в ref: keydown-замыкание несвежее
   // (exporting нет в deps эффекта), а повторный запуск/отмена идут через E.
   const exportingRef = useRef(false);
@@ -105,6 +114,8 @@ export function CutEditor({ pairId, onBack }: Props) {
   const statusRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const fullscreenExitRef = useRef<HTMLButtonElement | null>(null);
+  const wasFullscreenRef = useRef(false);
 
   // Синхронизация состояния с полноэкранным режимом браузера (вкл/выкл через Esc).
   useEffect(() => {
@@ -112,6 +123,20 @@ export function CutEditor({ pairId, onBack }: Props) {
     document.addEventListener("fullscreenchange", onChange);
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
+
+  // В полном экране шапка исчезает: фокус ведём на видимую кнопку выхода,
+  // а после выхода возвращаем в шапку — иначе он проваливается в body.
+  useEffect(() => {
+    if (isFullscreen) {
+      wasFullscreenRef.current = true;
+      fullscreenExitRef.current?.focus();
+    } else if (wasFullscreenRef.current) {
+      wasFullscreenRef.current = false;
+      editorRef.current
+        ?.querySelector<HTMLButtonElement>(".editor-back")
+        ?.focus();
+    }
+  }, [isFullscreen]);
 
   const toggleFullscreen = () => {
     if (document.fullscreenElement) {
@@ -557,6 +582,11 @@ export function CutEditor({ pairId, onBack }: Props) {
     pumpRef.current();
   };
 
+  const togglePlayback = () => {
+    cancelPending();
+    setPlaying((v) => !v);
+  };
+
   const jump = (dir: 1 | -1) => {
     const p = modelRef.current;
     if (!p) return;
@@ -759,10 +789,9 @@ export function CutEditor({ pairId, onBack }: Props) {
       // Физическая клавиша: кнопка не зависит от раскладки (KeyR ~ R на любой раскладке).
       const is = (physical: string) => code === physical || k === physical;
 
-      // Справка — настоящий диалог: клавиши обрабатывает HelpModal
-      // (Esc/H/Q, focus trap), редактор не перехватывает их и не мешает
-      // прокрутке панели.
-      if (helpOpenRef.current) return;
+      // Справка и меню — настоящие диалоги: клавиши обрабатывают они,
+      // редактор не перехватывает их и не мешает прокрутке панели.
+      if (helpOpenRef.current || openMenuRef.current) return;
 
       const isEditing = (e.target as HTMLElement)?.tagName === "INPUT" || (e.target as HTMLElement)?.tagName === "TEXTAREA";
       if (isEditing) return;
@@ -811,8 +840,7 @@ export function CutEditor({ pairId, onBack }: Props) {
         setPosition(p.totalFrames - 1);
       } else if (is(" ") || is("Space") || is("Spacebar")) {
         e.preventDefault();
-        cancelPending();
-        setPlaying((v) => !v);
+        togglePlayback();
       } else if (is("KeyR")) {
         const nd = direction === 1 ? -1 : 1;
         setDirection(nd);
@@ -1070,12 +1098,18 @@ export function CutEditor({ pairId, onBack }: Props) {
   // Индикатор загрузки — только при ручной навигации. При воспроизведении
   // задержек не показываем: кадры идут все подряд в темпе железа.
   const frameLoading = !playing && position !== shownFrame;
+  const pairTitle = `${pair.name || pairId}: источник ${pair.source_name}${
+    pair.preview_name !== pair.source_name
+      ? ` · Превью: ${pair.preview_name}`
+      : ""
+  }`;
 
   return (
     <div ref={editorRef} className={isFullscreen ? "editor fullscreen" : "editor"}>
       <h1 className="sr-only">Редактор: {pair.name || pairId}</h1>
       {isFullscreen && (
         <button
+          ref={fullscreenExitRef}
           type="button"
           className="fullscreen-exit"
           onClick={toggleFullscreen}
@@ -1085,264 +1119,192 @@ export function CutEditor({ pairId, onBack }: Props) {
         </button>
       )}
       {!isFullscreen && (
-        <div className="editor-toolbar">
-          <button onClick={handleBack}>← Назад</button>
-          <span className="pair-name">
-            {pair.name || pairId}: источник {pair.source_name}
-            {pair.preview_name !== pair.source_name && (
-              <span> · Превью: {pair.preview_name}</span>
-            )}
-          </span>
-          <span className="view-settings">
-            <label className="view-slider">
-              Масштаб
-              <input
-                type="range"
-                min={5}
-                max={100}
-                step={5}
-                value={Math.round(scale * 100)}
-                onChange={(e) => setScale(parseInt(e.target.value, 10) / 100)}
-                title="Масштаб кадров (меньше — быстрее)"
-              />
-              <b>{formatPercent(Math.round(scale * 100))}</b>
-            </label>
-            <label className="view-slider">
-              Качество
-              <input
-                type="range"
-                min={30}
-                max={95}
-                step={1}
-                value={quality}
-                onChange={(e) => setQuality(parseInt(e.target.value, 10))}
-                title="Качество JPEG (меньше — быстрее)"
-              />
-              <b>{quality}</b>
-            </label>
-          </span>
-          <span className="info">
-            кадр{" "}
-            <input
-              className="frame-input"
-              type="text"
-              inputMode="numeric"
-              aria-label="Номер кадра"
-              title="Номер кадра: введите число и нажмите Enter (Esc — отмена)"
-              style={{
-                // Адаптивная ширина: запас по max длине total, черновика и
-                // позиции, +1 разряд под курсор — ввод не обрезается.
-                width: `${Math.max(
-                  (frameDraft ?? String(position + 1)).length,
-                  String(pair.total_frames).length,
-                ) + 1}ch`,
-              }}
-              value={frameDraft ?? String(position + 1)}
-              onFocus={(e) => {
-                setFrameDraft(String(position + 1));
-                e.currentTarget.select();
-              }}
-              onChange={(e) => setFrameDraft(e.target.value.replace(/\D/g, ""))}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  e.currentTarget.select(); // повторный ввод заменит, а не допишет
-                  commitFrameInput();
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  setFrameDraft(null); // откат; фокус остаётся
-                }
-              }}
-              onBlur={commitFrameInput}
-            />{" "}
-            /{formatNumber(pair.total_frames)} · выделено {formatNumber(sel)} ({formatPercent(markedPct, 1)})
-          </span>
-          <span
-            className="info"
-            role="status"
-            title={playing ? (direction === -1 ? "идёт назад (R — сменить)" : "идёт вперёд (R — сменить)") : (direction === -1 ? "пауза (пробел), направление: назад" : "пауза (пробел), направление: вперёд")}
-            aria-label={playing ? (direction === -1 ? "воспроизведение назад" : "воспроизведение вперёд") : (direction === -1 ? "пауза, направление: назад" : "пауза, направление: вперёд")}
-          >{playing ? (direction === -1 ? "◀" : "▶") : (direction === -1 ? "◁" : "▷")}x{speed}</span>
-          {(perf.fps > 0 || perf.load > 0 || perf.show > 0) && (
-            <span
-              className="info"
-              title="Замер клиента за секунду: к/с показа · мс загрузки кадра (сеть + сервер + декод браузера) · мс показа (рендер до отрисовки). Сервер тёплое отдаёт за миллисекунды: если ↓ мало, а к/с низкие — упираемся в рендер браузера."
-            >⏱ {formatNumber(perf.fps)} к/с · ↓ {formatNumber(perf.load)} мс · ⊙ {formatNumber(perf.show)} мс</span>
-          )}
-          <CacheControl />
-          {pair.pair_warning && (
-            <span className="info warn" title={pair.pair_warning}>
-              ⚠ {pair.pair_warning}
-            </span>
-          )}
-          <button
-            className="toolbar-export"
-            onClick={() => handleExport()}
-            title={exporting ? "Отменить экспорт (E)" : "Экспорт (E)"}
-          >
-            {exportProgress !== null && (
+        <header className="editor-top">
+          <div className="editor-context">
+            <button type="button" className="editor-back" onClick={handleBack}>
+              ← Назад
+            </button>
+            <div className="editor-identity" title={pairTitle}>
+              <span className="pair-name">{pair.name || pairId}</span>
+              <span className="pair-source">
+                источник {pair.source_name}
+                {pair.preview_name !== pair.source_name && (
+                  <span> · Превью: {pair.preview_name}</span>
+                )}
+              </span>
+            </div>
+            {pair.pair_warning && (
               <span
-                className="toolbar-export-progress"
-                style={{ width: `${Math.round(exportProgress * 100)}%` }}
-              />
+                className="editor-warning"
+                role="status"
+                title={pair.pair_warning}
+                aria-label={`Предупреждение: ${pair.pair_warning}`}
+              >
+                <span aria-hidden="true">⚠</span>
+                <span className="editor-warning-text">{pair.pair_warning}</span>
+              </span>
             )}
-            <span className="toolbar-export-label">
-              {exportProgress !== null
-                ? `${formatPercent(Math.round(exportProgress * 100))} · Отмена`
-                : "Экспорт (E)"}
-            </span>
-          </button>
-          <Hint
-            className="toolbar-btn"
-            text="Экспорт разметки — скачать fragments.tsv + манифест (без видео)"
-            pin={false}
-            focusable={false}
-          >
-            <button
-              className="toolbar-btn-plain"
-              disabled={dlState !== null || annBusy}
-              onClick={() =>
-                handleDownload(
-                  "ann",
-                  annotationsUrl(pairId),
-                  `${pairId}-annotations.zip`,
-                )
-              }
+            <div
+              className="editor-utilities"
+              role="group"
+              aria-label="Настройки и сервис"
             >
-              {dlState?.key === "ann" ? (
-                <>
-                  <span className="btn-spin" />
-                  {dlState.frac !== null
-                    ? ` ${formatPercent(Math.round(dlState.frac * 100))}`
-                    : ""}
-                </>
-              ) : (
-                "⤓ Разметка"
-              )}
-            </button>
-          </Hint>
-          <Hint
-            className="toolbar-btn"
-            text="Импорт разметки — применить архив разметки к задаче (видео не трогается)"
-            pin={false}
-            focusable={false}
-          >
-            <FileButton
-              className="toolbar-btn-plain"
-              accept=".zip,application/zip"
-              disabled={annBusy}
-              onFile={handleAnnotationsImport}
-            >
-              {annProgress !== null
-                ? `Разметка ${formatPercent(Math.round(annProgress * 100))}`
-                : "⤒ Импорт"}
-            </FileButton>
-          </Hint>
-          <Hint
-            className="toolbar-btn"
-            text="Экспорт бэкапа — скачать задачу целиком (видео + разметка + паспорт)"
-            pin={false}
-            focusable={false}
-          >
-            <button
-              className="toolbar-btn-plain"
-              disabled={dlState !== null || annBusy}
-              onClick={() =>
-                handleDownload(
-                  "bak",
-                  taskBackupUrl(pairId),
-                  `${pairId}-backup.zip`,
-                )
-              }
-            >
-              {dlState?.key === "bak" ? (
-                <>
-                  <span className="btn-spin" />
-                  {dlState.frac !== null
-                    ? ` ${formatPercent(Math.round(dlState.frac * 100))}`
-                    : ""}
-                </>
-              ) : (
-                "⤓ Бэкап"
-              )}
-            </button>
-          </Hint>
-          <button
-            className="toolbar-help"
-            onClick={() => setHelpOpen(true)}
-            title="Справка (H)"
-            aria-label="Справка"
-          >
-            <span aria-hidden="true">?</span>
-          </button>
-        </div>
-      )}
+              <Popover
+                label="Вид"
+                open={openMenu === "view"}
+                onOpenChange={(v) => setOpenMenu(v ? "view" : null)}
+              >
+                <ViewMenu
+                  scale={scale}
+                  quality={quality}
+                  preserveAspect={preserveAspect}
+                  onScale={setScale}
+                  onQuality={setQuality}
+                  onPreserveAspect={setPreserveAspect}
+                  onFullscreen={() => {
+                    setOpenMenu(null);
+                    toggleFullscreen();
+                  }}
+                />
+              </Popover>
+              <Popover
+                label="Обмен"
+                open={openMenu === "exchange"}
+                onOpenChange={(v) => setOpenMenu(v ? "exchange" : null)}
+              >
+                <ExchangeMenu
+                  downloading={dlState?.key ?? null}
+                  downloadFrac={dlState?.frac ?? null}
+                  annBusy={annBusy}
+                  annProgress={annProgress}
+                  onDownload={(key) =>
+                    handleDownload(
+                      key,
+                      key === "ann"
+                        ? annotationsUrl(pairId)
+                        : taskBackupUrl(pairId),
+                      `${pairId}-${key === "ann" ? "annotations" : "backup"}.zip`,
+                    )
+                  }
+                  onImport={handleAnnotationsImport}
+                />
+              </Popover>
+              <Popover
+                label="Диагностика"
+                open={openMenu === "diagnostics"}
+                onOpenChange={(v) => setOpenMenu(v ? "diagnostics" : null)}
+              >
+                <DiagnosticsMenu
+                  fps={perf.fps}
+                  load={perf.load}
+                  show={perf.show}
+                />
+              </Popover>
+            </div>
+            <div className="editor-global-actions">
+              <button
+                type="button"
+                className="toolbar-export"
+                onClick={() => handleExport()}
+                title={exporting ? "Отменить экспорт (E)" : "Экспорт (E)"}
+              >
+                {exportProgress !== null && (
+                  <span
+                    className="toolbar-export-progress"
+                    style={{ width: `${Math.round(exportProgress * 100)}%` }}
+                  />
+                )}
+                <span className="toolbar-export-label">
+                  {exportProgress !== null
+                    ? `${formatPercent(Math.round(exportProgress * 100))} · Отмена`
+                    : "Экспорт (E)"}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="toolbar-help"
+                onClick={() => setHelpOpen(true)}
+                title="Справка (H)"
+                aria-label="Справка"
+              >
+                <span aria-hidden="true">?</span>
+              </button>
+            </div>
+          </div>
 
-      {!isFullscreen && (
-        <div
-          className="fragment-actions"
-          role="toolbar"
-          aria-label="Разметка фрагментов"
-        >
-          <span className="fragment-actions-label">Фрагмент</span>
-          <button
-            type="button"
-            onClick={markStart}
-            title="Начало фрагмента ([ или ↑)"
-          >
-            Начало <kbd>[</kbd>
-          </button>
-          <button
-            type="button"
-            onClick={markEnd}
-            title="Конец фрагмента (] или ↓)"
-          >
-            Конец <kbd>]</kbd>
-          </button>
-          <button
-            type="button"
-            className="fragment-create"
-            onClick={createOrComplete}
-            aria-pressed={keyPose !== null}
-            title={
-              keyPose === null
-                ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
-                : "Завершить фрагмент в текущем кадре (K)"
-            }
-          >
-            {keyPose === null ? "Создать" : "Завершить"} <kbd>K</kbd>
-          </button>
-          <button
-            type="button"
-            onClick={deleteAtPosition}
-            title="Удалить фрагмент под курсором (D или Del)"
-          >
-            Удалить <kbd>D</kbd>
-          </button>
-          <button
-            type="button"
-            onClick={startCommentEdit}
-            title="Комментарий к фрагменту (I)"
-          >
-            Комментарий <kbd>I</kbd>
-          </button>
-          <button
-            type="button"
-            onClick={undoEdit}
-            disabled={!canUndo}
-            title="Отменить последнее изменение (Ctrl+Z)"
-          >
-            Отменить
-          </button>
-          <button
-            type="button"
-            onClick={redoEdit}
-            disabled={!canRedo}
-            title="Повторить отменённое (Ctrl+Shift+Z или Z)"
-          >
-            Повторить
-          </button>
-        </div>
+          <div className="editor-workbench">
+            <div
+              className="fragment-actions"
+              role="toolbar"
+              aria-label="Разметка фрагментов"
+            >
+              <span className="fragment-actions-label">Фрагмент</span>
+              <button
+                type="button"
+                onClick={markStart}
+                title="Начало фрагмента ([ или ↑)"
+              >
+                Начало <kbd>[</kbd>
+              </button>
+              <button
+                type="button"
+                onClick={markEnd}
+                title="Конец фрагмента (] или ↓)"
+              >
+                Конец <kbd>]</kbd>
+              </button>
+              <button
+                type="button"
+                className="fragment-create"
+                onClick={createOrComplete}
+                aria-pressed={keyPose !== null}
+                title={
+                  keyPose === null
+                    ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
+                    : "Завершить фрагмент в текущем кадре (K)"
+                }
+              >
+                {keyPose === null ? "Создать" : "Завершить"} <kbd>K</kbd>
+              </button>
+              <button
+                type="button"
+                onClick={deleteAtPosition}
+                title="Удалить фрагмент под курсором (D или Del)"
+              >
+                Удалить <kbd>D</kbd>
+              </button>
+              <button
+                type="button"
+                onClick={startCommentEdit}
+                title="Комментарий к фрагменту (I)"
+              >
+                Комментарий <kbd>I</kbd>
+              </button>
+              <div
+                className="editor-history"
+                role="group"
+                aria-label="История изменений"
+              >
+                <button
+                  type="button"
+                  onClick={undoEdit}
+                  disabled={!canUndo}
+                  title="Отменить последнее изменение (Ctrl+Z)"
+                >
+                  Отменить
+                </button>
+                <button
+                  type="button"
+                  onClick={redoEdit}
+                  disabled={!canRedo}
+                  title="Повторить отменённое (Ctrl+Shift+Z или Z)"
+                >
+                  Повторить
+                </button>
+              </div>
+            </div>
+          </div>
+        </header>
       )}
 
       <div className="video-area">
@@ -1402,6 +1364,86 @@ export function CutEditor({ pairId, onBack }: Props) {
           ) : null
         )}
       </div>
+
+      {!isFullscreen && (
+        <div className="editor-transport">
+          <span className="frame-readout">
+            кадр{" "}
+            <input
+              className="frame-input"
+              type="text"
+              inputMode="numeric"
+              aria-label="Номер кадра"
+              title="Номер кадра: введите число и нажмите Enter (Esc — отмена)"
+              style={{
+                // Адаптивная ширина: запас по max длине total, черновика и
+                // позиции, +1 разряд под курсор — ввод не обрезается.
+                width: `${Math.max(
+                  (frameDraft ?? String(position + 1)).length,
+                  String(pair.total_frames).length,
+                ) + 1}ch`,
+              }}
+              value={frameDraft ?? String(position + 1)}
+              onFocus={(e) => {
+                setFrameDraft(String(position + 1));
+                e.currentTarget.select();
+              }}
+              onChange={(e) => setFrameDraft(e.target.value.replace(/\D/g, ""))}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  e.currentTarget.select(); // повторный ввод заменит, а не допишет
+                  commitFrameInput();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setFrameDraft(null); // откат; фокус остаётся
+                }
+              }}
+              onBlur={commitFrameInput}
+            />{" "}
+            / {formatNumber(pair.total_frames)}
+          </span>
+          <span className="selection-readout">
+            выделено {formatNumber(sel)} ({formatPercent(markedPct, 1)})
+          </span>
+          <div className="transport-playback">
+            <button
+              type="button"
+              className="transport-play"
+              onClick={togglePlayback}
+              aria-pressed={playing}
+              aria-label={
+                playing
+                  ? `Пауза, ${direction === -1 ? "назад" : "вперёд"}, скорость ${speed}`
+                  : `Воспроизвести ${direction === -1 ? "назад" : "вперёд"}, скорость ${speed}`
+              }
+              title={
+                playing
+                  ? "Пауза (пробел); R — сменить направление"
+                  : "Воспроизвести (пробел); R — сменить направление"
+              }
+            >
+              <span aria-hidden="true">
+                {playing
+                  ? direction === -1
+                    ? "◀"
+                    : "▶"
+                  : direction === -1
+                    ? "◁"
+                    : "▷"}
+              </span>
+              <span className="transport-speed">x{speed}</span>
+            </button>
+            <span className="sr-only" role="status">
+              {playing
+                ? direction === -1
+                  ? "Воспроизведение назад"
+                  : "Воспроизведение вперёд"
+                : "Пауза"}
+            </span>
+          </div>
+        </div>
+      )}
 
       <canvas
         ref={statusRef}
