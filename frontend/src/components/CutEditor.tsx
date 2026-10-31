@@ -562,6 +562,12 @@ export function CutEditor({ pairId, onBack }: Props) {
     window.setTimeout(() => setMessage(""), 2000);
   };
 
+  const saveToDb = (frags: { start: number; end: number; comment: string }[]) => {
+    replaceFragments(pairId, frags, position)
+      .then(() => flash("Сохранено"))
+      .catch((e) => flash(`Ошибка сохранения: ${e.message}`));
+  };
+
   // Ввод номера кадра (1-based, как на экране): клампинг в 1..N, переход
   // как прыжок (строго целевой кадр, незаконченные запросы отменяются),
   // пауза воспроизведения. Пусто/мусор — откат без прыжка; уже на этом
@@ -606,6 +612,74 @@ export function CutEditor({ pairId, onBack }: Props) {
       drawStatusbar();
       saveToDb(p.getFragments());
     }
+  };
+
+  // Действия разметки — один источник для клавиатуры и видимой панели.
+  const afterFragmentChange = () => {
+    const p = modelRef.current;
+    rerender();
+    drawStatusbar();
+    if (p) saveToDb(p.getFragments());
+  };
+
+  const markStart = () => {
+    const p = modelRef.current;
+    if (!p) return;
+    p.newStart(position);
+    afterFragmentChange();
+  };
+
+  const markEnd = () => {
+    const p = modelRef.current;
+    if (!p) return;
+    p.newEnd(position);
+    afterFragmentChange();
+  };
+
+  const createOrComplete = () => {
+    const p = modelRef.current;
+    if (!p) return;
+    if (keyPose === null) {
+      if (p.fragments.some((f) => position >= f.start && position <= f.end)) {
+        flash("Невозможно создать фрагмент внутри другого");
+      } else {
+        setKeyPose(position);
+      }
+      return;
+    }
+    const [lo, hi] = keyPose < position
+      ? [keyPose, position]
+      : [position, keyPose];
+    if (p.add(lo, hi)) {
+      setKeyPose(null);
+      afterFragmentChange();
+    } else {
+      flash("Фрагмент пересекается с существующим");
+    }
+  };
+
+  const deleteAtPosition = () => {
+    const p = modelRef.current;
+    if (!p) return;
+    const res = p.delete(position);
+    if (res === "ok" || res === "merged") {
+      afterFragmentChange();
+      if (res === "merged") startCommentEdit();
+    } else if (res === "ambiguous") {
+      flash("Текущий кадр — стык двух фрагментов. Переместите курсор.");
+    } else {
+      flash("Под курсором нет фрагмента");
+    }
+  };
+
+  const undoEdit = () => {
+    const p = modelRef.current;
+    if (p?.undo()) afterFragmentChange();
+  };
+
+  const redoEdit = () => {
+    const p = modelRef.current;
+    if (p?.redo()) afterFragmentChange();
   };
 
   // Клавиатура.
@@ -697,60 +771,21 @@ export function CutEditor({ pairId, onBack }: Props) {
 
       // Отметка фрагментов.
       else if (is("ArrowUp") || is("BracketLeft")) {
-        p.newStart(position);
-        rerender();
-        drawStatusbar();
-        saveToDb(p.getFragments());
+        markStart();
       } else if (is("ArrowDown") || is("BracketRight")) {
-        p.newEnd(position);
-        rerender();
-        drawStatusbar();
-        saveToDb(p.getFragments());
+        markEnd();
       } else if (is("KeyK") || is("Insert") || is("F12")) {
-        if (keyPose === null) {
-          if (p.fragments.some((f) => position >= f.start && position <= f.end)) {
-            flash("Невозможно создать фрагмент внутри другого");
-          } else {
-            setKeyPose(position);
-          }
-        } else {
-          const [lo, hi] = keyPose < position
-            ? [keyPose, position]
-            : [position, keyPose];
-          const ok = p.add(lo, hi);
-          if (ok) {
-            setKeyPose(null);
-            rerender();
-            drawStatusbar();
-            saveToDb(p.getFragments());
-          } else {
-            flash("Фрагмент пересекается с существующим");
-          }
-        }
+        createOrComplete();
       } else if (is("Delete") || is("KeyD")) {
-        const res = p.delete(position);
-        if (res === "ok" || res === "merged") {
-          rerender();
-          drawStatusbar();
-          saveToDb(p.getFragments());
-          if (res === "merged") startCommentEdit();
-        } else if (res === "ambiguous") {
-          flash("Текущий кадр — стык двух фрагментов. Переместите курсор.");
-        }
+        deleteAtPosition();
       } else if (is("KeyI")) {
         startCommentEdit();
       } else if (ctrl && is("KeyZ")) {
         // Ctrl+Shift+Z — стандартный redo, иначе undo.
-        if (e.shiftKey) p.redo();
-        else p.undo();
-        rerender();
-        drawStatusbar();
-        saveToDb(p.getFragments());
+        if (e.shiftKey) redoEdit();
+        else undoEdit();
       } else if (is("KeyZ")) {
-        p.redo();
-        rerender();
-        drawStatusbar();
-        saveToDb(p.getFragments());
+        redoEdit();
       } else if (is("KeyE")) {
         handleExport();
       } else if (is("Escape") || is("KeyQ")) {
@@ -777,12 +812,6 @@ export function CutEditor({ pairId, onBack }: Props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position, keyPose, direction, speed, playing, drawStatusbar]);
-
-  const saveToDb = (frags: { start: number; end: number; comment: string }[]) => {
-    replaceFragments(pairId, frags, position)
-      .then(() => flash("Сохранено"))
-      .catch((e) => flash(`Ошибка сохранения: ${e.message}`));
-  };
 
   // Завершение редактирования: фиксируем текущий кадр и возвращаемся к списку.
   const handleBack = () => {
@@ -964,6 +993,10 @@ export function CutEditor({ pairId, onBack }: Props) {
   }
 
   const sel = modelRef.current?.selectedFrames() ?? 0;
+  const canUndo = (modelRef.current?.histPos ?? 0) > 0;
+  const canRedo = modelRef.current
+    ? modelRef.current.histPos < modelRef.current.history.length - 1
+    : false;
 
   // Индикатор загрузки — только при ручной навигации. При воспроизведении
   // задержек не показываем: кадры идут все подряд в темпе железа.
@@ -1162,6 +1195,73 @@ export function CutEditor({ pairId, onBack }: Props) {
             title="Справка (H)"
           >
             ?
+          </button>
+        </div>
+      )}
+
+      {!isFullscreen && (
+        <div
+          className="fragment-actions"
+          role="toolbar"
+          aria-label="Разметка фрагментов"
+        >
+          <span className="fragment-actions-label">Фрагмент</span>
+          <button
+            type="button"
+            onClick={markStart}
+            title="Начало фрагмента ([ или ↑)"
+          >
+            Начало <kbd>[</kbd>
+          </button>
+          <button
+            type="button"
+            onClick={markEnd}
+            title="Конец фрагмента (] или ↓)"
+          >
+            Конец <kbd>]</kbd>
+          </button>
+          <button
+            type="button"
+            className="fragment-create"
+            onClick={createOrComplete}
+            aria-pressed={keyPose !== null}
+            title={
+              keyPose === null
+                ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
+                : "Завершить фрагмент в текущем кадре (K)"
+            }
+          >
+            {keyPose === null ? "Создать" : "Завершить"} <kbd>K</kbd>
+          </button>
+          <button
+            type="button"
+            onClick={deleteAtPosition}
+            title="Удалить фрагмент под курсором (D или Del)"
+          >
+            Удалить <kbd>D</kbd>
+          </button>
+          <button
+            type="button"
+            onClick={startCommentEdit}
+            title="Комментарий к фрагменту (I)"
+          >
+            Комментарий <kbd>I</kbd>
+          </button>
+          <button
+            type="button"
+            onClick={undoEdit}
+            disabled={!canUndo}
+            title="Отменить последнее изменение (Ctrl+Z)"
+          >
+            Отменить
+          </button>
+          <button
+            type="button"
+            onClick={redoEdit}
+            disabled={!canRedo}
+            title="Повторить отменённое (Ctrl+Shift+Z или Z)"
+          >
+            Повторить
           </button>
         </div>
       )}

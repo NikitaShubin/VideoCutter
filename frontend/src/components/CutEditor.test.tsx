@@ -7,7 +7,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CutEditor } from "./CutEditor";
 import type { VideoPairDetail } from "../types";
-import type { CacheState } from "../api";
+import { replaceFragments, type CacheState } from "../api";
 
 let resolvePair: (p: VideoPairDetail) => void = () => {};
 let pairDetail: VideoPairDetail;
@@ -33,6 +33,7 @@ vi.mock("../api", async (importOriginal) => {
         tuning: { ncpu: 0, ram_mb: 0, auto: {}, source: {} },
       } as CacheState),
     setPairSettings: () => Promise.resolve().then(() => undefined),
+    replaceFragments: vi.fn(() => Promise.resolve()),
   };
 });
 
@@ -417,6 +418,92 @@ describe("клавиатура не отбирает Tab", () => {
     expect(img.style.objectFit).toBe("fill");
     tap("KeyA");
     expect(img.style.objectFit).toBe("contain");
+    unmount();
+  });
+});
+
+function fragmentButton(host: HTMLElement, text: string): HTMLButtonElement {
+  const bar = host.querySelector('[role="toolbar"][aria-label="Разметка фрагментов"]');
+  if (!bar) throw new Error("панель разметки не найдена");
+  const btn = [...bar.querySelectorAll<HTMLButtonElement>("button")].find(
+    (b) => b.textContent?.includes(text),
+  );
+  if (!btn) throw new Error(`кнопка «${text}» не найдена`);
+  return btn;
+}
+
+function clickFragment(host: HTMLElement, text: string): void {
+  act(() => {
+    fragmentButton(host, text).click();
+  });
+}
+
+function lastSaved(): { start: number; end: number; comment: string }[] {
+  const calls = vi.mocked(replaceFragments).mock.calls;
+  return calls[calls.length - 1][1] as {
+    start: number;
+    end: number;
+    comment: string;
+  }[];
+}
+
+describe("видимая панель разметки", () => {
+  it("все действия фрагмента доступны кнопками", async () => {
+    const { host, unmount } = await mountEditor();
+    for (const name of [
+      "Начало",
+      "Конец",
+      "Создать",
+      "Удалить",
+      "Комментарий",
+      "Отменить",
+      "Повторить",
+    ]) {
+      expect(fragmentButton(host, name)).toBeTruthy();
+    }
+    unmount();
+  });
+
+  it("«Начало» и «Конец» создают фрагмент и сохраняют его", async () => {
+    const { host, unmount } = await mountEditor();
+    clickFragment(host, "Начало");
+    for (let i = 0; i < 10; i++) tap("ArrowRight");
+    clickFragment(host, "Конец");
+    expect(lastSaved()).toEqual([{ start: 0, end: 10, comment: "" }]);
+    unmount();
+  });
+
+  it("«Создать» ставит начало, «Завершить» — конец", async () => {
+    const { host, unmount } = await mountEditor();
+    clickFragment(host, "Создать");
+    for (let i = 0; i < 10; i++) tap("ArrowRight");
+    clickFragment(host, "Завершить");
+    expect(lastSaved()).toEqual([{ start: 0, end: 10, comment: "" }]);
+    unmount();
+  });
+
+  it("«Удалить» убирает фрагмент под курсором", async () => {
+    pairDetail.fragments = [{ start: 0, end: 10, comment: "" }];
+    const { host, unmount } = await mountEditor();
+    for (let i = 0; i < 5; i++) tap("ArrowRight");
+    clickFragment(host, "Удалить");
+    expect(lastSaved()).toEqual([]);
+    unmount();
+  });
+
+  it("«Комментарий» открывает поле ввода", async () => {
+    pairDetail.fragments = [{ start: 0, end: 10, comment: "" }];
+    const { host, unmount } = await mountEditor();
+    clickFragment(host, "Комментарий");
+    expect(host.querySelector("textarea")).toBeTruthy();
+    unmount();
+  });
+
+  it("«Отменить» возвращает предыдущее состояние", async () => {
+    const { host, unmount } = await mountEditor();
+    clickFragment(host, "Начало");
+    clickFragment(host, "Отменить");
+    expect(lastSaved()).toEqual([]);
     unmount();
   });
 });

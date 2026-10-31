@@ -857,6 +857,66 @@ select option {
   cursor: default;
 }
 
+/* Видимая панель разметки: главные действия не должны жить только в
+ * памяти и справке. Клавиатурные шорткаты остаются, но кнопки — рядом. */
+.fragment-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--panel);
+  border-radius: var(--r-s);
+}
+
+.fragment-actions-label {
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.fragment-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.fragment-actions button:hover:not(:disabled) {
+  background: var(--btn-hover);
+}
+
+.fragment-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fragment-actions button.fragment-create {
+  border-color: var(--green);
+  background: var(--green);
+  color: #fff;
+}
+
+.fragment-actions button.fragment-create:hover:not(:disabled) {
+  background: #359a63;
+}
+
+.fragment-actions kbd {
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--inset);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8em;
+}
+
 /* Ссылки/лейблы/кнопки тулбара (обмен разметкой и бэкапом): та же геометрия. */
 .editor-toolbar span.toolbar-btn,
 .editor-toolbar a.toolbar-btn,
