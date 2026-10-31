@@ -523,6 +523,21 @@ describe("обратная связь о сохранении", () => {
     unmount();
   });
 
+  it("ошибка сохранения предлагает повторить", async () => {
+    vi.mocked(replaceFragments).mockRejectedValueOnce(new Error("сеть"));
+    const { host, unmount } = await mountEditor();
+    tap("ArrowUp");
+    await act(async () => {});
+    const retry = host.querySelector<HTMLButtonElement>(".flash-retry");
+    expect(retry?.textContent).toBe("Повторить");
+    act(() => {
+      retry!.click();
+    });
+    await act(async () => {});
+    expect(host.querySelector(".flash")?.textContent).toContain("Сохранено");
+    unmount();
+  });
+
   it("ошибка — role=alert, не исчезает и закрывается вручную", async () => {
     vi.mocked(replaceFragments).mockRejectedValueOnce(new Error("сеть"));
     const { host, unmount } = await mountEditor();

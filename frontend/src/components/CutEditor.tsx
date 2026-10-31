@@ -67,6 +67,8 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [message, setMessage] = useState<{
     text: string;
     kind: "success" | "error";
+    /** Повтор неудавшегося действия прямо из сообщения об ошибке. */
+    retry?: () => void;
   } | null>(null);
   const [loadError, setLoadError] = useState("");
   // Настройки просмотра: масштаб (0.05..1.0) и качество JPEG (30..95).
@@ -595,12 +597,16 @@ export function CutEditor({ pairId, onBack }: Props) {
   };
 
   const flashTimerRef = useRef<number | null>(null);
-  const flash = (text: string, kind: "success" | "error" = "success") => {
+  const flash = (
+    text: string,
+    kind: "success" | "error" = "success",
+    retry?: () => void,
+  ) => {
     if (flashTimerRef.current !== null) {
       window.clearTimeout(flashTimerRef.current);
       flashTimerRef.current = null;
     }
-    setMessage({ text, kind });
+    setMessage({ text, kind, retry });
     // Успех можно не читать — он уходит сам. Ошибка остаётся до закрытия:
     // иначе сбой сохранения исчезает раньше, чем пользователь его заметит.
     if (kind === "success") {
@@ -621,7 +627,11 @@ export function CutEditor({ pairId, onBack }: Props) {
   const saveToDb = (frags: { start: number; end: number; comment: string }[]) => {
     replaceFragments(pairId, frags, position)
       .then(() => flash("Сохранено"))
-      .catch((e) => flash(`Ошибка сохранения: ${e.message}`, "error"));
+      .catch((e) =>
+        flash(`Ошибка сохранения: ${e.message}`, "error", () =>
+          saveToDb(frags),
+        ),
+      );
   };
 
   // Ввод номера кадра (1-based, как на экране): клампинг в 1..N, переход
@@ -1461,6 +1471,18 @@ export function CutEditor({ pairId, onBack }: Props) {
           aria-atomic="true"
         >
           <span>{message.text}</span>
+          {message.retry && (
+            <button
+              className="flash-retry"
+              onClick={() => {
+                const retry = message.retry!;
+                dismissFlash();
+                retry();
+              }}
+            >
+              Повторить
+            </button>
+          )}
           <button
             className="flash-close"
             onClick={dismissFlash}

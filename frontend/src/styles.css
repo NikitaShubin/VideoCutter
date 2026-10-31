@@ -1288,6 +1288,21 @@ select option {
   color: #ffd6d6;
 }
 
+.flash-retry {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.flash-retry:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .flash-close {
   flex: 0 0 auto;
   padding: 0 2px;
