@@ -57,7 +57,10 @@ export function CutEditor({ pairId, onBack }: Props) {
     key: "ann" | "bak";
     frac: number | null;
   } | null>(null);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState<{
+    text: string;
+    kind: "success" | "error";
+  } | null>(null);
   const [loadError, setLoadError] = useState("");
   // Настройки просмотра: масштаб (0.05..1.0) и качество JPEG (30..95).
   const [scale, setScale] = useState(0.75);
@@ -557,15 +560,34 @@ export function CutEditor({ pairId, onBack }: Props) {
     setPlaying(true);
   };
 
-  const flash = (m: string) => {
-    setMessage(m);
-    window.setTimeout(() => setMessage(""), 2000);
+  const flashTimerRef = useRef<number | null>(null);
+  const flash = (text: string, kind: "success" | "error" = "success") => {
+    if (flashTimerRef.current !== null) {
+      window.clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = null;
+    }
+    setMessage({ text, kind });
+    // Успех можно не читать — он уходит сам. Ошибка остаётся до закрытия:
+    // иначе сбой сохранения исчезает раньше, чем пользователь его заметит.
+    if (kind === "success") {
+      flashTimerRef.current = window.setTimeout(() => {
+        setMessage(null);
+        flashTimerRef.current = null;
+      }, 2500);
+    }
+  };
+  const dismissFlash = () => {
+    if (flashTimerRef.current !== null) {
+      window.clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = null;
+    }
+    setMessage(null);
   };
 
   const saveToDb = (frags: { start: number; end: number; comment: string }[]) => {
     replaceFragments(pairId, frags, position)
       .then(() => flash("Сохранено"))
-      .catch((e) => flash(`Ошибка сохранения: ${e.message}`));
+      .catch((e) => flash(`Ошибка сохранения: ${e.message}`, "error"));
   };
 
   // Ввод номера кадра (1-based, как на экране): клампинг в 1..N, переход
@@ -593,7 +615,7 @@ export function CutEditor({ pairId, onBack }: Props) {
     if (!p) return;
     const f = p.fragmentAt(position);
     if (!f) {
-      flash("Комментарии можно добавлять только к выделенным участкам");
+      flash("Комментарии можно добавлять только к выделенным участкам", "error");
       return;
     }
     setCommentDraft(f.comment);
@@ -641,7 +663,7 @@ export function CutEditor({ pairId, onBack }: Props) {
     if (!p) return;
     if (keyPose === null) {
       if (p.fragments.some((f) => position >= f.start && position <= f.end)) {
-        flash("Невозможно создать фрагмент внутри другого");
+        flash("Невозможно создать фрагмент внутри другого", "error");
       } else {
         setKeyPose(position);
       }
@@ -654,7 +676,7 @@ export function CutEditor({ pairId, onBack }: Props) {
       setKeyPose(null);
       afterFragmentChange();
     } else {
-      flash("Фрагмент пересекается с существующим");
+      flash("Фрагмент пересекается с существующим", "error");
     }
   };
 
@@ -666,9 +688,9 @@ export function CutEditor({ pairId, onBack }: Props) {
       afterFragmentChange();
       if (res === "merged") startCommentEdit();
     } else if (res === "ambiguous") {
-      flash("Текущий кадр — стык двух фрагментов. Переместите курсор.");
+      flash("Текущий кадр — стык двух фрагментов. Переместите курсор.", "error");
     } else {
-      flash("Под курсором нет фрагмента");
+      flash("Под курсором нет фрагмента", "error");
     }
   };
 
@@ -854,7 +876,7 @@ export function CutEditor({ pairId, onBack }: Props) {
         st = await getExportStatus(pairId);
       } catch (e) {
         finishExportUi();
-        flash(`Ошибка опроса экспорта: ${(e as Error).message}`);
+        flash(`Ошибка опроса экспорта: ${(e as Error).message}`, "error");
         return;
       }
       if (st.state === "running" || st.state === "cancelling") {
@@ -869,11 +891,11 @@ export function CutEditor({ pairId, onBack }: Props) {
         flash("Экспорт отменён");
       } else if (st.state === "error") {
         finishExportUi();
-        flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
+        flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`, "error");
       } else {
         // idle: сервер забыл статус (рестарт) — дальше ждать нечего.
         finishExportUi();
-        flash("Экспорт прерван (нет статуса на сервере)");
+        flash("Экспорт прерван (нет статуса на сервере)", "error");
       }
     }, 500);
   };
@@ -885,7 +907,7 @@ export function CutEditor({ pairId, onBack }: Props) {
       try {
         await cancelExport(pairId);
       } catch (e) {
-        flash(`Не удалось отменить экспорт: ${(e as Error).message}`);
+        flash(`Не удалось отменить экспорт: ${(e as Error).message}`, "error");
       }
       return;
     }
@@ -903,12 +925,12 @@ export function CutEditor({ pairId, onBack }: Props) {
         finishExportUi();
       } else if (st.state !== "running") {
         finishExportUi();
-        if (st.state === "error") flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
-        else flash("Экспорт не запущен");
+        if (st.state === "error") flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`, "error");
+        else flash("Экспорт не запущен", "error");
       }
     } catch (e) {
       finishExportUi();
-      flash(`Ошибка экспорта: ${(e as Error).message}`);
+      flash(`Ошибка экспорта: ${(e as Error).message}`, "error");
     }
   };
 
@@ -925,7 +947,7 @@ export function CutEditor({ pairId, onBack }: Props) {
         return getPair(pairId);
       })
       .then((p) => loadPairInto(p))
-      .catch((e: Error) => flash(`Ошибка импорта разметки: ${e.message}`))
+      .catch((e: Error) => flash(`Ошибка импорта разметки: ${e.message}`, "error"))
       .finally(() => {
         setAnnBusy(false);
         setAnnProgress(null);
@@ -942,7 +964,7 @@ export function CutEditor({ pairId, onBack }: Props) {
     if (dlState !== null || annBusy) return;
     setDlState({ key, frac: null });
     downloadFile(url, filename, (f) => setDlState({ key, frac: f }))
-      .catch((e: Error) => flash(`Ошибка скачивания: ${e.message}`))
+      .catch((e: Error) => flash(`Ошибка скачивания: ${e.message}`, "error"))
       .finally(() => setDlState(null));
   };
 
@@ -962,7 +984,7 @@ export function CutEditor({ pairId, onBack }: Props) {
           setExportProgress((st.index ?? 0) / Math.max(1, total));
           startPolling();
         } else if (st.state === "error") {
-          flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`);
+          flash(`Ошибка экспорта: ${st.error ?? "неизвестно"}`, "error");
         }
       })
       .catch(() => {});
@@ -1344,7 +1366,22 @@ export function CutEditor({ pairId, onBack }: Props) {
         }}
       />
 
-      {!isFullscreen && message && <div className="flash">{message}</div>}
+      {message && (
+        <div
+          className={`flash ${message.kind}`}
+          role={message.kind === "error" ? "alert" : "status"}
+          aria-atomic="true"
+        >
+          <span>{message.text}</span>
+          <button
+            className="flash-close"
+            onClick={dismissFlash}
+            aria-label="Скрыть сообщение"
+          >
+            <span aria-hidden="true">✕</span>
+          </button>
+        </div>
+      )}
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
 

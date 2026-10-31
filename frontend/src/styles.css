@@ -1176,10 +1176,37 @@ select option {
   position: fixed;
   top: 12px;
   right: 12px;
-  padding: 8px 14px;
-  background: var(--green);
+  z-index: 70;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border: 1px solid var(--line);
   border-radius: var(--r-s);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.flash.success {
+  border-color: var(--green);
+  background: #1f3d2a;
+  color: #d8f5e3;
+}
+
+.flash.error {
+  border-color: #a34;
+  background: #3a1f1f;
+  color: #ffd6d6;
+}
+
+.flash-close {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
 
 .error {

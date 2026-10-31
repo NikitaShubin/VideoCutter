@@ -507,3 +507,39 @@ describe("видимая панель разметки", () => {
     unmount();
   });
 });
+
+describe("обратная связь о сохранении", () => {
+  it("успех — role=status, исчезает сам", async () => {
+    const { host, unmount } = await mountEditor();
+    tap("ArrowUp");
+    await act(async () => {});
+    const flash = host.querySelector(".flash");
+    expect(flash?.getAttribute("role")).toBe("status");
+    expect(flash?.textContent).toContain("Сохранено");
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(host.querySelector(".flash")).toBeNull();
+    unmount();
+  });
+
+  it("ошибка — role=alert, не исчезает и закрывается вручную", async () => {
+    vi.mocked(replaceFragments).mockRejectedValueOnce(new Error("сеть"));
+    const { host, unmount } = await mountEditor();
+    tap("ArrowUp");
+    await act(async () => {});
+    const flash = host.querySelector(".flash");
+    expect(flash?.getAttribute("role")).toBe("alert");
+    expect(flash?.className).toContain("error");
+    expect(flash?.textContent).toContain("Ошибка сохранения");
+    act(() => {
+      vi.advanceTimersByTime(10000);
+    });
+    expect(host.querySelector(".flash")).not.toBeNull();
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".flash-close")!.click();
+    });
+    expect(host.querySelector(".flash")).toBeNull();
+    unmount();
+  });
+});
