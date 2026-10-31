@@ -1064,6 +1064,16 @@ export function CutEditor({ pairId, onBack }: Props) {
   return (
     <div ref={editorRef} className={isFullscreen ? "editor fullscreen" : "editor"}>
       <h1 className="sr-only">Редактор: {pair.name || pairId}</h1>
+      {isFullscreen && (
+        <button
+          type="button"
+          className="fullscreen-exit"
+          onClick={toggleFullscreen}
+          title="Выйти из полноэкранного режима (Esc)"
+        >
+          Выйти (Esc)
+        </button>
+      )}
       {!isFullscreen && (
         <div className="editor-toolbar">
           <button onClick={handleBack}>← Назад</button>
@@ -1143,10 +1153,12 @@ export function CutEditor({ pairId, onBack }: Props) {
             title={playing ? (direction === -1 ? "идёт назад (R — сменить)" : "идёт вперёд (R — сменить)") : (direction === -1 ? "пауза (пробел), направление: назад" : "пауза (пробел), направление: вперёд")}
             aria-label={playing ? (direction === -1 ? "воспроизведение назад" : "воспроизведение вперёд") : (direction === -1 ? "пауза, направление: назад" : "пауза, направление: вперёд")}
           >{playing ? (direction === -1 ? "◀" : "▶") : (direction === -1 ? "◁" : "▷")}x{speed}</span>
-          <span
-            className="info"
-            title="Замер клиента за секунду: к/с показа · мс загрузки кадра (сеть + сервер + декод браузера) · мс показа (рендер до отрисовки). Сервер тёплое отдаёт за миллисекунды: если ↓ мало, а к/с низкие — упираемся в рендер браузера."
-          >⏱ {formatNumber(perf.fps)} к/с · ↓ {formatNumber(perf.load)} мс · ⊙ {formatNumber(perf.show)} мс</span>
+          {(perf.fps > 0 || perf.load > 0 || perf.show > 0) && (
+            <span
+              className="info"
+              title="Замер клиента за секунду: к/с показа · мс загрузки кадра (сеть + сервер + декод браузера) · мс показа (рендер до отрисовки). Сервер тёплое отдаёт за миллисекунды: если ↓ мало, а к/с низкие — упираемся в рендер браузера."
+            >⏱ {formatNumber(perf.fps)} к/с · ↓ {formatNumber(perf.load)} мс · ⊙ {formatNumber(perf.show)} мс</span>
+          )}
           <CacheControl />
           {pair.pair_warning && (
             <span className="info warn" title={pair.pair_warning}>

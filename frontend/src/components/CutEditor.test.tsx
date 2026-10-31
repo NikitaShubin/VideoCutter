@@ -626,3 +626,49 @@ describe("таймлайн редактора", () => {
     unmount();
   });
 });
+
+describe("полноэкранный режим", () => {
+  it("видна кнопка выхода, пока редактор на весь экран", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(host.querySelector(".fullscreen-exit")).toBeNull();
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => host.querySelector(".editor"),
+    });
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    const exit = host.querySelector<HTMLButtonElement>(".fullscreen-exit");
+    expect(exit?.textContent).toContain("Выйти");
+    unmount();
+  });
+
+  it("кнопка выхода действительно выходит из полноэкранного режима", async () => {
+    const exitFullscreen = vi.fn(() => Promise.resolve());
+    Object.defineProperty(document, "exitFullscreen", {
+      configurable: true,
+      value: exitFullscreen,
+    });
+    const { host, unmount } = await mountEditor();
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => host.querySelector(".editor"),
+    });
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".fullscreen-exit")!.click();
+    });
+    expect(exitFullscreen).toHaveBeenCalled();
+    unmount();
+  });
+});
+
+describe("телеметрия клиента", () => {
+  it("скрыта, пока кадры не листаются", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(host.textContent).not.toContain("к/с");
+    unmount();
+  });
+});

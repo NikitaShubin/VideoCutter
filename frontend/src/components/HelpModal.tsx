@@ -127,7 +127,7 @@ export function HelpModal({ open, onClose }: Props) {
           <h3>Навигация</h3>
           <table className="help-table">
             <tbody>
-              <tr><th>Клавиши</th><th>Действие</th></tr>
+              <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
               <tr>
                 <td>
                   <span className="kbd">←</span> <span className="kbd">→</span>
@@ -163,7 +163,7 @@ export function HelpModal({ open, onClose }: Props) {
           <h3>Воспроизведение</h3>
           <table className="help-table">
             <tbody>
-              <tr><th>Клавиши</th><th>Действие</th></tr>
+              <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
               <tr><td><span className="kbd">Пробел</span></td><td>воспроизведение / пауза</td></tr>
               <tr><td>{k("0 – 9")}</td><td>скорость воспроизведения</td></tr>
               <tr><td><span className="kbd">R</span></td><td>направление: вперёд / назад</td></tr>
@@ -176,7 +176,7 @@ export function HelpModal({ open, onClose }: Props) {
           <h3>Разметка фрагментов</h3>
           <table className="help-table">
             <tbody>
-              <tr><th>Клавиши</th><th>Действие</th></tr>
+              <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
               <tr><td>{k("↑ / [ или ] / ↓")}</td><td>начало / конец фрагмента (ключевой кадр / граница)</td></tr>
               <tr><td><span className="kbd">K</span> <span className="kbd">Ins</span></td><td>вставить пару границ: первое нажатие — начало, второе — конец</td></tr>
               <tr><td>{k("D / Del")}</td><td>удалить фрагмент под позицией</td></tr>
@@ -190,7 +190,7 @@ export function HelpModal({ open, onClose }: Props) {
           <h3>Вид и интерфейс</h3>
           <table className="help-table">
             <tbody>
-              <tr><th>Клавиши</th><th>Действие</th></tr>
+              <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
               <tr><td><span className="kbd">F</span></td><td>полноэкранный режим</td></tr>
               <tr><td><span className="kbd">A</span></td><td>сохранять пропорции кадра / растягивать</td></tr>
               <tr><td><span className="kbd">Esc</span></td><td>закрыть справку / выйти из полноэкранного режима</td></tr>
@@ -218,7 +218,7 @@ export function HelpModal({ open, onClose }: Props) {
           <h3>Прочее</h3>
           <table className="help-table">
             <tbody>
-              <tr><th>Клавиша</th><th>Действие</th></tr>
+              <tr><th scope="col">Клавиша</th><th scope="col">Действие</th></tr>
               <tr><td><span className="kbd">E</span></td><td>экспорт фрагментов (оригиналы) — кнопка «Экспорт» в панели; повтор во время экспорта — отмена</td></tr>
             </tbody>
           </table>
@@ -238,6 +238,10 @@ export function HelpModal({ open, onClose }: Props) {
             <span><i className="help-swatch" style={{ background: "#00ffff" }} /> выбранный диапазон (на зелёном)</span>
             <span><i className="help-swatch" style={{ background: "#ff00ff" }} /> выбранный диапазон (на фрагменте)</span>
           </div>
+          <p>
+            В списке задач таймлайн приглушён тёмной подложкой ради
+            читаемости текста — цвета те же, что в редакторе.
+          </p>
         </div>
       </div>
     </div>

@@ -7,6 +7,9 @@
  */
 
 :root {
+  /* Тёмная тема по умолчанию: нативные скроллбары/select не вспыхивают
+   * светлым до загрузки CSS. */
+  color-scheme: dark;
   --bg: #1e1e2e;
   --panel: #2a2a3e;
   --panel-2: #22223a;
@@ -336,7 +339,9 @@ select option {
 }
 
 .project-panel .project-name {
-  flex: 1;
+  /* Имя важнее меты: при нехватке места мета уходит на вторую строку,
+   * а не съедает ширину имени. */
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -350,7 +355,8 @@ select option {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 2px 10px;
   padding: 2px 4px;
   background: none;
   border: none;
@@ -366,10 +372,12 @@ select option {
 }
 
 .project-panel .project-meta {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  margin-left: auto;
   color: var(--muted);
   font-size: 0.85em;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .project-hint {
@@ -856,7 +864,10 @@ select option {
 .editor {
   display: flex;
   flex-direction: column;
+  /* dvh — видимая высота без прыжков из-за мобильных панелей браузера;
+   * 100vh оставлен запасным для старых движков. */
   height: 100vh;
+  height: 100dvh;
   padding: 8px;
   gap: 8px;
 }
@@ -865,6 +876,29 @@ select option {
   padding: 0;
   gap: 4px;
   background: #000;
+}
+
+/* В полноэкранном режиме тулбар скрыт — кнопка выхода должна быть видимой
+ * и не перекрывать кадр, пока на неё не навели/не сфокусировали. */
+.fullscreen-exit {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 80;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--r-s);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+
+.fullscreen-exit:hover,
+.fullscreen-exit:focus-visible {
+  opacity: 1;
 }
 
 .editor.fullscreen .video-area {
@@ -1578,5 +1612,18 @@ select option {
   .export-list {
     left: 12px;
     max-width: none;
+  }
+}
+
+/* Уважение к системной настройке «меньше движения»: спиннеры и полосы
+ * прогресса перестают анимироваться, переходы — мгновенные. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
