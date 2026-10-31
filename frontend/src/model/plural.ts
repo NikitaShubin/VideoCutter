@@ -1,3 +1,5 @@
+import { formatNumber } from "./format";
+
 /** Русские числительные для списков.
  *
  * pluralCount(5, "задача", "задачи", "задач") → "5 задач".
@@ -9,7 +11,7 @@ export function pluralCount(
   few: string,
   many: string,
 ): string {
-  return `${n} ${pluralWord(n, one, few, many)}`;
+  return `${formatNumber(n)} ${pluralWord(n, one, few, many)}`;
 }
 
 /** Только слово формы (без числа): 1 → one, 2-4 → few, остальное → many. */

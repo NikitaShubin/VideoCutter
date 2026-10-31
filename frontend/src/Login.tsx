@@ -27,7 +27,7 @@ export function LoginScreen({ onOk }: { onOk: () => void }) {
   return (
     <div className="login-wrap">
       <form className="login" onSubmit={submit}>
-        <h2>VideoCutter</h2>
+        <h1>VideoCutter</h1>
         <p className="login-hint">Доступ защищён токеном. Введите его для входа.</p>
         <label>
           Токен доступа
@@ -39,7 +39,11 @@ export function LoginScreen({ onOk }: { onOk: () => void }) {
             onChange={(e) => setValue(e.target.value)}
           />
         </label>
-        {error && <div className="login-error">{error}</div>}
+        {error && (
+          <div className="login-error" role="alert">
+            {error}
+          </div>
+        )}
         <button type="submit" disabled={!value.trim() || busy}>
           {busy ? "Проверка…" : "Войти"}
         </button>

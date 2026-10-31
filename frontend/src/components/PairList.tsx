@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   annotationsUrl,
   attachTask,
@@ -33,6 +40,7 @@ import {
   type MarkStats,
 } from "../model/markStats";
 import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
+import { formatPercent } from "../model/format";
 import { pluralCount } from "../model/plural";
 import { StatusbarPreview } from "./StatusbarPreview";
 import { PairRowFrame } from "./PairRowFrame";
@@ -189,6 +197,8 @@ export function PairList({
 
   // ─── Вкладки (как в CVAT): задачи и проекты — отдельные экраны ────────
   const [tab, setTab] = useState<Tab>(readTab);
+  const tasksTabRef = useRef<HTMLButtonElement>(null);
+  const projectsTabRef = useRef<HTMLButtonElement>(null);
 
   const pickTab = (t: Tab) => {
     setTab(t);
@@ -197,6 +207,27 @@ export function PairList({
     } catch {
       /* ignore */
     }
+  };
+
+  // Клавиатурный паттерн табов: одна вкладка в Tab-порядке, стрелки/Home/End
+  // переключают и ведут фокус за собой.
+  const onTabsKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const order: Tab[] = ["tasks", "projects"];
+    const i = order.indexOf(tab);
+    let next: Tab | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      next = order[(i + 1) % order.length];
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      next = order[(i - 1 + order.length) % order.length];
+    } else if (e.key === "Home") {
+      next = order[0];
+    } else if (e.key === "End") {
+      next = order[order.length - 1];
+    }
+    if (next === null) return;
+    e.preventDefault();
+    pickTab(next);
+    (next === "tasks" ? tasksTabRef : projectsTabRef).current?.focus();
   };
 
   // ─── Проекты: реестр, фильтр списка, CRUD ────────────────────────────────
@@ -625,6 +656,9 @@ export function PairList({
         <span className="pair-edit-label">Имя</span>
         <input
           type="text"
+          name="taskName"
+          autoComplete="off"
+          aria-label="Имя задачи"
           value={editName}
           onChange={(e) => setEditName(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") doRename(p); }}
@@ -643,6 +677,7 @@ export function PairList({
         <span className="pair-edit-label">Проект</span>
         <select
           className="pair-edit-select"
+          aria-label="Проект задачи"
           value={editProject}
           disabled={editBusy}
           onChange={(e) => {
@@ -776,7 +811,11 @@ export function PairList({
       {editProgress !== null && editBusy && editProgress >= 1 && (
         <div className="pair-edit-verifying">Проверка видео…</div>
       )}
-      {editError && <div className="pair-edit-error">{editError}</div>}
+      {editError && (
+        <div className="pair-edit-error" role="alert">
+          {editError}
+        </div>
+      )}
 
       <div className="pair-edit-row">
         <span className="pair-edit-label">Бэкап</span>
@@ -844,12 +883,24 @@ export function PairList({
 
   return (
     <div className="pair-list">
+      <h1 className="sr-only">
+        VideoCutter — {tab === "tasks" ? "задачи" : "проекты"}
+      </h1>
       <div className="pair-list-head">
         <div className="title-row">
-          <div className="tabs" role="tablist" aria-label="Разделы">
+          <div
+            className="tabs"
+            role="tablist"
+            aria-label="Разделы"
+            onKeyDown={onTabsKeyDown}
+          >
             <button
+              ref={tasksTabRef}
+              id="tab-tasks"
               role="tab"
               aria-selected={tab === "tasks"}
+              aria-controls="tasks-panel"
+              tabIndex={tab === "tasks" ? 0 : -1}
               className={tab === "tasks" ? "tab active" : "tab"}
               onClick={() => pickTab("tasks")}
             >
@@ -859,8 +910,12 @@ export function PairList({
               </span>
             </button>
             <button
+              ref={projectsTabRef}
+              id="tab-projects"
               role="tab"
               aria-selected={tab === "projects"}
+              aria-controls="projects-panel"
+              tabIndex={tab === "projects" ? 0 : -1}
               className={tab === "projects" ? "tab active" : "tab"}
               onClick={() => pickTab("projects")}
             >
@@ -938,10 +993,19 @@ export function PairList({
       </div>
 
       {tab === "projects" && (
+        <div
+          id="projects-panel"
+          className="tab-panel"
+          role="tabpanel"
+          aria-labelledby="tab-projects"
+        >
         <div className="project-panel">
           <div className="project-create">
             <input
               type="text"
+              name="projectName"
+              autoComplete="off"
+              aria-label="Название нового проекта"
               value={newProjectName}
               placeholder="Название нового проекта"
               onChange={(e) => setNewProjectName(e.target.value)}
@@ -973,7 +1037,11 @@ export function PairList({
               />
             </div>
           )}
-          {projError && <div className="pair-edit-error">{projError}</div>}
+          {projError && (
+            <div className="pair-edit-error" role="alert">
+              {projError}
+            </div>
+          )}
           <ul className="project-rows">
             {(projects ?? []).map((p) => {
               const bad = defectTasks.get(p.id) ?? [];
@@ -1049,10 +1117,16 @@ export function PairList({
             Задачи перевешиваются в их форме редактирования (✎ → «Проект»).
           </div>
         </div>
+        </div>
       )}
 
       {tab === "tasks" && (
-        <>
+        <div
+          id="tasks-panel"
+          className="tab-panel"
+          role="tabpanel"
+          aria-labelledby="tab-tasks"
+        >
           {showForm && (
             <form className="upload" onSubmit={submit}>
               <h3>Новое видео</h3>
@@ -1088,7 +1162,11 @@ export function PairList({
             Задача будет называться: «
             {name.trim() || (firstFile ? fileStem(firstFile.name) : "—")}»
           </div>
-          {formError && <div className="upload-error">{formError}</div>}
+          {formError && (
+            <div className="upload-error" role="alert">
+              {formError}
+            </div>
+          )}
           <button type="submit" disabled={!source && !preview}>
             Загрузить
           </button>
@@ -1106,7 +1184,7 @@ export function PairList({
             ? `⚠ ${u.error}`
             : entry && entry.indexing
               ? entry.indexing_progress != null
-                ? `Индексируется… ${Math.round(entry.indexing_progress * 100)}%`
+                ? `Индексируется… ${formatPercent(Math.round(entry.indexing_progress * 100))}`
                 : "Индексируется…"
               : uploadLabel(u);
           // Канва — слои фаз: фон = цвет завершённой предыдущей фазы
@@ -1289,7 +1367,7 @@ export function PairList({
                     ` · ⧉ ${projectName(p.project_id)}`}
                   {p.indexing
                     ? (p.indexing_progress != null
-                      ? ` · Индексируется… ${Math.round(p.indexing_progress * 100)}%`
+                      ? ` · Индексируется… ${formatPercent(Math.round(p.indexing_progress * 100))}`
                       : " · ⏳ Индексируется…")
                     : ` · ${taskStatsMeta(p)} · ${p.width}×${p.height}`}
                   {p.name && p.name !== p.id ? ` · [${p.id}]` : ""}
@@ -1348,7 +1426,7 @@ export function PairList({
           )
         )}
       </ul>
-        </>
+        </div>
       )}
     </div>
   );

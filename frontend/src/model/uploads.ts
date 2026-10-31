@@ -4,6 +4,7 @@ import {
   uploadWorkspace,
   type WorkspaceUploadFiles,
 } from "../api";
+import { formatPercent } from "./format";
 
 export interface UploadJob {
   /** Client-ключ строки (он же upload_id для статуса приёма). */
@@ -49,9 +50,11 @@ export function uploadFraction(u: UploadJob): number {
 
 export function uploadLabel(u: UploadJob): string {
   if (u.error) return u.error;
-  if (u.progress < 1) return `Загрузка ${Math.round(u.progress * 100)}%`;
+  if (u.progress < 1) {
+    return `Загрузка ${formatPercent(Math.round(u.progress * 100))}`;
+  }
   if (u.serverTotal && (u.serverReceived ?? 0) < u.serverTotal) {
-    return `Приём сервером ${Math.round(uploadFraction(u) * 100)}%`;
+    return `Приём сервером ${formatPercent(Math.round(uploadFraction(u) * 100))}`;
   }
   return "Готово…";
 }

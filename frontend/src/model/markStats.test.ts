@@ -44,19 +44,25 @@ describe("markedLabel", () => {
 
   it("метка: выделено K из N кадров (X%)", () => {
     expect(markedLabel(markedFrameStats([{ start: 0, end: 19 }], 100))).toBe(
-      "выделено 20 из 100 кадров (20.0%)",
+      "выделено 20 из 100 кадров (20,0 %)",
     );
   });
 
   it("один кадр в знаменателе — родительный", () => {
     expect(markedLabel(markedFrameStats([{ start: 0, end: 0 }], 1))).toBe(
-      "выделено 1 из 1 кадра (100.0%)",
+      "выделено 1 из 1 кадра (100,0 %)",
     );
   });
 
   it("знаменатель 2-4 — родительный singular", () => {
     expect(markedLabel(markedFrameStats([{ start: 0, end: 0 }], 3))).toBe(
-      "выделено 1 из 3 кадра (33.3%)",
+      "выделено 1 из 3 кадра (33,3 %)",
+    );
+  });
+
+  it("большие числа — с разделителем тысяч", () => {
+    expect(markedLabel(markedFrameStats([{ start: 0, end: 999 }], 2000))).toBe(
+      "выделено 1\u00A0000 из 2\u00A0000 кадров (50,0 %)",
     );
   });
 });

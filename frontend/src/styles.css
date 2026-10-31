@@ -20,6 +20,9 @@
   --faint: #6a6a80;
   --accent: #7fb2ff;
   --green: #2e8b57;
+  /* Тёмный зелёный для белого текста: контраст ≥ 5:1 (AA). */
+  --green-strong: #26734a;
+  --green-strong-hover: #2a7d4f;
   --green-bright: #00c853;
   --tl-green: #2ecc40;
   --red: #ff8080;
@@ -51,9 +54,46 @@ video {
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* Скрыто визуально, но доступно скринридеру (h1, подписи). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  top: -48px;
+  left: 12px;
+  z-index: 100;
+  padding: 8px 12px;
+  background: var(--accent);
+  color: #101828;
+  border-radius: var(--r-s);
+  font-weight: 600;
+  text-decoration: none;
+  transition: top 0.12s ease;
+}
+
+.skip-link:focus {
+  top: 12px;
+}
+
+.app-main:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 /* ─── Кнопки ─────────────────────────────────────────────────────────────── */
@@ -87,13 +127,13 @@ select:focus-visible {
 }
 
 .btn.primary {
-  background: var(--green);
-  border-color: var(--green);
+  background: var(--green-strong);
+  border-color: var(--green-strong);
   color: #fff;
 }
 
 .btn.primary:hover {
-  background: #359a63;
+  background: var(--green-strong-hover);
 }
 
 /* label-кнопка (файловый input внутри): ведёт себя как кнопка. */
@@ -173,12 +213,6 @@ select option {
   gap: 12px;
 }
 
-.title-row h2 {
-  margin: 0;
-  margin-right: auto;
-  font-size: 1.25em;
-}
-
 /* Вкладки «Задачи / Проекты» (сегмент-контрол): активная подсвечена,
  * счётчики — приглушены. Ряд переносится, вкладки сжимаемы. */
 .tabs {
@@ -216,6 +250,15 @@ select option {
 .tab-count {
   font-size: 0.8em;
   opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Панель вкладки — обёртка ради role=tabpanel; раскладку не меняет:
+ * те же вертикальные отступы, что были у прямых детей .pair-list. */
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .title-actions {
@@ -326,6 +369,7 @@ select option {
   flex: 0 0 auto;
   color: var(--muted);
   font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
 }
 
 .project-hint {
@@ -461,8 +505,10 @@ select option {
   transition: background 0.15s ease;
 }
 
+/* Наведение лишь чуть светлее, но текст остаётся ≥ 5:1 даже на ярко-
+ * зелёном фоне (0.5 давал ~3.9:1). */
 .pair-list button.pair-open:hover::before {
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.6);
 }
 
 .pair-list .pair-open .pair-label,
@@ -485,6 +531,7 @@ select option {
   padding: 1px 8px;
   font-size: 0.85em;
   color: #d8d8e8;
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
@@ -697,7 +744,7 @@ select option {
 
 .pair-list li.empty {
   display: block;
-  color: var(--faint);
+  color: var(--muted);
   padding: 12px;
   text-align: center;
 }
@@ -898,13 +945,13 @@ select option {
 }
 
 .fragment-actions button.fragment-create {
-  border-color: var(--green);
-  background: var(--green);
+  border-color: var(--green-strong);
+  background: var(--green-strong);
   color: #fff;
 }
 
 .fragment-actions button.fragment-create:hover:not(:disabled) {
-  background: #359a63;
+  background: var(--green-strong-hover);
 }
 
 .fragment-actions kbd {
@@ -1008,6 +1055,7 @@ select option {
 .info {
   color: var(--muted);
   font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
 }
 
 .info.warn {
@@ -1024,12 +1072,12 @@ select option {
   background: var(--inset);
   color: var(--text);
   font: inherit;
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 
 .frame-input:focus {
   border-color: var(--accent);
-  outline: none;
 }
 
 /* Ползунки качества/масштаба в тулбаре редактора. */
@@ -1433,8 +1481,9 @@ select option {
   border-radius: var(--r);
 }
 
-.login h2 {
+.login h1 {
   margin: 0 0 8px;
+  font-size: 1.5em;
 }
 
 .login-hint {
@@ -1465,7 +1514,7 @@ select option {
   padding: 8px 16px;
   border: none;
   border-radius: var(--r-s);
-  background: var(--green);
+  background: var(--green-strong);
   color: #fff;
   font: inherit;
   cursor: pointer;

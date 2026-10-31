@@ -15,6 +15,7 @@ import {
   withTokenQuery,
   workspaceNonce,
 } from "../api";
+import { formatNumber, formatPercent } from "../model/format";
 import { FragmentModel } from "../model/fragmentModel";
 import { CacheControl } from "./CacheControl";
 import { HelpModal } from "./HelpModal";
@@ -1031,7 +1032,8 @@ export function CutEditor({ pairId, onBack }: Props) {
   if (loadError) {
     return (
       <div className="loading">
-        <div>⚠ {loadError}</div>
+        <h1 className="sr-only">VideoCutter — редактор</h1>
+        <div role="alert">⚠ {loadError}</div>
         <button onClick={onBack}>← Назад к списку</button>
       </div>
     );
@@ -1039,15 +1041,17 @@ export function CutEditor({ pairId, onBack }: Props) {
 
   if (!pair) {
     return (
-      <div className="loading">
+      <div className="loading" role="status">
+        <h1 className="sr-only">VideoCutter — редактор</h1>
         {waitingIndex
-          ? `Индексируется…${waitPct != null ? ` ${Math.round(waitPct * 100)}%` : ""}`
+          ? `Индексируется…${waitPct != null ? ` ${formatPercent(Math.round(waitPct * 100))}` : ""}`
           : "Загрузка видео-пары…"}
       </div>
     );
   }
 
   const sel = modelRef.current?.selectedFrames() ?? 0;
+  const markedPct = pair.total_frames > 0 ? (100 * sel) / pair.total_frames : 0;
   const canUndo = (modelRef.current?.histPos ?? 0) > 0;
   const canRedo = modelRef.current
     ? modelRef.current.histPos < modelRef.current.history.length - 1
@@ -1059,6 +1063,7 @@ export function CutEditor({ pairId, onBack }: Props) {
 
   return (
     <div ref={editorRef} className={isFullscreen ? "editor fullscreen" : "editor"}>
+      <h1 className="sr-only">Редактор: {pair.name || pairId}</h1>
       {!isFullscreen && (
         <div className="editor-toolbar">
           <button onClick={handleBack}>← Назад</button>
@@ -1080,7 +1085,7 @@ export function CutEditor({ pairId, onBack }: Props) {
                 onChange={(e) => setScale(parseInt(e.target.value, 10) / 100)}
                 title="Масштаб кадров (меньше — быстрее)"
               />
-              <b>{Math.round(scale * 100)}%</b>
+              <b>{formatPercent(Math.round(scale * 100))}</b>
             </label>
             <label className="view-slider">
               Качество
@@ -1130,17 +1135,18 @@ export function CutEditor({ pairId, onBack }: Props) {
               }}
               onBlur={commitFrameInput}
             />{" "}
-            /{pair.total_frames} · выделено {sel} ({(100 * sel / pair.total_frames).toFixed(1)}%)
+            /{formatNumber(pair.total_frames)} · выделено {formatNumber(sel)} ({formatPercent(markedPct, 1)})
           </span>
           <span
             className="info"
+            role="status"
             title={playing ? (direction === -1 ? "идёт назад (R — сменить)" : "идёт вперёд (R — сменить)") : (direction === -1 ? "пауза (пробел), направление: назад" : "пауза (пробел), направление: вперёд")}
             aria-label={playing ? (direction === -1 ? "воспроизведение назад" : "воспроизведение вперёд") : (direction === -1 ? "пауза, направление: назад" : "пауза, направление: вперёд")}
           >{playing ? (direction === -1 ? "◀" : "▶") : (direction === -1 ? "◁" : "▷")}x{speed}</span>
           <span
             className="info"
             title="Замер клиента за секунду: к/с показа · мс загрузки кадра (сеть + сервер + декод браузера) · мс показа (рендер до отрисовки). Сервер тёплое отдаёт за миллисекунды: если ↓ мало, а к/с низкие — упираемся в рендер браузера."
-          >⏱ {perf.fps}/с · ↓{perf.load}мс · ⊙{perf.show}мс</span>
+          >⏱ {formatNumber(perf.fps)} к/с · ↓ {formatNumber(perf.load)} мс · ⊙ {formatNumber(perf.show)} мс</span>
           <CacheControl />
           {pair.pair_warning && (
             <span className="info warn" title={pair.pair_warning}>
@@ -1160,7 +1166,7 @@ export function CutEditor({ pairId, onBack }: Props) {
             )}
             <span className="toolbar-export-label">
               {exportProgress !== null
-                ? `${Math.round(exportProgress * 100)}% · Отмена`
+                ? `${formatPercent(Math.round(exportProgress * 100))} · Отмена`
                 : "Экспорт (E)"}
             </span>
           </button>
@@ -1185,7 +1191,7 @@ export function CutEditor({ pairId, onBack }: Props) {
                 <>
                   <span className="btn-spin" />
                   {dlState.frac !== null
-                    ? ` ${Math.round(dlState.frac * 100)}%`
+                    ? ` ${formatPercent(Math.round(dlState.frac * 100))}`
                     : ""}
                 </>
               ) : (
@@ -1206,7 +1212,7 @@ export function CutEditor({ pairId, onBack }: Props) {
               onFile={handleAnnotationsImport}
             >
               {annProgress !== null
-                ? `Разметка ${Math.round(annProgress * 100)}%`
+                ? `Разметка ${formatPercent(Math.round(annProgress * 100))}`
                 : "⤒ Импорт"}
             </FileButton>
           </Hint>
@@ -1231,7 +1237,7 @@ export function CutEditor({ pairId, onBack }: Props) {
                 <>
                   <span className="btn-spin" />
                   {dlState.frac !== null
-                    ? ` ${Math.round(dlState.frac * 100)}%`
+                    ? ` ${formatPercent(Math.round(dlState.frac * 100))}`
                     : ""}
                 </>
               ) : (
@@ -1320,7 +1326,7 @@ export function CutEditor({ pairId, onBack }: Props) {
       <div className="video-area">
         <img
           ref={imageRef}
-          alt=""
+          alt={`Кадр ${formatNumber(position + 1)} из ${formatNumber(pair.total_frames)}`}
           className={frameLoading ? "frame-loading" : undefined}
           style={{
             objectFit: preserveAspect ? "contain" : "fill",
@@ -1333,10 +1339,10 @@ export function CutEditor({ pairId, onBack }: Props) {
         />
         {shownFrame < 0 && <div className="frame-empty">Кадр загружается…</div>}
         {frameLoading && (
-          <div className="frame-wait" aria-hidden>
-            <span className="frame-ring" />
+          <div className="frame-wait">
+            <span className="frame-ring" aria-hidden="true" />
             {frameStuck && (
-              <span className="frame-wait-text">
+              <span className="frame-wait-text" role="alert">
                 Кадр не загрузился — перейдите на соседний кадр и вернитесь
               </span>
             )}
@@ -1347,6 +1353,8 @@ export function CutEditor({ pairId, onBack }: Props) {
             <div className="editor-comment">
               <textarea
                 ref={commentRef}
+                name="fragmentComment"
+                aria-label="Комментарий к фрагменту"
                 rows={3}
                 value={commentDraft}
                 placeholder="Комментарий к сегменту…"

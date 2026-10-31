@@ -336,3 +336,33 @@ describe("превью таймлайна в списке", () => {
     expect(html).toContain('aria-hidden="true"');
   });
 });
+
+describe("семантика страницы", () => {
+  it("у экрана есть заголовок первого уровня", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const html = renderList([makePair({ broken: false })]);
+    expect(html).toContain("<h1");
+    expect(html).toContain("VideoCutter");
+  });
+
+  it("вкладки переключаются стрелками, фокус следует за выбором", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const { host, unmount } = mountList([makePair({ broken: false })]);
+    const tasks = host.querySelector<HTMLButtonElement>("#tab-tasks")!;
+    tasks.focus();
+    act(() => {
+      tasks.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const projects = host.querySelector<HTMLButtonElement>("#tab-projects")!;
+    expect(projects.getAttribute("aria-selected")).toBe("true");
+    expect(tasks.getAttribute("aria-selected")).toBe("false");
+    expect(document.activeElement).toBe(projects);
+    unmount();
+  });
+});

@@ -5,6 +5,7 @@
  * и проектов — одна формула на все экраны.
  */
 import type { Fragment } from "../types";
+import { formatNumber, formatPercent } from "./format";
 import { pluralWord } from "./plural";
 
 export interface MarkStats {
@@ -42,12 +43,12 @@ export function aggregateMarkStats(items: MarkStats[]): MarkStats {
   return { marked, total, percent: percentOf(marked, total) };
 }
 
-/** Подпись для списков: «выделено 20 из 100 кадров (20.0%)»; пусто — выделенного нет. */
+/** Подпись для списков: «выделено 20 из 100 кадров (20,0 %)»; пусто — выделенного нет. */
 export function markedLabel(stats: MarkStats): string {
   if (stats.marked <= 0 || stats.percent === null) return "";
   // После «из» — родительный: 1 кадра, 2-4 кадра, 5+ кадров.
   const word = pluralWord(stats.total, "кадра", "кадра", "кадров");
-  return `выделено ${stats.marked} из ${stats.total} ${word} (${stats.percent.toFixed(1)}%)`;
+  return `выделено ${formatNumber(stats.marked)} из ${formatNumber(stats.total)} ${word} (${formatPercent(stats.percent, 1)})`;
 }
 
 function percentOf(marked: number, total: number): number | null {

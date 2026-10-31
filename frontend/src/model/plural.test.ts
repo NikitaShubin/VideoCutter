@@ -29,6 +29,10 @@ describe("pluralCount", () => {
   it("ноль задач — форма множественного", () => {
     expect(pluralCount(0, ...TASKS)).toBe("0 задач");
   });
+
+  it("тысячи — с неразрывным разделителем", () => {
+    expect(pluralCount(1234, ...TASKS)).toBe("1\u00A0234 задачи");
+  });
 });
 
 describe("pluralWord", () => {

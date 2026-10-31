@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   authStatus,
   clearAuthToken,
@@ -116,20 +122,21 @@ export function App() {
     removeJob,
   } = useUploadManager(reload);
 
+  let content: ReactElement;
   if (!gate.checked) {
-    return <div className="loading">Загрузка…</div>;
-  }
-
-  if (gate.enabled && !gate.authed) {
-    return (
+    content = (
+      <div className="loading" role="status">
+        Загрузка…
+      </div>
+    );
+  } else if (gate.enabled && !gate.authed) {
+    content = (
       <LoginScreen
         onOk={() => setGate((g) => ({ ...g, authed: true }))}
       />
     );
-  }
-
-  if (screen === "editor" && pairId !== null) {
-    return (
+  } else if (screen === "editor" && pairId !== null) {
+    content = (
       <CutEditor
         pairId={pairId}
         onBack={() => {
@@ -138,25 +145,36 @@ export function App() {
         }}
       />
     );
+  } else {
+    content = (
+      <PairList
+        pairs={pairs}
+        onSelect={(id) => {
+          setPairId(id);
+          setScreen("editor");
+        }}
+        onChanged={reload}
+        onTick={handleStatusTick}
+        uploads={uploads}
+        onStartUpload={startUpload}
+        onCancelUpload={cancelUpload}
+        onDismissUpload={dismissUpload}
+        onRenameUpload={renameUpload}
+        onUpdateJob={updateJob}
+        onRemoveJob={removeJob}
+        onLogout={gate.enabled ? logout : null}
+      />
+    );
   }
 
   return (
-    <PairList
-      pairs={pairs}
-      onSelect={(id) => {
-        setPairId(id);
-        setScreen("editor");
-      }}
-      onChanged={reload}
-      onTick={handleStatusTick}
-      uploads={uploads}
-      onStartUpload={startUpload}
-      onCancelUpload={cancelUpload}
-      onDismissUpload={dismissUpload}
-      onRenameUpload={renameUpload}
-      onUpdateJob={updateJob}
-      onRemoveJob={removeJob}
-      onLogout={gate.enabled ? logout : null}
-    />
+    <>
+      <a className="skip-link" href="#main">
+        Перейти к содержимому
+      </a>
+      <main id="main" className="app-main" tabIndex={-1}>
+        {content}
+      </main>
+    </>
   );
 }

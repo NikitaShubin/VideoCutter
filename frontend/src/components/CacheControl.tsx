@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCache, setCache, type CacheState } from "../api";
+import { formatNumber, formatPercent } from "../model/format";
 
 // Ручка управления GOP-кэшем (RAM): заполнение + лимиты без рестарта.
 // Лимиты стартовые — из автотюна (доли машины, видны в title);
@@ -49,7 +50,7 @@ export function CacheControl() {
   const srcMb = cache.tuning.source["VC_GOP_CACHE_MB"] ?? "?";
   const srcGops = cache.tuning.source["VC_GOP_CACHE_GOPS"] ?? "?";
   const perSource = Object.entries(u.per_source ?? {})
-    .map(([k, v]) => `${k}: ${v.mb}МБ`)
+    .map(([k, v]) => `${k}: ${formatNumber(v.mb)} МБ`)
     .join(", ");
 
   return (
@@ -58,17 +59,17 @@ export function CacheControl() {
         className="toolbar-help"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        aria-label={`GOP-кэш: ${u.mb} из ${u.mb_cap} МБ, ${u.gops} из ${u.gops_cap} групп. ${open ? "Свернуть лимиты" : "Открыть лимиты"}`}
-        title={`GOP-кэш (RAM): ${u.gops}/${u.gops_cap} групп, ${u.mb}/${u.mb_cap}МБ на ${u.sources} источниках${perSource ? ` (${perSource})` : ""}. Лимиты: МБ [${srcMb}], GOP [${srcGops}] (auto — из автотюна). Раскрыть ручку лимитов.`}
+        aria-label={`GOP-кэш: ${formatNumber(u.mb)} из ${formatNumber(u.mb_cap)} МБ, ${formatNumber(u.gops)} из ${formatNumber(u.gops_cap)} групп. ${open ? "Свернуть лимиты" : "Открыть лимиты"}`}
+        title={`GOP-кэш (RAM): ${formatNumber(u.gops)} / ${formatNumber(u.gops_cap)} групп, ${formatNumber(u.mb)} / ${formatNumber(u.mb_cap)} МБ на ${formatNumber(u.sources)} источниках${perSource ? ` (${perSource})` : ""}. Лимиты: МБ [${srcMb}], GOP [${srcGops}] (auto — из автотюна). Раскрыть ручку лимитов.`}
       >
-        <span aria-hidden="true">💾</span> {u.mb}/{u.mb_cap}МБ
+        <span aria-hidden="true">💾</span> {formatNumber(u.mb)} / {formatNumber(u.mb_cap)} МБ
       </button>
       <span
         style={{
           display: "inline-block", width: 48, height: 6,
           background: "#333", borderRadius: 3, overflow: "hidden",
         }}
-        title={`Заполнение кэша: ${pct}%`}
+        title={`Заполнение кэша: ${formatPercent(pct)}`}
       >
         <span style={{ display: "block", width: `${pct}%`, height: "100%", background: pct > 90 ? "#c33" : "#6a6" }} />
       </span>
