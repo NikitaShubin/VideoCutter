@@ -2172,7 +2172,10 @@ select option {
   /* Панель разметки уходит из потока шапки: плавающая колонка слева. */
   .editor-workbench {
     position: fixed;
-    top: 50%;
+    /* Центр свободной полосы между шапкой (52 px) и транспортом
+     * (45 px + 28 px статуса), а не всего экрана: иначе на низких
+     * экранах панель заезжает на поле «кадр». */
+    top: calc(50% - 10px);
     left: max(8px, env(safe-area-inset-left));
     z-index: 30;
     display: none;
@@ -2209,6 +2212,36 @@ select option {
 
   .editor-history {
     display: contents;
+  }
+}
+
+/* Совсем низкий ландшафт (высоту съедает браузерная панель): колонка
+ * 2×4 не помещается между шапкой и транспортом. Раскладываем те же
+ * кнопки в 4×2 — панель ниже и оставляет кадру больше высоты. */
+@media (orientation: landscape) and (max-height: 340px) and (hover: none) and (pointer: coarse) {
+  .editor-workbench {
+    grid-template-columns: repeat(4, 44px);
+  }
+}
+
+/* Ещё ниже (около 300 px): 4×2 с кнопками 44 px уже не влезает —
+ * аккуратно уменьшаем кнопки до 40 px. */
+@media (orientation: landscape) and (max-height: 300px) and (hover: none) and (pointer: coarse) {
+  .editor-workbench {
+    grid-template-columns: repeat(4, 40px);
+    gap: 4px;
+    padding: 4px;
+  }
+
+  .fragment-actions button {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+  }
+
+  .fragment-icon {
+    width: 20px;
+    height: 20px;
   }
 }
 
