@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { FragmentIcon } from "./FragmentIcon";
+import { useKeyboardMode } from "./useKeyboardMode";
 
 interface Props {
   open: boolean;
@@ -11,6 +13,7 @@ function k(keys: string): string {
 }
 
 export function HelpModal({ open, onClose }: Props) {
+  const keyboard = useKeyboardMode();
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
@@ -91,7 +94,7 @@ export function HelpModal({ open, onClose }: Props) {
 
         <nav className="help-toc" aria-label="Разделы справки">
           <a href="#help-frames">Кадры</a>
-          <a href="#help-nav">Клавиши</a>
+          <a href="#help-nav">{keyboard ? "Клавиши" : "Экран"}</a>
           <a href="#help-playback">Воспроизведение</a>
           <a href="#help-markup">Разметка</a>
           <a href="#help-view">Вид</a>
@@ -101,6 +104,12 @@ export function HelpModal({ open, onClose }: Props) {
           <a href="#help-timeline">Таймлайн</a>
         </nav>
 
+        <p className="help-mode-note">
+          {keyboard
+            ? "Клавиатура: ниже — горячие клавиши."
+            : "Сенсорный режим: горячие клавиши недоступны, ниже — экранные кнопки."}
+        </p>
+
         <div className="help-section">
           <h3 id="help-frames">Навигация по кадрам</h3>
           <p>
@@ -109,66 +118,108 @@ export function HelpModal({ open, onClose }: Props) {
             пока кадра нет или он меняется, в центре кадра крутится кольцо
             ожидания.
           </p>
-          <ul className="help-modes">
-            <li>
-              <b>Тап</b> <span className="kbd">←</span>/<span className="kbd">→</span> —{" "}
-              сразу целевой кадр. Серия быстрых тапов — тоже прыжок к позиции
-              последнего: промежуточные кадры не показываются.
-            </li>
-            <li>
-              <b>Удержание</b> стрелки (в т.ч. <span className="kbd">Ctrl</span>+стрелка) —{" "}
-              <b>chase</b>: позиция бежит в реальном времени, экран догоняет
-              её, пропуская кадры. Незаконченные запросы тапов при этом
-              отменяются сразу.
-            </li>
-            <li>
-              <b>Прыжки</b> — <span className="kbd">PageUp</span>/<span className="kbd">PageDown</span>,{" "}
-              <span className="kbd">Home</span>/<span className="kbd">End</span>, одиночный{" "}
-              <span className="kbd">Ctrl</span>+<span className="kbd">→</span>, клик по таймлайну:{" "}
-              сразу целевой кадр, без промежуточных.
-            </li>
-            <li>
-              <b>Воспроизведение</b> (<span className="kbd">Пробел</span>) — покадровое:
-              каждый кадр обязательно показывается (без пропусков),
-              воспроизведение останавливается в точности на показанном кадре.
-            </li>
-          </ul>
+          {keyboard ? (
+            <ul className="help-modes">
+              <li>
+                <b>Тап</b> <span className="kbd">←</span>/<span className="kbd">→</span> —{" "}
+                сразу целевой кадр. Серия быстрых тапов — тоже прыжок к позиции
+                последнего: промежуточные кадры не показываются.
+              </li>
+              <li>
+                <b>Удержание</b> стрелки (в т.ч. <span className="kbd">Ctrl</span>+стрелка) —{" "}
+                <b>chase</b>: позиция бежит в реальном времени, экран догоняет
+                её, пропуская кадры. Незаконченные запросы тапов при этом
+                отменяются сразу.
+              </li>
+              <li>
+                <b>Прыжки</b> — <span className="kbd">PageUp</span>/<span className="kbd">PageDown</span>,{" "}
+                <span className="kbd">Home</span>/<span className="kbd">End</span>, одиночный{" "}
+                <span className="kbd">Ctrl</span>+<span className="kbd">→</span>, клик по таймлайну:{" "}
+                сразу целевой кадр, без промежуточных.
+              </li>
+              <li>
+                <b>Воспроизведение</b> (<span className="kbd">Пробел</span>) — покадровое:
+                каждый кадр обязательно показывается (без пропусков),
+                воспроизведение останавливается в точности на показанном кадре.
+              </li>
+            </ul>
+          ) : (
+            <ul className="help-modes">
+              <li>
+                <b>Таймлайн</b> — коснитесь полосы, чтобы перейти к выбранному
+                кадру.
+              </li>
+              <li>
+                <b>Поле «кадр»</b> — введите номер и подтвердите: переход сразу
+                к целевому кадру, без промежуточных.
+              </li>
+              <li>
+                <b>Воспроизведение</b> — кнопка <b>▷ / ◁</b> запускает и
+                ставит на паузу; направление и скорость — в меню <b>xN ▾</b>.
+                Клик по самому кадру тоже переключает воспроизведение.
+              </li>
+            </ul>
+          )}
         </div>
 
         <div className="help-section">
           <h3 id="help-nav">Навигация</h3>
-          <table className="help-table">
-            <tbody>
-              <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
-              <tr>
-                <td>
-                  <span className="kbd">←</span> <span className="kbd">→</span>
-                  {" "}(и{" "}<span className="kbd">,</span>/<span className="kbd">.</span>)
-                </td>
-                <td>назад / вперёд на 1 кадр (серия быстрых нажатий — прыжок к последней)</td>
-              </tr>
-              <tr>
-                <td>{k("Ctrl + ← / →")}</td>
-                <td>10 кадров (одиночное нажатие — прыжок, удержание — догон)</td>
-              </tr>
-              <tr>
-                <td>{k("PageDown / PageUp")}</td>
-                <td>к следующей / предыдущей границе фрагментов</td>
-              </tr>
-              <tr>
-                <td>{k("Home / End")}</td>
-                <td>первый / последний кадр видео</td>
-              </tr>
-              <tr>
-                <td>клик по таймлайну</td>
-                <td>переход к выбранному кадру</td>
-              </tr>
-              <tr>
-                <td>поле номера кадра (в полосе у таймлайна)</td>
-                <td>введите 1…N и нажмите Enter — переход без промежуточных кадров; Esc — отмена</td>
-              </tr>
-            </tbody>
-          </table>
+          {keyboard ? (
+            <table className="help-table">
+              <tbody>
+                <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
+                <tr>
+                  <td>
+                    <span className="kbd">←</span> <span className="kbd">→</span>
+                    {" "}(и{" "}<span className="kbd">,</span>/<span className="kbd">.</span>)
+                  </td>
+                  <td>назад / вперёд на 1 кадр (серия быстрых нажатий — прыжок к последней)</td>
+                </tr>
+                <tr>
+                  <td>{k("Ctrl + ← / →")}</td>
+                  <td>10 кадров (одиночное нажатие — прыжок, удержание — догон)</td>
+                </tr>
+                <tr>
+                  <td>{k("PageDown / PageUp")}</td>
+                  <td>к следующей / предыдущей границе фрагментов</td>
+                </tr>
+                <tr>
+                  <td>{k("Home / End")}</td>
+                  <td>первый / последний кадр видео</td>
+                </tr>
+                <tr>
+                  <td>клик по таймлайну</td>
+                  <td>переход к выбранному кадру</td>
+                </tr>
+                <tr>
+                  <td>поле номера кадра (в полосе у таймлайна)</td>
+                  <td>введите 1…N и нажмите Enter — переход без промежуточных кадров; Esc — отмена</td>
+                </tr>
+              </tbody>
+            </table>
+          ) : (
+            <table className="help-table">
+              <tbody>
+                <tr><th scope="col">Экран</th><th scope="col">Действие</th></tr>
+                <tr>
+                  <td>таймлайн</td>
+                  <td>коснитесь полосы, чтобы перейти к кадру</td>
+                </tr>
+                <tr>
+                  <td>поле «кадр»</td>
+                  <td>введите номер и подтвердите — переход без промежуточных кадров</td>
+                </tr>
+                <tr>
+                  <td>кнопки ▷/◁ и xN ▾</td>
+                  <td>воспроизведение, направление и скорость</td>
+                </tr>
+                <tr>
+                  <td>сам кадр</td>
+                  <td>коснитесь изображения — воспроизведение / пауза</td>
+                </tr>
+              </tbody>
+            </table>
+          )}
         </div>
 
         <div className="help-section">
@@ -177,31 +228,63 @@ export function HelpModal({ open, onClose }: Props) {
             Кнопка <b>▷ / ◁</b> у таймлайна запускает и ставит на паузу;
             соседняя <b>xN ▾</b> открывает направление и скорость. Скорость
             — это шаг: x8 проходит восемь кадров за тик (прореживание для
-            быстрого просмотра).
+            быстрого просмотра). Клик по самому кадру тоже переключает
+            воспроизведение.
           </p>
-          <table className="help-table">
-            <tbody>
-              <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
-              <tr><td><span className="kbd">Пробел</span></td><td>воспроизведение / пауза</td></tr>
-              <tr><td>{k("0 – 9")}</td><td>скорость воспроизведения (x1…x512)</td></tr>
-              <tr><td><span className="kbd">R</span></td><td>направление: вперёд / назад</td></tr>
-              <tr><td><span className="kbd">J</span></td><td>прокрутить до ближайшей границы фрагмента (начало/конец) и остановиться (на краю видео направление разворачивается)</td></tr>
-            </tbody>
-          </table>
+          {keyboard ? (
+            <table className="help-table">
+              <tbody>
+                <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
+                <tr><td><span className="kbd">Пробел</span></td><td>воспроизведение / пауза</td></tr>
+                <tr><td>{k("0 – 9")}</td><td>скорость воспроизведения (x1…x512)</td></tr>
+                <tr><td><span className="kbd">R</span></td><td>направление: вперёд / назад</td></tr>
+                <tr><td><span className="kbd">J</span></td><td>прокрутить до ближайшей границы фрагмента (начало/конец) и остановиться (на краю видео направление разворачивается)</td></tr>
+              </tbody>
+            </table>
+          ) : (
+            <p>
+              В меню <b>xN ▾</b> — один переключатель направления
+              «Вперёд / Назад» и ползунок скорости x1…x512. Коснитесь
+              изображения, чтобы запустить или остановить показ.
+            </p>
+          )}
         </div>
 
         <div className="help-section">
           <h3 id="help-markup">Разметка фрагментов</h3>
-          <table className="help-table">
-            <tbody>
-              <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
-              <tr><td>{k("↑ / [ или ] / ↓")}</td><td>начало / конец фрагмента (ключевой кадр / граница)</td></tr>
-              <tr><td><span className="kbd">K</span> <span className="kbd">Ins</span></td><td>вставить пару границ: первое нажатие — начало, второе — конец</td></tr>
-              <tr><td>{k("D / Del")}</td><td>удалить фрагмент под позицией</td></tr>
-              <tr><td><span className="kbd">I</span></td><td>комментарий к сегменту (Enter — сохранить, Esc — отмена)</td></tr>
-              <tr><td>{k("Ctrl+Z / Ctrl+Shift+Z / Z")}</td><td>отменить / повторить (Ctrl+Shift+Z или Z)</td></tr>
-            </tbody>
-          </table>
+          {keyboard ? (
+            <table className="help-table">
+              <tbody>
+                <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
+                <tr><td>{k("↑ / [ или ] / ↓")}</td><td>начало / конец фрагмента (ключевой кадр / граница)</td></tr>
+                <tr><td><span className="kbd">K</span> <span className="kbd">Ins</span></td><td>вставить пару границ: первое нажатие — начало, второе — конец</td></tr>
+                <tr><td>{k("D / Del")}</td><td>удалить фрагмент под позицией</td></tr>
+                <tr><td><span className="kbd">I</span></td><td>комментарий к сегменту (Enter — сохранить, Esc — отмена)</td></tr>
+                <tr><td>{k("Ctrl+Z / Ctrl+Shift+Z / Z")}</td><td>отменить / повторить (Ctrl+Shift+Z или Z)</td></tr>
+              </tbody>
+            </table>
+          ) : (
+            <>
+              <p>
+                На сенсорном экране действия разметки — квадратные кнопки
+                со значками в панели под шапкой. Вот что означает каждый
+                значок.
+              </p>
+              <table className="help-table help-icon-table">
+                <tbody>
+                  <tr><th scope="col">Кнопка</th><th scope="col">Действие</th></tr>
+                  <tr><td><FragmentIcon name="start" /></td><td><b>Начало фрагмента</b> — поставить начало в текущем кадре</td></tr>
+                  <tr><td><FragmentIcon name="end" /></td><td><b>Конец фрагмента</b> — поставить конец в текущем кадре</td></tr>
+                  <tr><td><FragmentIcon name="create" /></td><td><b>Создать</b> — первое нажатие ставит начало, второе (значок ✓) — конец</td></tr>
+                  <tr><td><FragmentIcon name="complete" /></td><td><b>Завершить</b> — поставить конец, когда начало уже отмечено</td></tr>
+                  <tr><td><FragmentIcon name="delete" /></td><td><b>Удалить</b> — убрать фрагмент под текущим кадром</td></tr>
+                  <tr><td><FragmentIcon name="comment" /></td><td><b>Комментарий</b> — добавить или изменить комментарий к фрагменту</td></tr>
+                  <tr><td><FragmentIcon name="undo" /></td><td><b>Отменить</b> — вернуть предыдущее состояние разметки</td></tr>
+                  <tr><td><FragmentIcon name="redo" /></td><td><b>Повторить</b> — вернуть отменённое изменение</td></tr>
+                </tbody>
+              </table>
+            </>
+          )}
         </div>
 
         <div className="help-section">
@@ -212,16 +295,24 @@ export function HelpModal({ open, onClose }: Props) {
             Настройки применяются с небольшой задержкой и запоминаются в
             задаче.
           </p>
-          <table className="help-table">
-            <tbody>
-              <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
-              <tr><td><span className="kbd">F</span></td><td>полноэкранный режим</td></tr>
-              <tr><td><span className="kbd">A</span></td><td>сохранять пропорции кадра / растягивать</td></tr>
-              <tr><td><span className="kbd">Esc</span></td><td>закрыть справку / меню / выйти из полноэкранного режима</td></tr>
-              <tr><td>{k("Esc или Q")}</td><td>назад к списку пар (позиция кадра запоминается)</td></tr>
-              <tr><td>{k("H или ?")}</td><td>показать / скрыть эту справку</td></tr>
-            </tbody>
-          </table>
+          {keyboard ? (
+            <table className="help-table">
+              <tbody>
+                <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
+                <tr><td><span className="kbd">F</span></td><td>полноэкранный режим</td></tr>
+                <tr><td><span className="kbd">A</span></td><td>сохранять пропорции кадра / растягивать</td></tr>
+                <tr><td><span className="kbd">Esc</span></td><td>закрыть справку / меню / выйти из полноэкранного режима</td></tr>
+                <tr><td>{k("Esc или Q")}</td><td>назад к списку пар (позиция кадра запоминается)</td></tr>
+                <tr><td>{k("H или ?")}</td><td>показать / скрыть эту справку</td></tr>
+              </tbody>
+            </table>
+          ) : (
+            <p>
+              Полноэкранный режим включается в меню <b>«Вид»</b>; там же
+              сохраняются пропорции кадра. Чтобы вернуться к списку задач,
+              нажмите <b>«← Назад»</b> в шапке.
+            </p>
+          )}
         </div>
 
         <div className="help-section">
@@ -250,12 +341,19 @@ export function HelpModal({ open, onClose }: Props) {
 
         <div className="help-section">
           <h3 id="help-misc">Прочее</h3>
-          <table className="help-table">
-            <tbody>
-              <tr><th scope="col">Клавиша</th><th scope="col">Действие</th></tr>
-              <tr><td><span className="kbd">E</span></td><td>экспорт фрагментов (оригиналы) — кнопка «Экспорт» в шапке редактора; повтор во время экспорта — отмена</td></tr>
-            </tbody>
-          </table>
+          {keyboard ? (
+            <table className="help-table">
+              <tbody>
+                <tr><th scope="col">Клавиша</th><th scope="col">Действие</th></tr>
+                <tr><td><span className="kbd">E</span></td><td>экспорт фрагментов (оригиналы) — кнопка «Экспорт» в шапке редактора; повтор во время экспорта — отмена</td></tr>
+              </tbody>
+            </table>
+          ) : (
+            <p>
+              Кнопка <b>«Экспорт»</b> в шапке экспортирует фрагменты
+              (оригиналы); повторное нажатие во время экспорта отменяет его.
+            </p>
+          )}
         </div>
 
         <div className="help-section">

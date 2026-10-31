@@ -19,6 +19,7 @@ import { formatNumber, formatPercent } from "../model/format";
 import { FragmentModel } from "../model/fragmentModel";
 import { DataMenu } from "./DataMenu";
 import { DiagnosticsMenu } from "./DiagnosticsMenu";
+import { FragmentIcon } from "./FragmentIcon";
 import { HelpModal } from "./HelpModal";
 import { PlaybackMenu } from "./PlaybackMenu";
 import { Popover } from "./Popover";
@@ -1216,9 +1217,13 @@ export function CutEditor({ pairId, onBack }: Props) {
                   />
                 )}
                 <span className="toolbar-export-label">
-                  {exportProgress !== null
-                    ? `${formatPercent(Math.round(exportProgress * 100))} · Отмена`
-                    : "Экспорт (E)"}
+                  {exportProgress !== null ? (
+                    `${formatPercent(Math.round(exportProgress * 100))} · Отмена`
+                  ) : (
+                    <>
+                      Экспорт <span className="hotkey-hint">(E)</span>
+                    </>
+                  )}
                 </span>
               </button>
               <button
@@ -1244,42 +1249,61 @@ export function CutEditor({ pairId, onBack }: Props) {
                 type="button"
                 onClick={markStart}
                 title="Начало фрагмента ([ или ↑)"
+                aria-label="Начало фрагмента"
               >
-                Начало <kbd>[</kbd>
+                <FragmentIcon name="start" />
+                <span className="fragment-action-text">Начало</span>
+                <kbd>[</kbd>
               </button>
               <button
                 type="button"
                 onClick={markEnd}
                 title="Конец фрагмента (] или ↓)"
+                aria-label="Конец фрагмента"
               >
-                Конец <kbd>]</kbd>
+                <FragmentIcon name="end" />
+                <span className="fragment-action-text">Конец</span>
+                <kbd>]</kbd>
               </button>
               <button
                 type="button"
                 className="fragment-create"
                 onClick={createOrComplete}
                 aria-pressed={keyPose !== null}
+                aria-label={
+                  keyPose === null ? "Создать фрагмент" : "Завершить фрагмент"
+                }
                 title={
                   keyPose === null
                     ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
                     : "Завершить фрагмент в текущем кадре (K)"
                 }
               >
-                {keyPose === null ? "Создать" : "Завершить"} <kbd>K</kbd>
+                <FragmentIcon name={keyPose === null ? "create" : "complete"} />
+                <span className="fragment-action-text">
+                  {keyPose === null ? "Создать" : "Завершить"}
+                </span>
+                <kbd>K</kbd>
               </button>
               <button
                 type="button"
                 onClick={deleteAtPosition}
                 title="Удалить фрагмент под курсором (D или Del)"
+                aria-label="Удалить фрагмент"
               >
-                Удалить <kbd>D</kbd>
+                <FragmentIcon name="delete" />
+                <span className="fragment-action-text">Удалить</span>
+                <kbd>D</kbd>
               </button>
               <button
                 type="button"
                 onClick={startCommentEdit}
                 title="Комментарий к фрагменту (I)"
+                aria-label="Комментарий к фрагменту"
               >
-                Комментарий <kbd>I</kbd>
+                <FragmentIcon name="comment" />
+                <span className="fragment-action-text">Комментарий</span>
+                <kbd>I</kbd>
               </button>
               <div
                 className="editor-history"
@@ -1291,16 +1315,20 @@ export function CutEditor({ pairId, onBack }: Props) {
                   onClick={undoEdit}
                   disabled={!canUndo}
                   title="Отменить последнее изменение (Ctrl+Z)"
+                  aria-label="Отменить последнее изменение"
                 >
-                  Отменить
+                  <FragmentIcon name="undo" />
+                  <span className="fragment-action-text">Отменить</span>
                 </button>
                 <button
                   type="button"
                   onClick={redoEdit}
                   disabled={!canRedo}
                   title="Повторить отменённое (Ctrl+Shift+Z или Z)"
+                  aria-label="Повторить отменённое"
                 >
-                  Повторить
+                  <FragmentIcon name="redo" />
+                  <span className="fragment-action-text">Повторить</span>
                 </button>
               </div>
             </div>
@@ -1313,6 +1341,8 @@ export function CutEditor({ pairId, onBack }: Props) {
           ref={imageRef}
           alt={`Кадр ${formatNumber(position + 1)} из ${formatNumber(pair.total_frames)}`}
           className={frameLoading ? "frame-loading" : undefined}
+          onClick={togglePlayback}
+          title="Клик — воспроизведение / пауза"
           style={{
             objectFit: preserveAspect ? "contain" : "fill",
             width: "100%",

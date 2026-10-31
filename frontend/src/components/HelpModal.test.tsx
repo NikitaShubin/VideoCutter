@@ -4,7 +4,7 @@
 // Запуск: npm test (vitest run).
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HelpModal } from "./HelpModal";
 
 function mount(node: React.ReactElement) {
@@ -33,6 +33,28 @@ function press(key: string, shiftKey = false): void {
     );
   });
 }
+
+function stubTouchOnly(matches: boolean): void {
+  vi.stubGlobal(
+    "matchMedia",
+    (query: string) =>
+      ({
+        matches:
+          query === "(hover: none) and (pointer: coarse)" ? matches : false,
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as unknown as MediaQueryList,
+  );
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("справка как диалог", () => {
   it("модальная и подписана заголовком", () => {
@@ -115,5 +137,58 @@ describe("справка как диалог", () => {
     expect(text).not.toContain("↑ / ] или [ / ↓");
     expect(text).not.toContain("undo / redo / redo");
     unmount();
+  });
+});
+
+describe("справка под устройство", () => {
+  it("на сенсорном экране показывает экранные кнопки", () => {
+    stubTouchOnly(true);
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const text = el.textContent ?? "";
+    expect(text).toContain("Сенсорный режим");
+    expect(text).toContain("Начало фрагмента");
+    expect(text).toContain("Комментарий");
+    expect(
+      el.querySelectorAll(".help-icon-table .fragment-icon"),
+    ).toHaveLength(8);
+    expect(text).not.toContain("Пробел");
+    unmount();
+  });
+
+  it("на клавиатуре показывает горячие клавиши", () => {
+    stubTouchOnly(false);
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const text = el.textContent ?? "";
+    expect(text).toContain("Пробел");
+    expect(text).toContain("Клавиши");
+    expect(text).not.toContain("Сенсорный режим");
+    expect(el.querySelector(".help-icon-table")).toBeNull();
+    unmount();
+  });
+
+  it("первое нажатие клавиши включает режим клавиатуры", () => {
+    stubTouchOnly(true);
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    expect(el.textContent).toContain("Сенсорный режим");
+    press("KeyR");
+    expect(el.textContent).toContain("Пробел");
+    expect(el.textContent).not.toContain("Сенсорный режим");
+    unmount();
+  });
+
+  it("ввод в поле не включает режим клавиатуры", () => {
+    stubTouchOnly(true);
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    input.focus();
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    act(() => {
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "1", bubbles: true }),
+      );
+    });
+    expect(el.textContent).toContain("Сенсорный режим");
+    unmount();
+    input.remove();
   });
 });

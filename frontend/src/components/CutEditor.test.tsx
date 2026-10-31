@@ -517,6 +517,20 @@ describe("панель разметки", () => {
     unmount();
   });
 
+  it("у каждой кнопки разметки есть значок и доступное имя", async () => {
+    const { host, unmount } = await mountEditor();
+    const bar = host.querySelector<HTMLElement>(
+      '[role="toolbar"][aria-label="Разметка фрагментов"]',
+    )!;
+    const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons).toHaveLength(7);
+    for (const button of buttons) {
+      expect(button.querySelector("svg.fragment-icon")).toBeTruthy();
+      expect(button.getAttribute("aria-label")).toBeTruthy();
+    }
+    unmount();
+  });
+
   it("«Начало» и «Конец» создают фрагмент и сохраняют его", async () => {
     const { host, unmount } = await mountEditor();
     clickFragment(host, "Начало");
@@ -744,6 +758,23 @@ describe("управление воспроизведением", () => {
       vi.advanceTimersByTime(1);
     });
     expect(frameInput(host).value).toBe("9"); // 0 + 8 → кадр 9
+    unmount();
+  });
+
+  it("клик по изображению запускает и ставит на паузу", async () => {
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      FakeImage.issued[0].onload?.();
+    });
+    const image = host.querySelector<HTMLImageElement>(".video-area img")!;
+    act(() => {
+      image.click();
+    });
+    expect(playButton(host).getAttribute("aria-pressed")).toBe("true");
+    act(() => {
+      image.click();
+    });
+    expect(playButton(host).getAttribute("aria-pressed")).toBe("false");
     unmount();
   });
 });

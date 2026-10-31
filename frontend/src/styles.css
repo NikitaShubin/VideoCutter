@@ -1025,6 +1025,39 @@ select option {
   .editor-workbench {
     display: flex;
   }
+
+  /* На сенсорном экране текст и клавиши не нужны: квадратные кнопки
+   * со значками, 44×44 — минимальная цель для пальца. */
+  .fragment-actions {
+    gap: 6px;
+  }
+
+  .fragment-actions-label,
+  .fragment-action-text,
+  .fragment-actions kbd,
+  .hotkey-hint {
+    display: none;
+  }
+
+  .fragment-actions button {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .fragment-icon {
+    width: 22px;
+    height: 22px;
+  }
+
+  .editor-history {
+    gap: 6px;
+    margin-left: 0;
+    padding-left: 0;
+    border-left: none;
+  }
 }
 
 /* Видимая панель разметки: главные действия не должны жить только в
@@ -1047,6 +1080,12 @@ select option {
   align-items: center;
   gap: 6px;
   white-space: nowrap;
+}
+
+.fragment-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
 }
 
 .fragment-actions button.fragment-create {
@@ -1498,6 +1537,7 @@ select option {
 }
 
 .video-area img {
+  cursor: pointer;
   user-select: none;
   -webkit-user-drag: none;
 }
@@ -1822,6 +1862,23 @@ select option {
   margin: 6px 0;
 }
 
+.help-mode-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.help-icon-table td:first-child {
+  width: 40px;
+  color: var(--muted);
+}
+
+.help-icon-table .fragment-icon {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+
 .help-table {
   width: 100%;
   border-collapse: collapse;
@@ -2012,6 +2069,146 @@ select option {
 
   .editor-global-actions {
     margin-left: 0;
+  }
+}
+
+/* ─── Ландшафт: кадр — главный объект, управление поверх видео ───────────
+ * На телефоне в горизонтальной ориентации шапка и транспорт съедали почти
+ * всю высоту. Здесь видео занимает весь экран, а органы управления лежат
+ * поверх него: сверху — контекст, снизу — транспорт и таймлайн, слева —
+ * панель разметки. Так кадр получает максимум площади, а не остаток. */
+@media (orientation: landscape) and (max-height: 520px) {
+  .editor {
+    position: relative;
+    gap: 0;
+    padding: 0;
+    background: #000;
+  }
+
+  .editor-top {
+    position: absolute;
+    inset: 0 0 auto;
+    z-index: 20;
+    padding: max(6px, env(safe-area-inset-top))
+      max(10px, env(safe-area-inset-right)) 6px
+      max(10px, env(safe-area-inset-left));
+    background: linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0.82),
+      rgba(0, 0, 0, 0)
+    );
+    border: none;
+    border-radius: 0;
+  }
+
+  .editor-context {
+    flex-wrap: nowrap;
+    gap: 6px 10px;
+  }
+
+  .editor-identity {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .pair-source {
+    display: none;
+  }
+
+  .editor-utilities,
+  .editor-global-actions {
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+
+  .editor-warning {
+    max-width: 180px;
+  }
+
+  .editor-top button {
+    min-height: 40px;
+  }
+
+  .video-area {
+    position: absolute;
+    inset: 0;
+    border-radius: 0;
+  }
+
+  .editor-transport {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 28px;
+    z-index: 20;
+    flex-wrap: nowrap;
+    gap: 6px 10px;
+    padding: 4px max(10px, env(safe-area-inset-right)) 4px
+      max(10px, env(safe-area-inset-left));
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0));
+    border: none;
+    border-radius: 0;
+    font-size: 0.85em;
+  }
+
+  .transport-playback {
+    margin-left: auto;
+  }
+
+  .statusbar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    height: 28px;
+    border-radius: 0;
+  }
+
+  .editor-comment {
+    bottom: 76px;
+  }
+
+  /* Панель разметки уходит из потока шапки: плавающая колонка слева. */
+  .editor-workbench {
+    position: fixed;
+    top: 50%;
+    left: max(8px, env(safe-area-inset-left));
+    z-index: 30;
+    display: none;
+    transform: translateY(-50%);
+    padding: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 12px;
+    background: rgba(10, 10, 18, 0.86);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+
+  .help-overlay {
+    padding: 8px;
+  }
+
+  .help-panel {
+    max-height: calc(100dvh - 16px);
+    padding: 12px 16px;
+  }
+}
+
+/* Та же ландшафтная раскладка, но с сенсорной панелью разметки:
+ * сетка 2×4 из квадратных кнопок со значками. */
+@media (orientation: landscape) and (max-height: 520px) and (hover: none) and (pointer: coarse) {
+  .editor-workbench {
+    display: grid;
+    grid-template-columns: repeat(2, 44px);
+    gap: 6px;
+  }
+
+  .fragment-actions {
+    display: contents;
+  }
+
+  .editor-history {
+    display: contents;
   }
 }
 
