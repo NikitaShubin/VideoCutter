@@ -42,6 +42,35 @@ export function App() {
     listPairs().then(setPairs).catch(console.error);
   }, []);
 
+  // Экран живёт в state, но вход в редактор оставляет запись в history:
+  // кнопка «Назад» браузера возвращает к списку, а не выбрасывает из
+  // приложения. popstate — единственный источник правды для перехода назад.
+  const closeEditor = useCallback(() => {
+    setScreen("list");
+    setPairId(null);
+    reload();
+  }, [reload]);
+
+  const openEditor = useCallback((id: string) => {
+    setPairId(id);
+    setScreen("editor");
+    window.history.pushState({ vc: "editor", pairId: id }, "");
+  }, []);
+
+  useEffect(() => {
+    const onPop = (e: PopStateEvent) => {
+      const st = e.state as { vc?: string; pairId?: string } | null;
+      if (st?.vc === "editor" && st.pairId) {
+        setPairId(st.pairId);
+        setScreen("editor");
+      } else {
+        closeEditor();
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [closeEditor]);
+
   // Зеркало списка для тика: слияние лёгкого статуса без лишних рендеров.
   const pairsRef = useRef<VideoPair[]>([]);
   pairsRef.current = pairs;
@@ -108,6 +137,9 @@ export function App() {
     clearAuthToken();
     setGate((g) => ({ ...g, authed: false }));
     setScreen("list");
+    // Выход — это не «назад»: запись редактора больше не должна открываться
+    // кнопкой браузера после повторного входа.
+    window.history.replaceState({ vc: "list" }, "");
   }, []);
 
   // Заливки переживают смену экранов: форма только стартует, строки
@@ -140,8 +172,14 @@ export function App() {
       <CutEditor
         pairId={pairId}
         onBack={() => {
-          setScreen("list");
-          reload(); // после правок обновляем статус-бар и порядок «недавние сверху»
+          // Возврат к списку идёт через history, чтобы не оставлять в ней
+          // «редактор» позади списка. После правок reload обновляет
+          // статус-бар и порядок «недавние сверху».
+          if (window.history.state?.vc === "editor") {
+            window.history.back();
+          } else {
+            closeEditor();
+          }
         }}
       />
     );
@@ -149,10 +187,7 @@ export function App() {
     content = (
       <PairList
         pairs={pairs}
-        onSelect={(id) => {
-          setPairId(id);
-          setScreen("editor");
-        }}
+        onSelect={openEditor}
         onChanged={reload}
         onTick={handleStatusTick}
         uploads={uploads}
