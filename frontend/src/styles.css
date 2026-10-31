@@ -1011,12 +1011,20 @@ select option {
 }
 
 .editor-workbench {
-  display: flex;
+  display: none;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   padding-top: 6px;
   border-top: 1px solid var(--edge);
+}
+
+/* Кнопки-дубли горячих клавиш нужны только там, где нет физической
+ * клавиатуры: на сенсорном экране с coarse-указателем. */
+@media (hover: none) and (pointer: coarse) {
+  .editor-workbench {
+    display: flex;
+  }
 }
 
 /* Видимая панель разметки: главные действия не должны жить только в
@@ -1117,6 +1125,38 @@ select option {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* Направление — два взаимоисключающих сегмента. */
+.menu-segments {
+  display: flex;
+  gap: 6px;
+}
+
+.menu-segments button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1 1 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.menu-segments button:hover {
+  background: var(--btn-hover);
+}
+
+.menu-segments button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--btn-hover);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .menu-slider {
@@ -1395,8 +1435,8 @@ select option {
 
 .transport-playback {
   display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  align-items: stretch;
+  gap: 0;
   margin-left: auto;
 }
 
@@ -1405,7 +1445,22 @@ select option {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-width: 64px;
+  min-width: 44px;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Сплит-кнопка: слева пуск/пауза, справа — направление и скорость. */
+.transport-playback .popover {
+  display: inline-flex;
+}
+
+.transport-playback .popover-trigger {
+  margin-left: -1px;
+  padding: 5px 8px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
   font-variant-numeric: tabular-nums;
 }
 

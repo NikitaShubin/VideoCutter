@@ -17,9 +17,10 @@ import {
 } from "../api";
 import { formatNumber, formatPercent } from "../model/format";
 import { FragmentModel } from "../model/fragmentModel";
+import { DataMenu } from "./DataMenu";
 import { DiagnosticsMenu } from "./DiagnosticsMenu";
-import { ExchangeMenu } from "./ExchangeMenu";
 import { HelpModal } from "./HelpModal";
+import { PlaybackMenu } from "./PlaybackMenu";
 import { Popover } from "./Popover";
 import { ViewMenu } from "./ViewMenu";
 import {
@@ -96,7 +97,7 @@ export function CutEditor({ pairId, onBack }: Props) {
   // Верх редактора: открыто максимум одно меню. Пока оно открыто,
   // глобальные горячие клавиши не срабатывают — иначе «D» в меню
   // «Вид» удалила бы фрагмент, а Escape увёл бы из редактора.
-  type EditorMenu = "view" | "exchange" | "diagnostics" | null;
+  type EditorMenu = "view" | "exchange" | "diagnostics" | "playback" | null;
   const [openMenu, setOpenMenu] = useState<EditorMenu>(null);
   const openMenuRef = useRef<EditorMenu>(null);
   openMenuRef.current = openMenu;
@@ -1168,11 +1169,11 @@ export function CutEditor({ pairId, onBack }: Props) {
                 />
               </Popover>
               <Popover
-                label="Обмен"
+                label="Данные"
                 open={openMenu === "exchange"}
                 onOpenChange={(v) => setOpenMenu(v ? "exchange" : null)}
               >
-                <ExchangeMenu
+                <DataMenu
                   downloading={dlState?.key ?? null}
                   downloadFrac={dlState?.frac ?? null}
                   annBusy={annBusy}
@@ -1432,8 +1433,29 @@ export function CutEditor({ pairId, onBack }: Props) {
                     ? "◁"
                     : "▷"}
               </span>
-              <span className="transport-speed">x{speed}</span>
             </button>
+            <Popover
+              label="Направление и скорость"
+              triggerLabel="Направление и скорость"
+              triggerTitle="Направление и скорость (R, 0–9)"
+              trigger={
+                <>
+                  <span className="transport-speed">x{speed}</span>
+                  <span className="popover-caret" aria-hidden="true">
+                    ▾
+                  </span>
+                </>
+              }
+              open={openMenu === "playback"}
+              onOpenChange={(v) => setOpenMenu(v ? "playback" : null)}
+            >
+              <PlaybackMenu
+                direction={direction}
+                speed={speed}
+                onDirection={setDirection}
+                onSpeed={setSpeed}
+              />
+            </Popover>
             <span className="sr-only" role="status">
               {playing
                 ? direction === -1

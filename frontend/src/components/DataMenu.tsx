@@ -16,8 +16,8 @@ function progressLabel(base: string, frac: number | null): string {
     : `${base} ${formatPercent(Math.round(frac * 100))}`;
 }
 
-/** Обмен разметкой и бэкапами: три файловых действия с пояснениями. */
-export function ExchangeMenu({
+/** Данные: разметка и бэкапы — три файловых действия с пояснениями. */
+export function DataMenu({
   downloading,
   downloadFrac,
   annBusy,

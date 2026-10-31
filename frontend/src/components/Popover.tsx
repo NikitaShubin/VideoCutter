@@ -12,6 +12,12 @@ import { createPortal } from "react-dom";
 interface Props {
   /** Имя меню: подпись кнопки и доступное имя панели. */
   label: string;
+  /** Содержимое кнопки-триггера; по умолчанию — label и каретка. */
+  trigger?: ReactNode;
+  /** Доступное имя кнопки, если trigger — не текст. */
+  triggerLabel?: string;
+  /** Подсказка при наведении на кнопку-триггер. */
+  triggerTitle?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: ReactNode;
@@ -25,7 +31,15 @@ interface Props {
  * закрывает без возврата фокуса. Содержимое монтируется только при
  * открытии: тяжёлые виджеты (опрос кэша) не работают впустую.
  */
-export function Popover({ label, open, onOpenChange, children }: Props) {
+export function Popover({
+  label,
+  trigger,
+  triggerLabel,
+  triggerTitle,
+  open,
+  onOpenChange,
+  children,
+}: Props) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const onOpenChangeRef = useRef(onOpenChange);
@@ -101,12 +115,18 @@ export function Popover({ label, open, onOpenChange, children }: Props) {
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? id : undefined}
+        aria-label={triggerLabel}
+        title={triggerTitle}
         onClick={() => onOpenChangeRef.current(!open)}
       >
-        {label}
-        <span className="popover-caret" aria-hidden="true">
-          ▾
-        </span>
+        {trigger ?? (
+          <>
+            {label}
+            <span className="popover-caret" aria-hidden="true">
+              ▾
+            </span>
+          </>
+        )}
       </button>
       {open &&
         typeof document !== "undefined" &&

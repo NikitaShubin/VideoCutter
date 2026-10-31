@@ -467,6 +467,20 @@ function menuPanel(name: string): HTMLElement | null {
   );
 }
 
+function playButton(host: HTMLElement): HTMLButtonElement {
+  const btn = host.querySelector<HTMLButtonElement>("button.transport-play");
+  if (!btn) throw new Error("кнопка воспроизведения не найдена");
+  return btn;
+}
+
+function playbackSettings(host: HTMLElement): HTMLButtonElement {
+  const btn = host.querySelector<HTMLButtonElement>(
+    '.transport-playback button[aria-label="Направление и скорость"]',
+  );
+  if (!btn) throw new Error("кнопка настроек воспроизведения не найдена");
+  return btn;
+}
+
 function lastSaved(): { start: number; end: number; comment: string }[] {
   const calls = vi.mocked(replaceFragments).mock.calls;
   return calls[calls.length - 1][1] as {
@@ -476,7 +490,7 @@ function lastSaved(): { start: number; end: number; comment: string }[] {
   }[];
 }
 
-describe("видимая панель разметки", () => {
+describe("панель разметки", () => {
   it("все действия фрагмента доступны кнопками", async () => {
     const { host, unmount } = await mountEditor();
     for (const name of [
@@ -544,17 +558,6 @@ describe("смысловые зоны верха редактора", () => {
     expect(topButton(host, "Экспорт")).toBeTruthy();
     expect(host.querySelector('button[aria-label="Справка"]')).toBeTruthy();
     expect(frameInput(host)).toBeTruthy();
-    for (const name of [
-      "Начало",
-      "Конец",
-      "Создать",
-      "Удалить",
-      "Комментарий",
-      "Отменить",
-      "Повторить",
-    ]) {
-      expect(fragmentButton(host, name)).toBeTruthy();
-    }
     unmount();
   });
 
@@ -588,10 +591,10 @@ describe("смысловые зоны верха редактора", () => {
     unmount();
   });
 
-  it("«Обмен» открывает действия с разметкой и бэкапом", async () => {
+  it("«Данные» открывает действия с разметкой и бэкапом", async () => {
     const { host, unmount } = await mountEditor();
-    openMenu(host, "Обмен");
-    const panel = menuPanel("Обмен");
+    openMenu(host, "Данные");
+    const panel = menuPanel("Данные");
     expect(panel).toBeTruthy();
     expect(panel!.textContent).toContain("Скачать разметку");
     expect(panel!.textContent).toContain("Импортировать разметку");
@@ -650,6 +653,72 @@ describe("смысловые зоны верха редактора", () => {
     const warning = host.querySelector(".editor-warning");
     expect(warning?.getAttribute("title")).toContain("не совпадают");
     expect(host.textContent).toContain("не совпадают");
+    unmount();
+  });
+});
+
+describe("управление воспроизведением", () => {
+  it("кнопка скорости открывает направление и скорость", async () => {
+    const { host, unmount } = await mountEditor();
+    const trigger = playbackSettings(host);
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(menuPanel("Направление и скорость")).toBeNull();
+    act(() => {
+      trigger.click();
+    });
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    const panel = menuPanel("Направление и скорость");
+    expect(panel).toBeTruthy();
+    expect(
+      panel!.querySelector('input[aria-label="Скорость воспроизведения"]'),
+    ).toBeTruthy();
+    expect(panel!.textContent).toContain("Вперёд");
+    expect(panel!.textContent).toContain("Назад");
+    unmount();
+  });
+
+  it("«Назад» меняет направление и подпись кнопки", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(playButton(host).getAttribute("aria-label")).toContain(
+      "Воспроизвести вперёд",
+    );
+    act(() => {
+      playbackSettings(host).click();
+    });
+    const back = [
+      ...menuPanel("Направление и скорость")!.querySelectorAll<HTMLButtonElement>(
+        "button",
+      ),
+    ].find((b) => b.textContent?.includes("Назад"))!;
+    act(() => {
+      back.click();
+    });
+    expect(back.getAttribute("aria-pressed")).toBe("true");
+    expect(playButton(host).getAttribute("aria-label")).toContain("назад");
+    unmount();
+  });
+
+  it("скорость из меню задаёт шаг воспроизведения", async () => {
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      FakeImage.issued[0].onload?.();
+    });
+    act(() => {
+      playbackSettings(host).click();
+    });
+    const slider = menuPanel("Направление и скорость")!.querySelector<
+      HTMLInputElement
+    >('input[aria-label="Скорость воспроизведения"]')!;
+    typeInto(slider, "3"); // 2^3 = x8
+    expect(playbackSettings(host).textContent).toContain("x8");
+    act(() => {
+      playbackSettings(host).click(); // закрыть меню: иначе пробел подавлен
+    });
+    tap("Space");
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(frameInput(host).value).toBe("9"); // 0 + 8 → кадр 9
     unmount();
   });
 });
