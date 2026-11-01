@@ -1040,6 +1040,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       }
       return;
     }
+    // Нет фрагментов — экспортировать нечего. Кнопка уже заблокирована,
+    // но E и повторный запуск из списка файлов идут мимо disabled.
+    if ((modelRef.current?.fragments.length ?? 0) === 0) {
+      flash("Нет фрагментов для экспорта", "error");
+      return;
+    }
     setExportingUi(true);
     setExportProgress(0);
     startPolling();
@@ -1146,6 +1152,8 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   }
 
   const sel = modelRef.current?.selectedFrames() ?? 0;
+  const fragmentCount = modelRef.current?.fragments.length ?? 0;
+  const exportDisabled = fragmentCount === 0 && !exporting;
   const markedPct = pair.total_frames > 0 ? (100 * sel) / pair.total_frames : 0;
   const canUndo = (modelRef.current?.histPos ?? 0) > 0;
   const canRedo = modelRef.current
@@ -1274,7 +1282,14 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 type="button"
                 className="toolbar-export"
                 onClick={() => handleExport()}
-                title={exporting ? "Отменить экспорт (E)" : "Экспорт (E)"}
+                disabled={exportDisabled}
+                title={
+                  exporting
+                    ? "Отменить экспорт (E)"
+                    : exportDisabled
+                      ? "Нет фрагментов для экспорта"
+                      : "Экспорт (E)"
+                }
               >
                 {exportProgress !== null && (
                   <span

@@ -7,7 +7,12 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CutEditor } from "./CutEditor";
 import type { VideoPairDetail } from "../types";
-import { getCache, replaceFragments, type CacheState } from "../api";
+import {
+  getCache,
+  replaceFragments,
+  startExport,
+  type CacheState,
+} from "../api";
 
 let resolvePair: (p: VideoPairDetail) => void = () => {};
 let pairDetail: VideoPairDetail;
@@ -606,6 +611,36 @@ describe("панель разметки", () => {
   });
 });
 
+describe("экспорт без фрагментов", () => {
+  it("кнопка заблокирована и объясняет причину", async () => {
+    const { host, unmount } = await mountEditor();
+    const btn = topButton(host, "Экспорт");
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toBe("Нет фрагментов для экспорта");
+    unmount();
+  });
+
+  it("E не запускает экспорт и объясняет причину", async () => {
+    const { host, unmount } = await mountEditor();
+    tap("KeyE");
+    await act(async () => {});
+    expect(vi.mocked(startExport)).not.toHaveBeenCalled();
+    expect(host.querySelector(".flash")?.textContent).toContain(
+      "Нет фрагментов для экспорта",
+    );
+    unmount();
+  });
+
+  it("после создания первого фрагмента кнопка включается", async () => {
+    const { host, unmount } = await mountEditor();
+    clickFragment(host, "Начало");
+    const btn = topButton(host, "Экспорт");
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toBe("Экспорт (E)");
+    unmount();
+  });
+});
+
 describe("смысловые зоны верха редактора", () => {
   it("главные действия видны без раскрытия меню", async () => {
     const { host, unmount } = await mountEditor();
@@ -691,6 +726,10 @@ describe("смысловые зоны верха редактора", () => {
   });
 
   it("Escape закрывает список экспорта и не уводит из редактора", async () => {
+    pairDetail = {
+      ...oneFrame(50, 0),
+      fragments: [{ start: 0, end: 10, comment: "" }],
+    };
     const onBack = vi.fn();
     const { host, unmount } = await mountEditor(onBack);
     await act(async () => {
