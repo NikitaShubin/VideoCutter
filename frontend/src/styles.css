@@ -33,7 +33,7 @@
   --warn: #ffcf7a;
   --r: 10px;
   --r-s: 6px;
-  --page-w: 780px;
+  --page-w: 1100px;
 }
 
 * {
@@ -931,7 +931,9 @@ select option {
 }
 
 .editor.fullscreen .statusbar {
-  border-radius: 0;
+  /* Полноэкранный режим — только кадр: таймлайн не должен отнимать у
+   * изображения нижнюю кромку. */
+  display: none;
 }
 
 /* ─── Верх редактора: контекст, работа, утилиты ─────────────────────── */
@@ -1036,7 +1038,10 @@ select option {
 }
 
 .editor-workbench {
-  display: none;
+  /* Главные действия разметки видны и на десктопе: клавиши — ускоритель,
+   * а не единственный вход. В низком ландшафте панель уходит в рейку
+   * (см. медиазапросы ниже), в полноэкранном режиме шапки нет. */
+  display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
@@ -1110,6 +1115,7 @@ select option {
   .pair-list .pair-open,
   .pair-list input,
   .pair-list select,
+  .pair-list .filters-toggle,
   .tab {
     min-height: 44px;
   }
@@ -2328,7 +2334,7 @@ select option {
     display: flex;
     flex-wrap: wrap;
     gap: 4px 6px;
-    margin: 0 8px;
+    margin: 0 12px;
     color: var(--muted);
     font-size: 0.85em;
   }
@@ -2341,10 +2347,31 @@ select option {
    * между ними остаётся воздух, а не пустая полоса под панелью. */
   .editor-transport {
     order: 6;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
     gap: 4px 8px;
     margin: 0 8px;
     padding: 4px 8px;
     font-size: 0.82em;
+  }
+
+  /* 2×2 вместо переноса playback на вторую строку: на 4:3 длинные номера
+   * кадров раньше растягивали транспорт с 54 до 94 px. */
+  .editor-transport .frame-readout {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .editor-transport .selection-readout {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .editor-transport .transport-playback {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    justify-self: end;
   }
 
   .editor-workbench {
@@ -2402,13 +2429,16 @@ select option {
   }
 }
 
-/* ─── Ландшафт: кадр — главный объект, управление поверх видео ───────────
+/* ─── Ландшафт: кадр — главный объект, управление — в нижней полосе ───────
  * На телефоне в горизонтальной ориентации шапка и транспорт съедали почти
- * всю высоту. Здесь видео занимает весь экран, а органы управления лежат
- * поверх него: сверху — контекст, снизу — транспорт и таймлайн, слева —
- * панель разметки. Так кадр получает максимум площади, а не остаток. */
+ * всю высоту. Здесь кадр занимает всё пространство над нижней полосой
+ * управления, а контекст лежит поверх верхней кромки; слева — панель
+ * разметки. Так кадр получает максимум площади, а не остаток. */
 @media (orientation: landscape) and (max-height: 520px) {
   .editor {
+    /* 28 px таймлайна + 53 px транспорта: кадр заканчивается ровно над
+     * полосой и не прячет нижнюю кромку. */
+    --landscape-band: 81px;
     position: relative;
     gap: 0;
     padding: 0;
@@ -2467,8 +2497,14 @@ select option {
 
   .video-area {
     position: absolute;
-    inset: 0;
+    inset: 0 0 var(--landscape-band) 0;
     border-radius: 0;
+  }
+
+  /* В полноэкранном режиме кадр снова занимает весь экран: нижней полосы
+   * там нет — транспорт и таймлайн скрыты. */
+  .editor.fullscreen .video-area {
+    inset: 0;
   }
 
   .editor-transport {
@@ -2481,8 +2517,9 @@ select option {
     gap: 6px 10px;
     padding: 4px max(10px, env(safe-area-inset-right)) 4px
       max(10px, env(safe-area-inset-left));
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0));
+    background: rgba(10, 10, 18, 0.96);
     border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 0;
     font-size: 0.85em;
   }
@@ -2502,7 +2539,13 @@ select option {
   }
 
   .editor-comment {
-    bottom: 76px;
+    /* Комментарий живёт в нижнем чёрном поле широкого кадра, а не поверх
+     * изображения. На 16:9 поля нет — там он остаётся у нижней кромки. */
+    bottom: 8px;
+  }
+
+  .editor-comment textarea {
+    min-height: 36px;
   }
 
   /* Панель разметки уходит из потока шапки: плавающая колонка слева. */
