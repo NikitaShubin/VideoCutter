@@ -1058,6 +1058,42 @@ select option {
     padding-left: 0;
     border-left: none;
   }
+
+  /* 44×44 — минимальная цель для пальца. Это min-размеры, а не width/
+   * height: плотные кнопки сохраняют свой вид, но получают большую зону
+   * нажатия; широкие текстовые кнопки не сжимаются. */
+  .editor-top button,
+  .editor-transport button,
+  .fullscreen-exit,
+  .help-close,
+  .export-list-close,
+  .flash-close,
+  .menu-action,
+  .menu-direction button,
+  .menu-check,
+  .pair-list .pair-actions .pair-edit-btn,
+  .pair-list .pair-actions .pair-delete {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .pair-list .pair-actions {
+    gap: 8px;
+  }
+
+  .pair-list .pair-open,
+  .pair-list input,
+  .pair-list select,
+  .tab {
+    min-height: 44px;
+  }
+
+  /* Оглавление справки — тоже список целей, а не строк текста. */
+  .help-toc a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
 }
 
 /* Видимая панель разметки: главные действия не должны жить только в
