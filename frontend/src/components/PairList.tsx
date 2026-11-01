@@ -301,6 +301,9 @@ export function PairList({
   const defectTasks = useMemo(() => projectDefects(pairs), [pairs]);
 
   const [query, setQuery] = useState("");
+  // Сортировка и проект — не основные действия: на телефоне они живут
+  // под раскрывашкой, чтобы шапка не съедала пол-экрана до первой задачи.
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const listed =
     visible === null
@@ -954,41 +957,55 @@ export function PairList({
               aria-label="Поиск по имени задачи"
               onChange={(e) => setQuery(e.target.value)}
             />
-            <label className="field">
-              Сортировка{" "}
-              <select
-                value={sortMode}
-                onChange={(e) => {
-                  const v = e.target.value as SortMode;
-                  setSortMode(v);
-                  try {
-                    window.localStorage.setItem(SORT_KEY, v);
-                  } catch {
-                    /* ignore */
-                  }
-                }}
-              >
-                <option value="updated">Недавние</option>
-                <option value="created">Новые</option>
-                <option value="opened">Открытые</option>
-                <option value="name">По имени</option>
-              </select>
-            </label>
-            <label className="field">
-              Проект{" "}
-              <select
-                value={projFilter}
-                onChange={(e) => pickProjectFilter(e.target.value)}
-              >
-                <option value={PROJ_ALL}>Все проекты</option>
-                <option value={PROJ_NONE}>Без проекта</option>
-                {(projects ?? []).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <button
+              type="button"
+              className="btn filters-toggle"
+              aria-expanded={filtersOpen}
+              aria-controls="pair-filters"
+              onClick={() => setFiltersOpen((v) => !v)}
+            >
+              Фильтры
+            </button>
+            <div
+              id="pair-filters"
+              className={filtersOpen ? "filters-fields open" : "filters-fields"}
+            >
+              <label className="field">
+                Сортировка{" "}
+                <select
+                  value={sortMode}
+                  onChange={(e) => {
+                    const v = e.target.value as SortMode;
+                    setSortMode(v);
+                    try {
+                      window.localStorage.setItem(SORT_KEY, v);
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                >
+                  <option value="updated">Недавние</option>
+                  <option value="created">Новые</option>
+                  <option value="opened">Открытые</option>
+                  <option value="name">По имени</option>
+                </select>
+              </label>
+              <label className="field">
+                Проект{" "}
+                <select
+                  value={projFilter}
+                  onChange={(e) => pickProjectFilter(e.target.value)}
+                >
+                  <option value={PROJ_ALL}>Все проекты</option>
+                  <option value={PROJ_NONE}>Без проекта</option>
+                  {(projects ?? []).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           </div>
         )}
         {tab === "tasks" && (
@@ -1266,11 +1283,22 @@ export function PairList({
           listed.length === 0 &&
           uploads.length === 0 && (
             <li className="empty">
-              {query.trim()
-                ? `По запросу «${query.trim()}» ничего не найдено.`
-                : visible !== null && visible.length > 0
-                  ? "В выбранном проекте нет задач."
-                  : "Пока нет задач."}
+              {query.trim() ? (
+                <>
+                  <span>По запросу «{query.trim()}» ничего не найдено.</span>
+                  <button
+                    type="button"
+                    className="btn empty-reset"
+                    onClick={() => setQuery("")}
+                  >
+                    Сбросить поиск
+                  </button>
+                </>
+              ) : visible !== null && visible.length > 0 ? (
+                "В выбранном проекте нет задач."
+              ) : (
+                "Пока нет задач."
+              )}
             </li>
           )}
         {shownPairs.map((p) =>

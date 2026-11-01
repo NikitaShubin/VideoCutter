@@ -292,6 +292,20 @@ select option {
   flex: 1 1 200px;
 }
 
+/* Сортировка и проект — вторичные фильтры: на широком экране видны
+ * сразу, на телефоне прячутся под кнопку «Фильтры». */
+.filters-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.filters-toggle {
+  display: none;
+}
+
 .toolbar-row .field {
   display: inline-flex;
   align-items: center;
@@ -758,6 +772,11 @@ select option {
   color: var(--muted);
   padding: 12px;
   text-align: center;
+}
+
+.pair-list li.empty .empty-reset {
+  display: inline-flex;
+  margin-top: 8px;
 }
 
 /* ─── Битая задача: «мягко-болезненно», без растягивания рамки ───────────── */
@@ -2167,6 +2186,30 @@ select option {
   .toolbar-row .field select {
     flex: 1 1 100%;
     width: 100%;
+  }
+
+  /* Поиск и «Фильтры» делят одну строку: кнопка не отнимает высоту. */
+  .toolbar-row .search {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+  }
+
+  /* Вторичные фильтры не занимают шапку, пока их не раскрыли. */
+  .filters-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+  }
+
+  .filters-fields {
+    display: none;
+    flex: 1 1 100%;
+  }
+
+  .filters-fields.open {
+    display: flex;
   }
 
   .title-actions {

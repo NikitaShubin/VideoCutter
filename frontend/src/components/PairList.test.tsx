@@ -76,6 +76,18 @@ function visibleText(html: string): string {
   return html.replace(/title="[^"]*"/g, "").replace(/aria-label="[^"]*"/g, "");
 }
 
+/** Управляемый input React'а: setter прототипа + событие input. */
+function typeInto(input: HTMLInputElement, text: string): void {
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    setter.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 /** Список в живом DOM (нужны клики: панель задачи открывается по карандашу). */
 function mountList(pairs: VideoPair[]) {
   const host = document.createElement("div");
@@ -379,6 +391,44 @@ describe("семантика страницы", () => {
     expect(projects.getAttribute("aria-selected")).toBe("true");
     expect(tasks.getAttribute("aria-selected")).toBe("false");
     expect(document.activeElement).toBe(projects);
+    unmount();
+  });
+});
+
+describe("фильтры списка", () => {
+  it("свёрнуты по умолчанию и раскрываются кнопкой", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const { host, unmount } = mountList([makePair({ broken: false })]);
+    const toggle = host.querySelector<HTMLButtonElement>(".filters-toggle")!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      host.querySelector(".filters-fields")!.classList.contains("open"),
+    ).toBe(false);
+    act(() => {
+      toggle.click();
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      host.querySelector(".filters-fields")!.classList.contains("open"),
+    ).toBe(true);
+    unmount();
+  });
+
+  it("пустой поиск предлагает сброс и возвращает список", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const { host, unmount } = mountList([makePair({ broken: false })]);
+    const search = host.querySelector<HTMLInputElement>(".search")!;
+    typeInto(search, "zzzz");
+    expect(host.textContent).toContain("По запросу «zzzz» ничего не найдено.");
+    const reset = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent?.includes("Сбросить поиск"),
+    );
+    expect(reset).toBeTruthy();
+    act(() => {
+      reset!.click();
+    });
+    expect(search.value).toBe("");
+    expect(host.querySelector(".pair-open")).toBeTruthy();
     unmount();
   });
 });
