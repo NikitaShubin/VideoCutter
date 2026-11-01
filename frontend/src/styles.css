@@ -159,6 +159,14 @@ input[type="search"] {
   font: inherit;
 }
 
+/* Плейсхолдер — не «выключенный» текст: на тёмном фоне системный серый
+ * (#757575) даёт 4.0:1. var(--muted) — 6.6:1. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
 /* Нативные select: тот же стиль, что у кнопок (без правил браузер
    светит системной темой). */
 select {
@@ -1542,8 +1550,10 @@ select option {
   font-variant-numeric: tabular-nums;
 }
 
+/* На фоне кнопки (--btn) --muted даёт 4.0:1 — для скорости этого мало:
+ * #c8c8dc даёт 6.7:1 и остаётся спокойнее основного текста. */
 .transport-speed {
-  color: var(--muted);
+  color: #c8c8dc;
 }
 
 /* Поле ввода номера кадра: ширина задаётся в JSX (ch), поэтому
@@ -1837,7 +1847,8 @@ select option {
 
 .help-header h2 {
   margin: 0;
-  font-size: 1.15em;
+  /* 24 px: ступень к h3 (19.2 px) — 1.25, к тексту — заметная. */
+  font-size: 1.5rem;
 }
 
 .help-close {
@@ -1885,13 +1896,16 @@ select option {
   padding-bottom: 4px;
   border-bottom: 1px solid var(--edge);
   color: var(--accent);
-  font-size: 1em;
+  /* 19.2 px против 16 px текста: разделы читаются как разделы. */
+  font-size: 1.2rem;
   scroll-margin-top: 8px;
 }
 
 .help-section p {
   margin: 6px 0;
   color: #c0c0d0;
+  /* Не оставляем одно слово на последней строке абзаца. */
+  text-wrap: pretty;
 }
 
 .help-section b {
