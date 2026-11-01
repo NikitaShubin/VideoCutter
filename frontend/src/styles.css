@@ -2343,9 +2343,11 @@ select option {
     flex: 1 1 auto;
   }
 
+  /* В портрете есть вертикальный запас: отдаём его таймлайну — по нему
+   * проще попадать пальцем и видеть границы фрагментов. */
   .statusbar {
     order: 3;
-    height: 32px;
+    height: 64px;
     border-radius: 0;
   }
 
@@ -2369,15 +2371,16 @@ select option {
     color: var(--text);
   }
 
-  /* Транспорт держится у таймлайна, а панель разметки прижимается к низу:
-   * между ними остаётся воздух, а не пустая полоса под панелью. */
+  /* Нижний кластер: разметка над транспортом, транспорт — у самого
+   * большого пальца. Свободный запас остаётся выше кластера, между
+   * кадром и управлением, а не внутри него. */
   .editor-transport {
-    order: 6;
+    order: 7;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 4px 8px;
-    margin: 0 8px;
+    margin: 0 8px 8px;
     padding: 4px 8px;
     font-size: 0.82em;
   }
@@ -2401,8 +2404,8 @@ select option {
   }
 
   .editor-workbench {
-    order: 7;
-    margin: auto 8px 8px;
+    order: 6;
+    margin: auto 8px 6px;
   }
 }
 
