@@ -897,6 +897,9 @@ select option {
 }
 
 .editor.fullscreen .video-area {
+  /* Портретная раскладка задаёт пропорции через --frame-aspect; в полном
+   * экране кадр обязан заполнить экран, а не диктовать высоту. */
+  aspect-ratio: auto;
   border-radius: 0;
 }
 
@@ -2137,7 +2140,16 @@ select option {
   .video-area {
     order: 2;
     flex: 0 0 auto;
+    /* Только в портрете: на десктопе и в ландшафте высоту области задаёт
+     * раскладка, а пропорции кадра — object-fit. */
+    aspect-ratio: var(--frame-aspect);
     border-radius: 0;
+  }
+
+  /* В полноэкранном портрете кадр занимает весь экран, как и на десктопе:
+   * сжатие до пропорций здесь только вернуло бы чёрные поля. */
+  .editor.fullscreen .video-area {
+    flex: 1 1 auto;
   }
 
   .statusbar {

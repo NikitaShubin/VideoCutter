@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type MutableRefObject,
 } from "react";
 import {
@@ -1159,8 +1160,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       : ""
   }`;
   // Пропорции кадра: в портрете область видео сжимается до них, чтобы
-  // чёрные поля не съедали половину экрана. На десктопе высоту задаёт
-  // flex, поэтому aspect-ratio не мешает.
+  // чёрные поля не съедали половину экрана. Передаём их CSS-переменной,
+  // а не инлайновым aspect-ratio: инлайн перебивал бы `auto` в ландшафте
+  // и полноэкранном режиме, где высоту задаёт раскладка.
   const frameAspect =
     pair.width > 0 && pair.height > 0
       ? `${pair.width} / ${pair.height}`
@@ -1399,7 +1401,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         </header>
       )}
 
-      <div className="video-area" style={{ aspectRatio: frameAspect }}>
+      <div
+        className="video-area"
+        style={{ "--frame-aspect": frameAspect } as CSSProperties}
+      >
         <img
           ref={imageRef}
           alt={`Кадр ${formatNumber(position + 1)} из ${formatNumber(pair.total_frames)}`}
