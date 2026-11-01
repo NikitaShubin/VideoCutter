@@ -30,6 +30,7 @@ import { FragmentIcon } from "./FragmentIcon";
 import { HelpModal } from "./HelpModal";
 import { PlaybackMenu } from "./PlaybackMenu";
 import { Popover } from "./Popover";
+import { TimelineLegend } from "./TimelineLegend";
 import { ViewMenu } from "./ViewMenu";
 import {
   FrameScheduler,
@@ -1367,7 +1368,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 aria-label="Комментарий к фрагменту"
               >
                 <FragmentIcon name="comment" />
-                <span className="fragment-action-text">Комментарий</span>
+                <span className="fragment-action-text">
+                  <span className="fragment-action-long">Комментарий</span>
+                  <span className="fragment-action-short">Коммент.</span>
+                </span>
                 <kbd>I</kbd>
               </button>
               <div
@@ -1631,6 +1635,8 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
           seekTo(timelineFrame(pixel, canvas.width, p.totalFrames));
         }}
       />
+
+      {!isFullscreen && <TimelineLegend className="editor-legend" />}
 
       {message && (
         <div

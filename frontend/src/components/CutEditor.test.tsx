@@ -935,6 +935,16 @@ function keyOn(el: HTMLElement, key: string): KeyboardEvent {
 }
 
 describe("таймлайн редактора", () => {
+  it("рядом свёрнутая легенда, объясняющая цвета", async () => {
+    const { host, unmount } = await mountEditor();
+    const legend = host.querySelector<HTMLDetailsElement>(".editor-legend");
+    expect(legend).toBeTruthy();
+    expect(legend?.open).toBe(false);
+    expect(legend?.textContent).toContain("Легенда таймлайна");
+    expect(legend?.textContent).toContain("фрагмент с комментарием");
+    unmount();
+  });
+
   it("фокусируемый слайдер: минимум, максимум и текущий кадр", async () => {
     const { host, unmount } = await mountEditor();
     const tl = statusbar(host);

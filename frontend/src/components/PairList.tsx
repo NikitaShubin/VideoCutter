@@ -43,6 +43,7 @@ import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
 import { formatPercent } from "../model/format";
 import { pluralCount } from "../model/plural";
 import { StatusbarPreview } from "./StatusbarPreview";
+import { TimelineLegend } from "./TimelineLegend";
 import { PairRowFrame } from "./PairRowFrame";
 import { RoleField } from "./RoleFields";
 import { Hint } from "./Hint";
@@ -988,6 +989,11 @@ export function PairList({
                 ))}
               </select>
             </label>
+          </div>
+        )}
+        {tab === "tasks" && (
+          <div className="list-legend-row">
+            <TimelineLegend />
           </div>
         )}
       </div>

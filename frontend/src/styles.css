@@ -1070,7 +1070,8 @@ select option {
   .menu-direction button,
   .menu-check,
   .pair-list .pair-actions .pair-edit-btn,
-  .pair-list .pair-actions .pair-delete {
+  .pair-list .pair-actions .pair-delete,
+  .timeline-legend summary {
     min-width: 44px;
     min-height: 44px;
   }
@@ -1120,6 +1121,11 @@ select option {
   flex: 0 0 auto;
   width: 18px;
   height: 18px;
+}
+
+/* Короткая подпись нужна только в узкой ландшафтной рейке. */
+.fragment-action-short {
+  display: none;
 }
 
 .fragment-actions button.fragment-create {
@@ -1972,6 +1978,102 @@ select option {
   border-radius: 3px;
 }
 
+/* ─── Легенда таймлайна: смысл цветов на месте ─────────────────────────────
+ * Свёрнутая строка рядом с полосой: раскрывается по нажатию, в закрытом
+ * виде занимает одну строку. Цвета дублируются словами — это не цвет-only
+ * подсказка. */
+.timeline-legend {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.timeline-legend summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.timeline-legend summary::-webkit-details-marker {
+  display: none;
+}
+
+.timeline-legend summary::before {
+  content: "▸";
+  margin-right: 6px;
+  font-size: 0.9em;
+}
+
+.timeline-legend[open] summary::before {
+  content: "▾";
+}
+
+.timeline-legend summary:hover,
+.timeline-legend summary:focus-visible {
+  color: var(--text);
+}
+
+/* Свой список: сбрасываем стили списка задач (он тоже ul). */
+.timeline-legend ul {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 2px 0 4px;
+  padding: 0;
+  list-style: none;
+}
+
+.timeline-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.legend-swatch {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 2px;
+}
+
+.legend-free {
+  background: #00ff00;
+}
+
+.legend-fragment {
+  background: #ff0000;
+}
+
+.legend-comment {
+  background: #ff8c00;
+}
+
+.legend-viewed {
+  background: #008000;
+}
+
+.legend-selected {
+  background: linear-gradient(90deg, #00ffff 50%, #ff00ff 50%);
+}
+
+.legend-current {
+  width: 3px;
+  background: #ffffff;
+}
+
+.list-legend-row {
+  margin-top: 4px;
+}
+
+.editor-legend {
+  margin: 0 2px;
+}
+
 /* ─── Экран входа (входной фильтр-токен) ─────────────────────────────────── */
 
 .login-wrap {
@@ -2158,8 +2260,14 @@ select option {
     border-radius: 0;
   }
 
-  .rotate-hint {
+  /* Легенда — сразу под таймлайном, к которому относится. */
+  .editor-legend {
     order: 4;
+    margin: 0 8px;
+  }
+
+  .rotate-hint {
+    order: 5;
     display: flex;
     flex-wrap: wrap;
     gap: 4px 6px;
@@ -2175,7 +2283,7 @@ select option {
   /* Транспорт держится у таймлайна, а панель разметки прижимается к низу:
    * между ними остаётся воздух, а не пустая полоса под панелью. */
   .editor-transport {
-    order: 5;
+    order: 6;
     gap: 4px 8px;
     margin: 0 8px;
     padding: 4px 8px;
@@ -2183,7 +2291,7 @@ select option {
   }
 
   .editor-workbench {
-    order: 6;
+    order: 7;
     margin: auto 8px 8px;
   }
 }
@@ -2248,6 +2356,12 @@ select option {
     gap: 0;
     padding: 0;
     background: #000;
+  }
+
+  /* В фокус-режиме легенда отнимала бы высоту у кадра; она остаётся в
+   * списке и в портретном редакторе. */
+  .editor-legend {
+    display: none;
   }
 
   .editor-top {
@@ -2363,19 +2477,19 @@ select option {
 }
 
 /* Та же ландшафтная раскладка, но с сенсорной панелью разметки:
- * сетка 2×4 из квадратных кнопок со значками. Панель — левая рейка вне
- * кадра: видео начинается правее неё, поэтому кнопки не закрывают
- * изображение даже на широком кадре. */
+ * сетка 2×4 из кнопок «значок + подпись». Подписи снимают запоминание
+ * иконок. Панель — левая рейка вне кадра: видео начинается правее неё,
+ * поэтому кнопки не закрывают изображение даже на широком кадре. */
 @media (orientation: landscape) and (max-height: 520px) and (hover: none) and (pointer: coarse) {
   .editor {
     --workbench-left: max(8px, env(safe-area-inset-left));
-    /* 2×44 + gap 6 + padding 12 + border 2. */
-    --workbench-w: 108px;
+    /* 2×60 + gap 6 + padding 12 + border 2. */
+    --workbench-w: 140px;
   }
 
   .editor-workbench {
     display: grid;
-    grid-template-columns: repeat(2, 44px);
+    grid-template-columns: repeat(2, 60px);
     gap: 6px;
   }
 
@@ -2390,40 +2504,67 @@ select option {
   .editor-history {
     display: contents;
   }
+
+  /* Кнопка — колонка «значок + подпись», 60×46: подпись влезает в одну
+   * строку, а рейка 2×4 не выходит за транспорт даже на 360 px высоты. */
+  .fragment-actions button,
+  .editor-history button {
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    min-width: 0;
+    height: 46px;
+    padding: 3px 2px;
+    white-space: normal;
+  }
+
+  .fragment-action-text {
+    display: block;
+    font-size: 0.62em;
+    line-height: 1.05;
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+
+  .fragment-action-long {
+    display: none;
+  }
+
+  .fragment-action-short {
+    display: inline;
+  }
 }
 
-/* Совсем низкий ландшафт (высоту съедает браузерная панель): колонка
- * 2×4 не помещается между шапкой и транспортом. Раскладываем те же
- * кнопки в 4×2 — панель ниже и оставляет кадру больше высоты. */
-@media (orientation: landscape) and (max-height: 340px) and (hover: none) and (pointer: coarse) {
+/* Низкий ландшафт (высоту съедает браузерная панель): колонка 2×4 не
+ * помещается между шапкой и транспортом. Раскладываем те же кнопки в
+ * 4×2 — панель ниже и оставляет кадру больше высоты. */
+@media (orientation: landscape) and (max-height: 360px) and (hover: none) and (pointer: coarse) {
   .editor {
-    /* 4×44 + gap 18 + padding 12 + border 2. */
-    --workbench-w: 208px;
+    /* 4×60 + gap 18 + padding 12 + border 2. */
+    --workbench-w: 272px;
   }
 
   .editor-workbench {
-    grid-template-columns: repeat(4, 44px);
+    grid-template-columns: repeat(4, 60px);
   }
 }
 
-/* Ещё ниже (около 300 px): 4×2 с кнопками 44 px уже не влезает —
- * аккуратно уменьшаем кнопки до 40 px. */
+/* Совсем низкий ландшафт (около 300 px): 4×2 по 60 px съедает слишком
+ * много ширины — уменьшаем колонки до 52 px, сохраняя цели ≥ 44 px. */
 @media (orientation: landscape) and (max-height: 300px) and (hover: none) and (pointer: coarse) {
   .editor {
-    /* 4×40 + gap 12 + padding 8 + border 2. */
-    --workbench-w: 182px;
+    /* 4×52 + gap 12 + padding 8 + border 2. */
+    --workbench-w: 230px;
   }
 
   .editor-workbench {
-    grid-template-columns: repeat(4, 40px);
+    grid-template-columns: repeat(4, 52px);
     gap: 4px;
     padding: 4px;
   }
 
-  .fragment-actions button {
-    width: 40px;
-    height: 40px;
-    min-width: 40px;
+  .fragment-action-text {
+    font-size: 0.56em;
   }
 
   .fragment-icon {

@@ -344,6 +344,13 @@ describe("превью таймлайна в списке", () => {
     expect(html).toContain("зелёный — свободные кадры");
     expect(html).toContain("красный — фрагмент");
   });
+
+  it("держит свёрнутую легенду цветов рядом со списком", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const html = renderList([makePair({ broken: false })]);
+    expect(html).toContain("Легенда таймлайна");
+    expect(html).toContain("фрагмент с комментарием");
+  });
 });
 
 describe("семантика страницы", () => {
