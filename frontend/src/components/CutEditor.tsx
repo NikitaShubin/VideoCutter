@@ -1259,8 +1259,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
           className="fullscreen-exit"
           onClick={toggleFullscreen}
           title="Выйти из полноэкранного режима (Esc)"
+          aria-label="Выйти из полноэкранного режима"
         >
-          Выйти (Esc)
+          <span aria-hidden="true">✕</span>
+          <span className="sr-only">Выйти (Esc)</span>
         </button>
       )}
       {!isFullscreen && (

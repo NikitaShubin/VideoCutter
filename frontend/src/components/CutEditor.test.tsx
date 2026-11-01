@@ -1071,6 +1071,23 @@ describe("полноэкранный режим", () => {
     unmount();
   });
 
+  it("кнопка выхода компактна и названа словами", async () => {
+    const { host, unmount } = await mountEditor();
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => host.querySelector(".editor"),
+    });
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+    const exit = host.querySelector<HTMLButtonElement>(".fullscreen-exit")!;
+    expect(exit.getAttribute("aria-label")).toBe(
+      "Выйти из полноэкранного режима",
+    );
+    expect(exit.textContent).toContain("Выйти");
+    unmount();
+  });
+
   it("вход в полноэкранный режим фокусирует кнопку выхода", async () => {
     const { host, unmount } = await mountEditor();
     Object.defineProperty(document, "fullscreenElement", {

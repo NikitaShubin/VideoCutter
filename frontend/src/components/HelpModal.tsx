@@ -359,7 +359,7 @@ export function HelpModal({ open, onClose }: Props) {
         <div className="help-section">
           <h3 id="help-timeline">Таймлайн</h3>
           <div className="help-legend">
-            <span><i className="help-swatch" style={{ background: "#00ff00" }} /> фон — вся последовательность кадров</span>
+            <span><i className="help-swatch" style={{ background: "var(--tl-green)" }} /> фон — вся последовательность кадров</span>
             <span><i className="help-swatch" style={{ background: "#0077ff" }} /> синий фон — отправка файла</span>
             <span><i className="help-swatch" style={{ background: "#00bebe" }} /> бирюза — приём сервером (ложится поверх синего)</span>
             <span><i className="help-swatch" style={{ background: "#8b5cf6" }} /> фиолет — проверка/индексация поверх предыдущего (не разметка)</span>

@@ -46,8 +46,13 @@ export interface StatusbarState {
 
 // Цвета палитры: различается только фон (остаток затемняется сам,
 // маркер белый во всех). Фрагментов вне timeline-режима не бывает.
+//
+// Свободные кадры приглушены: красный и оранжевый — сигналы разметки —
+// должны оставаться единственными насыщенными цветами. Токен совпадает
+// с --tl-green в styles.css и легендой/справкой.
+export const TIMELINE_FREE_FILL = "#2f8f4e";
 const SCHEME_BG: Record<StatusbarScheme, string> = {
-  timeline: "#00ff00",
+  timeline: TIMELINE_FREE_FILL,
   upload: "#0077ff",
   receipt: "#00bebe",
   indexing: "#8b5cf6",

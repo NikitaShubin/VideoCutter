@@ -305,6 +305,20 @@ export function PairList({
   // Сортировка и проект — не основные действия: на телефоне они живут
   // под раскрывашкой, чтобы шапка не съедала пол-экрана до первой задачи.
   const [filtersOpen, setFiltersOpen] = useState(false);
+  // Свёрнутая кнопка «Фильтры» обязана показывать, что фильтр активен:
+  // иначе пустой список выглядит поломкой, а причина спрятана.
+  const activeFilterCount =
+    (sortMode === "updated" ? 0 : 1) + (projFilter === PROJ_ALL ? 0 : 1);
+  const filtersActive = activeFilterCount > 0;
+  const resetFilters = () => {
+    setSortMode("updated");
+    try {
+      window.localStorage.setItem(SORT_KEY, "updated");
+    } catch {
+      /* ignore */
+    }
+    pickProjectFilter(PROJ_ALL);
+  };
   // На телефоне постоянные ✎/🗑 отнимают четверть ширины строки. Там они
   // живут в одном меню «⋯»; на десктопе остаются отдельными кнопками.
   const [rowMenu, setRowMenu] = useState<string | null>(null);
@@ -957,7 +971,7 @@ export function PairList({
               className="search"
               type="search"
               value={query}
-              placeholder="Поиск по имени задачи…"
+              placeholder="Поиск задач…"
               aria-label="Поиск по имени задачи"
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -966,9 +980,19 @@ export function PairList({
               className="btn filters-toggle"
               aria-expanded={filtersOpen}
               aria-controls="pair-filters"
+              aria-label={
+                filtersActive
+                  ? `Фильтры, активны: ${activeFilterCount}`
+                  : "Фильтры"
+              }
               onClick={() => setFiltersOpen((v) => !v)}
             >
               Фильтры
+              {filtersActive && (
+                <span className="filters-badge" aria-hidden="true">
+                  {activeFilterCount}
+                </span>
+              )}
             </button>
             <div
               id="pair-filters"
@@ -1009,6 +1033,15 @@ export function PairList({
                   ))}
                 </select>
               </label>
+              {filtersActive && (
+                <button
+                  type="button"
+                  className="btn filters-reset"
+                  onClick={resetFilters}
+                >
+                  Сбросить фильтры
+                </button>
+              )}
             </div>
           </div>
         )}

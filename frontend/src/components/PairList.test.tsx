@@ -470,6 +470,41 @@ describe("фильтры списка", () => {
     unmount();
   });
 
+  it("активные фильтры видны на свёрнутой кнопке", () => {
+    window.localStorage.setItem("vc-project", "__none__");
+    window.localStorage.setItem("vc-sort", "name");
+    const { host, unmount } = mountList([makePair({ broken: false })]);
+    const toggle = host.querySelector<HTMLButtonElement>(".filters-toggle")!;
+    expect(toggle.getAttribute("aria-label")).toContain("активны");
+    expect(toggle.querySelector(".filters-badge")?.textContent).toBe("2");
+    unmount();
+  });
+
+  it("сброс фильтров возвращает задачи и убирает индикатор", () => {
+    window.localStorage.setItem("vc-project", "__none__");
+    window.localStorage.setItem("vc-sort", "name");
+    const { host, unmount } = mountList([
+      makePair({ broken: false, project_id: "p1" }),
+    ]);
+    expect(host.querySelector(".pair-open")).toBeNull();
+    const toggle = host.querySelector<HTMLButtonElement>(".filters-toggle")!;
+    act(() => {
+      toggle.click();
+    });
+    const reset = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent?.includes("Сбросить фильтры"),
+    )!;
+    act(() => {
+      reset.click();
+    });
+    expect(host.querySelector(".pair-open")).toBeTruthy();
+    expect(toggle.getAttribute("aria-label")).toBe("Фильтры");
+    expect(toggle.querySelector(".filters-badge")).toBeNull();
+    expect(host.querySelectorAll<HTMLSelectElement>("#pair-filters select")[0].value).toBe("updated");
+    expect(host.querySelectorAll<HTMLSelectElement>("#pair-filters select")[1].value).toBe("__all__");
+    unmount();
+  });
+
   it("пустой поиск предлагает сброс и возвращает список", () => {
     window.localStorage.setItem("vc-tab", "tasks");
     const { host, unmount } = mountList([makePair({ broken: false })]);
