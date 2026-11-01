@@ -35,6 +35,19 @@ vi.mock("../api", async (importOriginal) => {
     ),
     setPairSettings: () => Promise.resolve().then(() => undefined),
     replaceFragments: vi.fn(() => Promise.resolve()),
+    startExport: vi.fn(() =>
+      Promise.resolve({
+        state: "done" as const,
+        files: [
+          {
+            index: 0,
+            filename: "frag_0001.mp4",
+            url: "/export/frag_0001.mp4",
+          },
+        ],
+      }),
+    ),
+    getExportStatus: vi.fn(() => Promise.resolve({ state: "idle" as const })),
   };
 });
 
@@ -635,6 +648,49 @@ describe("смысловые зоны верха редактора", () => {
     expect(
       menuPanel("Диагностика")!.querySelector('button[aria-label^="GOP-кэш"]'),
     ).toBeTruthy();
+    unmount();
+  });
+
+  it("Escape закрывает справку и не уводит из редактора", async () => {
+    const onBack = vi.fn();
+    const { host, unmount } = await mountEditor(onBack);
+    act(() => {
+      host.querySelector<HTMLButtonElement>('button[aria-label="Справка"]')!.click();
+    });
+    expect(host.querySelector(".help-panel")).toBeTruthy();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(host.querySelector(".help-panel")).toBeNull();
+    expect(onBack).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("Escape закрывает список экспорта и не уводит из редактора", async () => {
+    const onBack = vi.fn();
+    const { host, unmount } = await mountEditor(onBack);
+    await act(async () => {
+      topButton(host, "Экспорт").click();
+    });
+    await act(async () => {});
+    expect(host.querySelector(".export-list")).toBeTruthy();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(host.querySelector(".export-list")).toBeNull();
+    expect(onBack).not.toHaveBeenCalled();
     unmount();
   });
 

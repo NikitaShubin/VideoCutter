@@ -14,7 +14,7 @@ import {
   setUnauthorizedHandler,
 } from "./api";
 import { PairList } from "./components/PairList";
-import { CutEditor } from "./components/CutEditor";
+import { CutEditor, type BackGuard } from "./components/CutEditor";
 import { LoginScreen } from "./Login";
 import { useUploadManager } from "./model/uploads";
 import type { VideoPair } from "./types";
@@ -45,6 +45,25 @@ export function App() {
   // Экран живёт в state, но вход в редактор оставляет запись в history:
   // кнопка «Назад» браузера возвращает к списку, а не выбрасывает из
   // приложения. popstate — единственный источник правды для перехода назад.
+  // Свежие screen/pairId нужны обработчику popstate без пересоздания
+  // подписки на каждое изменение.
+  const screenRef = useRef<Screen>("list");
+  screenRef.current = screen;
+  const pairIdRef = useRef<string | null>(null);
+  pairIdRef.current = pairId;
+  // Верхний оверлей редактора (справка, меню, экспорт, комментарий).
+  const backGuardRef = useRef<BackGuard | null>(null);
+
+  // Перезагрузка в редакторе оставляет в history «редактор», хотя экран
+  // начинает со списка. Нормализуем запись, иначе первый «Назад» из
+  // списка выглядит как переход в редактор.
+  useEffect(() => {
+    const st = window.history.state as { vc?: string } | null;
+    if (st?.vc !== "list") {
+      window.history.replaceState({ vc: "list" }, "");
+    }
+  }, []);
+
   const closeEditor = useCallback(() => {
     setScreen("list");
     setPairId(null);
@@ -54,12 +73,31 @@ export function App() {
   const openEditor = useCallback((id: string) => {
     setPairId(id);
     setScreen("editor");
-    window.history.pushState({ vc: "editor", pairId: id }, "");
+    const st = window.history.state as { vc?: string } | null;
+    if (st?.vc === "editor") {
+      // Уже в редакторе: не плодим записи, иначе «Назад» будет
+      // перебирать задачи вместо выхода к списку.
+      window.history.replaceState({ vc: "editor", pairId: id }, "");
+    } else {
+      window.history.pushState({ vc: "editor", pairId: id }, "");
+    }
   }, []);
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
       const st = e.state as { vc?: string; pairId?: string } | null;
+      // Уходим из редактора, но открыт оверлей — закрываем его и
+      // возвращаем запись редактора, чтобы следующий «Назад» уже вышел
+      // к списку.
+      if (screenRef.current === "editor" && st?.vc !== "editor") {
+        if (backGuardRef.current?.()) {
+          window.history.pushState(
+            { vc: "editor", pairId: pairIdRef.current },
+            "",
+          );
+          return;
+        }
+      }
       if (st?.vc === "editor" && st.pairId) {
         setPairId(st.pairId);
         setScreen("editor");
@@ -171,6 +209,7 @@ export function App() {
     content = (
       <CutEditor
         pairId={pairId}
+        backGuardRef={backGuardRef}
         onBack={() => {
           // Возврат к списку идёт через history, чтобы не оставлять в ней
           // «редактор» позади списка. После правок reload обновляет

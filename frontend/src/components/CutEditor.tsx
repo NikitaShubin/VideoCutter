@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import {
   annotationsUrl,
   cancelExport,
@@ -40,12 +46,17 @@ import { type ExportItem, type ExportStatus, type VideoPairDetail } from "../typ
 const STATUS_W = 800;
 const STATUS_H = 36;
 
+/** Закрывает верхний оверлей редактора. true — «назад» обработан. */
+export type BackGuard = () => boolean;
+
 interface Props {
   pairId: string;
   onBack: () => void;
+  /** Общий с App обработчик системной кнопки «Назад». */
+  backGuardRef?: MutableRefObject<BackGuard | null>;
 }
 
-export function CutEditor({ pairId, onBack }: Props) {
+export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [pair, setPair] = useState<VideoPairDetail | null>(null);
   const [position, setPosition] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -55,6 +66,8 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [preserveAspect, setPreserveAspect] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [exportItems, setExportItems] = useState<ExportItem[] | null>(null);
+  const exportItemsRef = useRef<ExportItem[] | null>(null);
+  exportItemsRef.current = exportItems;
   const [waitingIndex, setWaitingIndex] = useState(false);
   const [waitPct, setWaitPct] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -102,6 +115,41 @@ export function CutEditor({ pairId, onBack }: Props) {
   const [openMenu, setOpenMenu] = useState<EditorMenu>(null);
   const openMenuRef = useRef<EditorMenu>(null);
   openMenuRef.current = openMenu;
+
+  // Системная «Назад» (Android/браузер) сначала закрывает верхний оверлей:
+  // справку, меню, список экспорта или комментарий. Только потом App
+  // возвращает к списку задач.
+  useEffect(() => {
+    if (!backGuardRef) return;
+    backGuardRef.current = () => {
+      if (helpOpen) {
+        setHelpOpen(false);
+        return true;
+      }
+      if (openMenu) {
+        setOpenMenu(null);
+        return true;
+      }
+      if (exportItems) {
+        setExportItems(null);
+        return true;
+      }
+      if (editingComment) {
+        setEditingComment(false);
+        return true;
+      }
+      if (document.fullscreenElement) {
+        if (typeof document.exitFullscreen === "function") {
+          document.exitFullscreen().catch(() => {});
+        }
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      backGuardRef.current = null;
+    };
+  }, [backGuardRef, helpOpen, openMenu, exportItems, editingComment]);
 
   // Состояние экспорта дублируем в ref: keydown-замыкание несвежее
   // (exporting нет в deps эффекта), а повторный запуск/отмена идут через E.
@@ -885,7 +933,12 @@ export function CutEditor({ pairId, onBack }: Props) {
       } else if (is("KeyE")) {
         handleExport();
       } else if (is("Escape") || is("KeyQ")) {
-        if (!document.fullscreenElement) handleBack();
+        if (exportItemsRef.current) {
+          e.preventDefault();
+          setExportItems(null);
+        } else if (!document.fullscreenElement) {
+          handleBack();
+        }
       }
     };
     window.addEventListener("keydown", onKey);

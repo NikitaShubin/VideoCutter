@@ -145,6 +145,45 @@ describe("кнопка «Назад» браузера", () => {
     unmount();
   });
 
+  it("назад при открытой справке закрывает её, а не редактор", async () => {
+    const { host, unmount } = await mountApp();
+    act(() => {
+      host.querySelector<HTMLButtonElement>("button.pair-open")!.click();
+    });
+    await flush();
+    act(() => {
+      host.querySelector<HTMLButtonElement>('button[aria-label="Справка"]')!.click();
+    });
+    expect(host.querySelector(".help-panel")).not.toBeNull();
+    act(() => {
+      window.dispatchEvent(
+        new PopStateEvent("popstate", { state: { vc: "list" } }),
+      );
+    });
+    await flush();
+    expect(host.querySelector(".help-panel")).toBeNull();
+    expect(host.querySelector(".editor")).not.toBeNull();
+    expect(window.history.state).toEqual({
+      vc: "editor",
+      pairId: "ws-test",
+    });
+    act(() => {
+      window.dispatchEvent(
+        new PopStateEvent("popstate", { state: { vc: "list" } }),
+      );
+    });
+    await flush();
+    expect(host.querySelector(".pair-list")).not.toBeNull();
+    unmount();
+  });
+
+  it("после перезагрузки в редакторе история начинается со списка", async () => {
+    window.history.replaceState({ vc: "editor", pairId: "ws-test" }, "");
+    const { unmount } = await mountApp();
+    expect(window.history.state).toEqual({ vc: "list" });
+    unmount();
+  });
+
   it("popstate со списком возвращает к списку", async () => {
     const { host, unmount } = await mountApp();
     act(() => {
