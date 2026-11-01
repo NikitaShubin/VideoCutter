@@ -1219,6 +1219,7 @@ export function PairList({
                 <StatusbarPreview
                   className="pair-bg"
                   progress={layers}
+                  title="Прогресс создания задачи"
                 />
               }
               actions={
@@ -1347,6 +1348,7 @@ export function PairList({
               >
                 <StatusbarPreview
                   className="pair-bg"
+                  title="Таймлайн задачи: зелёный — свободные кадры, красный — фрагмент, оранжевый — фрагмент с комментарием"
                   totalFrames={p.total_frames}
                   fragments={p.fragments}
                   position={p.position}

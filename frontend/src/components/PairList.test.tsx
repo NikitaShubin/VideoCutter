@@ -335,6 +335,15 @@ describe("превью таймлайна в списке", () => {
     expect(html).toContain('class="pair-bg"');
     expect(html).toContain('aria-hidden="true"');
   });
+
+  it("подсказывает, что означают цвета полосы", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const html = renderList([
+      makePair({ broken: false, total_frames: 100, fragments: [{ start: 1, end: 2, comment: "" }] }),
+    ]);
+    expect(html).toContain("зелёный — свободные кадры");
+    expect(html).toContain("красный — фрагмент");
+  });
 });
 
 describe("семантика страницы", () => {

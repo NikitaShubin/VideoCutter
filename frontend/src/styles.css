@@ -481,7 +481,7 @@ select option {
   text-align: left;
   border: 1px solid var(--line);
   border-radius: var(--r-s);
-  background: transparent;
+  background: var(--panel-2);
   color: var(--text);
   cursor: pointer;
   font: inherit;
@@ -491,32 +491,27 @@ select option {
   cursor: default;
 }
 
+/* Таймлайн — тонкая полоса по нижнему краю, а не фон всей строки.
+ * Текст живёт на нейтральной панели и читается без затемнения; цвет
+ * остаётся только там, где он что-то значит: свободно / фрагмент /
+ * комментарий / прогресс. */
 .pair-list .pair-open .pair-bg {
   position: absolute;
-  inset: 0;
+  inset: auto 0 0;
   z-index: 0;
   display: block;
   width: 100%;
-  height: 100%;
+  height: 10px;
 }
 
-/* Один полупрозрачный фон на всю строку (а не под каждой строкой текста):
- * приглушает яркость статус-бара целиком — силуэт фрагментов остаётся
- * узнаваемым, а светлый текст читается без отдельных «чипов». Приглушение
- * не трогает отрисовку (statusbar.ts), это чистый CSS-слой. */
-.pair-list .pair-open::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  background: rgba(0, 0, 0, 0.7);
-  transition: background 0.15s ease;
+/* Полоса занимает нижние 10 px — оставляем под неё место, чтобы мета
+ * не наезжала на цвет. У битых строк полосы нет, им отступ не нужен. */
+.pair-list .pair-open:has(.pair-bg) {
+  padding-bottom: 8px;
 }
 
-/* Наведение лишь чуть светлее, но текст остаётся ≥ 5:1 даже на ярко-
- * зелёном фоне (0.5 давал ~3.9:1). */
-.pair-list button.pair-open:hover::before {
-  background: rgba(0, 0, 0, 0.6);
+.pair-list button.pair-open:hover {
+  background: var(--panel);
 }
 
 .pair-list .pair-open .pair-label,

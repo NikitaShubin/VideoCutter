@@ -11,6 +11,8 @@ interface Props {
   scheme?: StatusbarScheme;
   /** Слоёный прогресс: заменяет таймлайн (фазы поверх фаз). */
   progress?: ProgressLayers;
+  /** Подсказка при наведении: что означают цвета полосы. */
+  title?: string;
 }
 
 // Мини-статус-бар «как если бы файл был открыт»: те же цвета и разметка,
@@ -23,6 +25,7 @@ export function StatusbarPreview({
   className,
   scheme,
   progress,
+  title,
 }: Props) {
   const ref = useRef<HTMLCanvasElement>(null);
 
@@ -43,5 +46,14 @@ export function StatusbarPreview({
     });
   }, [totalFrames, fragments, position, scheme, progress]);
 
-  return <canvas ref={ref} width={800} height={20} className={className} aria-hidden />;
+  return (
+    <canvas
+      ref={ref}
+      width={800}
+      height={20}
+      className={className}
+      title={title}
+      aria-hidden
+    />
+  );
 }
