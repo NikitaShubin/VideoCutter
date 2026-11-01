@@ -31,6 +31,7 @@ import { HelpModal } from "./HelpModal";
 import { PlaybackMenu } from "./PlaybackMenu";
 import { Popover } from "./Popover";
 import { TimelineLegend } from "./TimelineLegend";
+import { useKeyboardMode } from "./useKeyboardMode";
 import { ViewMenu } from "./ViewMenu";
 import {
   FrameScheduler,
@@ -73,6 +74,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [keyPose, setKeyPose] = useState<number | null>(null);
   const [preserveAspect, setPreserveAspect] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Физическая клавиатура: тогда действия — только горячими клавишами,
+  // их список — в справке «?». Кнопки-дубли нужны лишь сенсорному экрану.
+  const keyboard = useKeyboardMode();
   const [exportItems, setExportItems] = useState<ExportItem[] | null>(null);
   const exportItemsRef = useRef<ExportItem[] | null>(null);
   exportItemsRef.current = exportItems;
@@ -1393,104 +1397,88 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
             </div>
           </div>
 
-          <div className="editor-workbench">
-            <div
-              className="fragment-actions"
-              role="toolbar"
-              aria-label="Разметка фрагментов"
-            >
-              <span className="fragment-actions-label">Фрагмент</span>
-              <button
-                type="button"
-                onClick={markStart}
-                title="Начало фрагмента ([ или ↑)"
-                aria-label="Начало фрагмента"
-              >
-                <FragmentIcon name="start" />
-                <span className="fragment-action-text">Начало</span>
-                <kbd>[</kbd>
-              </button>
-              <button
-                type="button"
-                onClick={markEnd}
-                title="Конец фрагмента (] или ↓)"
-                aria-label="Конец фрагмента"
-              >
-                <FragmentIcon name="end" />
-                <span className="fragment-action-text">Конец</span>
-                <kbd>]</kbd>
-              </button>
-              <button
-                type="button"
-                className="fragment-create"
-                onClick={createOrComplete}
-                aria-pressed={keyPose !== null}
-                aria-label={
-                  keyPose === null ? "Создать фрагмент" : "Завершить фрагмент"
-                }
-                title={
-                  keyPose === null
-                    ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
-                    : "Завершить фрагмент в текущем кадре (K)"
-                }
-              >
-                <FragmentIcon name={keyPose === null ? "create" : "complete"} />
-                <span className="fragment-action-text">
-                  {keyPose === null ? "Создать" : "Завершить"}
-                </span>
-                <kbd>K</kbd>
-              </button>
-              <button
-                type="button"
-                onClick={deleteAtPosition}
-                title="Удалить фрагмент под курсором (D или Del)"
-                aria-label="Удалить фрагмент"
-              >
-                <FragmentIcon name="delete" />
-                <span className="fragment-action-text">Удалить</span>
-                <kbd>D</kbd>
-              </button>
-              <button
-                type="button"
-                onClick={startCommentEdit}
-                title="Комментарий к фрагменту (I)"
-                aria-label="Комментарий к фрагменту"
-              >
-                <FragmentIcon name="comment" />
-                <span className="fragment-action-text">
-                  <span className="fragment-action-long">Комментарий</span>
-                  <span className="fragment-action-short">Коммент.</span>
-                </span>
-                <kbd>I</kbd>
-              </button>
+          {!keyboard && (
+            <div className="editor-workbench">
               <div
-                className="editor-history"
-                role="group"
-                aria-label="История изменений"
+                className="fragment-actions"
+                role="toolbar"
+                aria-label="Разметка фрагментов"
               >
                 <button
                   type="button"
-                  onClick={undoEdit}
-                  disabled={!canUndo}
-                  title="Отменить последнее изменение (Ctrl+Z)"
-                  aria-label="Отменить последнее изменение"
+                  onClick={markStart}
+                  title="Начало фрагмента ([ или ↑)"
+                  aria-label="Начало фрагмента"
                 >
-                  <FragmentIcon name="undo" />
-                  <span className="fragment-action-text">Отменить</span>
+                  <FragmentIcon name="start" />
                 </button>
                 <button
                   type="button"
-                  onClick={redoEdit}
-                  disabled={!canRedo}
-                  title="Повторить отменённое (Ctrl+Shift+Z или Z)"
-                  aria-label="Повторить отменённое"
+                  onClick={markEnd}
+                  title="Конец фрагмента (] или ↓)"
+                  aria-label="Конец фрагмента"
                 >
-                  <FragmentIcon name="redo" />
-                  <span className="fragment-action-text">Повторить</span>
+                  <FragmentIcon name="end" />
                 </button>
+                <button
+                  type="button"
+                  className="fragment-create"
+                  onClick={createOrComplete}
+                  aria-pressed={keyPose !== null}
+                  aria-label={
+                    keyPose === null ? "Создать фрагмент" : "Завершить фрагмент"
+                  }
+                  title={
+                    keyPose === null
+                      ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
+                      : "Завершить фрагмент в текущем кадре (K)"
+                  }
+                >
+                  <FragmentIcon name={keyPose === null ? "create" : "complete"} />
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteAtPosition}
+                  title="Удалить фрагмент под курсором (D или Del)"
+                  aria-label="Удалить фрагмент"
+                >
+                  <FragmentIcon name="delete" />
+                </button>
+                <button
+                  type="button"
+                  onClick={startCommentEdit}
+                  title="Комментарий к фрагменту (I)"
+                  aria-label="Комментарий к фрагменту"
+                >
+                  <FragmentIcon name="comment" />
+                </button>
+                <div
+                  className="editor-history"
+                  role="group"
+                  aria-label="История изменений"
+                >
+                  <button
+                    type="button"
+                    onClick={undoEdit}
+                    disabled={!canUndo}
+                    title="Отменить последнее изменение (Ctrl+Z)"
+                    aria-label="Отменить последнее изменение"
+                  >
+                    <FragmentIcon name="undo" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={redoEdit}
+                    disabled={!canRedo}
+                    title="Повторить отменённое (Ctrl+Shift+Z или Z)"
+                    aria-label="Повторить отменённое"
+                  >
+                    <FragmentIcon name="redo" />
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </header>
       )}
 

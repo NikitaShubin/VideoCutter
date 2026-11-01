@@ -1074,9 +1074,11 @@ select option {
 }
 
 .editor-workbench {
-  /* Главные действия разметки видны и на десктопе: клавиши — ускоритель,
-   * а не единственный вход. В низком ландшафте панель уходит в рейку
-   * (см. медиазапросы ниже), в полноэкранном режиме шапки нет. */
+  /* Панель-дубль горячих клавиш рендерится только на сенсорных экранах
+   * (см. useKeyboardMode в CutEditor): на устройствах с клавиатурой её
+   * нет вовсе — действия живут в шорткатах и справке «?».
+   * В низком ландшафте панель уходит в рейку (см. медиазапросы ниже),
+   * в полноэкранном режиме шапки нет. */
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1085,22 +1087,13 @@ select option {
   border-top: 1px solid var(--edge);
 }
 
-/* Кнопки-дубли горячих клавиш нужны только там, где нет физической
- * клавиатуры: на сенсорном экране с coarse-указателем. */
+/* На сенсорном экране текст и клавиши не нужны: квадратные кнопки
+ * со значками, 44×44 — минимальная цель для пальца. */
 @media (hover: none) and (pointer: coarse) {
-  .editor-workbench {
-    display: flex;
-  }
-
-  /* На сенсорном экране текст и клавиши не нужны: квадратные кнопки
-   * со значками, 44×44 — минимальная цель для пальца. */
   .fragment-actions {
     gap: 6px;
   }
 
-  .fragment-actions-label,
-  .fragment-action-text,
-  .fragment-actions kbd,
   .hotkey-hint {
     display: none;
   }
@@ -1173,12 +1166,6 @@ select option {
   gap: 6px;
 }
 
-.fragment-actions-label {
-  margin-right: 4px;
-  color: var(--muted);
-  font-size: 0.85em;
-}
-
 .fragment-actions button {
   display: inline-flex;
   align-items: center;
@@ -1192,11 +1179,6 @@ select option {
   height: 18px;
 }
 
-/* Короткая подпись нужна только в узкой ландшафтной рейке. */
-.fragment-action-short {
-  display: none;
-}
-
 .fragment-actions button.fragment-create {
   border-color: var(--green-strong);
   background: var(--green-strong);
@@ -1207,7 +1189,6 @@ select option {
   background: var(--green-strong-hover);
 }
 
-.fragment-actions kbd,
 .menu-stack kbd {
   padding: 0 4px;
   border: 1px solid var(--line);
@@ -2307,19 +2288,10 @@ select option {
     max-width: none;
   }
 
-  /* Верх редактора: подпись «Фрагмент» и разделитель истории съедают
-     строку — на узком экране кнопки идут одним потоком. */
+  /* Верх редактора: разделитель истории съедает строку — на узком
+     экране кнопки идут одним потоком. */
   .editor-top {
     padding: 6px 8px;
-  }
-
-  .fragment-actions-label {
-    display: none;
-  }
-
-  /* На телефоне клавиатуры нет — подсказки-клавиши только шумят. */
-  .fragment-actions kbd {
-    display: none;
   }
 
   .editor-history {
@@ -2439,9 +2411,9 @@ select option {
   }
 }
 
-/* Сенсорный портрет: панель разметки — сетка с подписями под значками.
- * Подписи снимают «запоминание иконок»; на десктопе они не нужны и
- * остаются скрытыми. */
+/* Сенсорный портрет: панель разметки — сетка крупных кнопок-значков.
+ * Подписи не нужны: действие читается по значку, полный список —
+ * в справке «?» и в подсказках кнопок. */
 @media (orientation: portrait) and (max-width: 640px) and (hover: none) and (pointer: coarse) {
   .editor-workbench {
     display: grid;
@@ -2458,33 +2430,11 @@ select option {
     display: contents;
   }
 
-  .fragment-actions-label {
-    display: none;
-  }
-
   .fragment-actions button,
   .editor-history button {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 3px;
     width: 100%;
     min-width: 0;
     height: 58px;
-    padding: 4px 2px;
-    white-space: normal;
-  }
-
-  .fragment-action-text {
-    display: block;
-    font-size: 0.72em;
-    line-height: 1.15;
-    text-align: center;
-  }
-
-  .fragment-actions kbd {
-    display: none;
   }
 }
 
@@ -2664,19 +2614,19 @@ select option {
 }
 
 /* Та же ландшафтная раскладка, но с сенсорной панелью разметки:
- * сетка 2×4 из кнопок «значок + подпись». Подписи снимают запоминание
- * иконок. Панель — левая рейка вне кадра: видео начинается правее неё,
- * поэтому кнопки не закрывают изображение даже на широком кадре. */
+ * сетка 2×4 из кнопок-значков 44×44. Панель — левая рейка вне кадра:
+ * видео начинается правее неё, поэтому кнопки не закрывают изображение
+ * даже на широком кадре. */
 @media (orientation: landscape) and (max-height: 520px) and (hover: none) and (pointer: coarse) {
   .editor {
     --workbench-left: max(8px, env(safe-area-inset-left));
-    /* 2×60 + gap 6 + padding 12 + border 2. */
-    --workbench-w: 140px;
+    /* 2×44 + gap 6 + padding 12 + border 2. */
+    --workbench-w: 108px;
   }
 
   .editor-workbench {
     display: grid;
-    grid-template-columns: repeat(2, 60px);
+    grid-template-columns: repeat(2, 44px);
     gap: 6px;
   }
 
@@ -2691,35 +2641,6 @@ select option {
   .editor-history {
     display: contents;
   }
-
-  /* Кнопка — колонка «значок + подпись», 60×46: подпись влезает в одну
-   * строку, а рейка 2×4 не выходит за транспорт даже на 360 px высоты. */
-  .fragment-actions button,
-  .editor-history button {
-    flex-direction: column;
-    gap: 2px;
-    width: 100%;
-    min-width: 0;
-    height: 46px;
-    padding: 3px 2px;
-    white-space: normal;
-  }
-
-  .fragment-action-text {
-    display: block;
-    font-size: 0.62em;
-    line-height: 1.05;
-    text-align: center;
-    overflow-wrap: anywhere;
-  }
-
-  .fragment-action-long {
-    display: none;
-  }
-
-  .fragment-action-short {
-    display: inline;
-  }
 }
 
 /* Низкий ландшафт (высоту съедает браузерная панель): колонка 2×4 не
@@ -2727,31 +2648,27 @@ select option {
  * 4×2 — панель ниже и оставляет кадру больше высоты. */
 @media (orientation: landscape) and (max-height: 350px) and (hover: none) and (pointer: coarse) {
   .editor {
-    /* 4×60 + gap 18 + padding 12 + border 2. */
-    --workbench-w: 272px;
+    /* 4×44 + gap 18 + padding 12 + border 2. */
+    --workbench-w: 208px;
   }
 
   .editor-workbench {
-    grid-template-columns: repeat(4, 60px);
+    grid-template-columns: repeat(4, 44px);
   }
 }
 
-/* Совсем низкий ландшафт (около 300 px): 4×2 по 60 px съедает слишком
- * много ширины — уменьшаем колонки до 52 px, сохраняя цели ≥ 44 px. */
+/* Совсем низкий ландшафт (около 300 px): 4×2 по 44 px съедает слишком
+ * много ширины — уменьшаем зазоры, сохраняя цели 44 px. */
 @media (orientation: landscape) and (max-height: 300px) and (hover: none) and (pointer: coarse) {
   .editor {
-    /* 4×52 + gap 12 + padding 8 + border 2. */
-    --workbench-w: 230px;
+    /* 4×44 + gap 12 + padding 8 + border 2. */
+    --workbench-w: 198px;
   }
 
   .editor-workbench {
-    grid-template-columns: repeat(4, 52px);
+    grid-template-columns: repeat(4, 44px);
     gap: 4px;
     padding: 4px;
-  }
-
-  .fragment-action-text {
-    font-size: 0.56em;
   }
 
   .fragment-icon {

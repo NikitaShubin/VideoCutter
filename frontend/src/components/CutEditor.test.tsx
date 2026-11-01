@@ -165,6 +165,24 @@ function keyPress(input: HTMLInputElement, key: string): void {
   });
 }
 
+/** Сенсорный экран без физической клавиатуры (как на телефоне). */
+function stubTouchOnly(matches: boolean): void {
+  vi.stubGlobal(
+    "matchMedia",
+    (query: string) =>
+      ({
+        matches: matches && query.includes("pointer: coarse"),
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as unknown as MediaQueryList,
+  );
+}
+
 /** Телефон в ландшафте: автоскрытие шапки включено, остальные медиа —
  * как в jsdom (не совпадают). */
 function stubLandscape(): void {
@@ -478,13 +496,17 @@ describe("клавиатура не отбирает Tab", () => {
   });
 });
 
-function fragmentButton(host: HTMLElement, text: string): HTMLButtonElement {
+function fragmentButton(host: HTMLElement, name: string): HTMLButtonElement {
   const bar = host.querySelector('[role="toolbar"][aria-label="Разметка фрагментов"]');
   if (!bar) throw new Error("панель разметки не найдена");
+  // Кнопки панели — только значки: видимого текста у них нет, поэтому
+  // сценарии ищут действие по доступному имени/подсказке.
   const btn = [...bar.querySelectorAll<HTMLButtonElement>("button")].find(
-    (b) => b.textContent?.includes(text),
+    (b) =>
+      (b.getAttribute("aria-label") ?? "").includes(name) ||
+      (b.getAttribute("title") ?? "").includes(name),
   );
-  if (!btn) throw new Error(`кнопка «${text}» не найдена`);
+  if (!btn) throw new Error(`кнопка «${name}» не найдена`);
   return btn;
 }
 
@@ -492,6 +514,15 @@ function clickFragment(host: HTMLElement, text: string): void {
   act(() => {
     fragmentButton(host, text).click();
   });
+}
+
+/** Переход к кадру через поле номера: клавиши в поле не считаются
+ * физической клавиатурой, поэтому панель разметки остаётся на месте. */
+function seekToFrame(host: HTMLElement, frame: number): void {
+  const input = frameInput(host);
+  act(() => input.focus());
+  typeInto(input, String(frame));
+  keyPress(input, "Enter");
 }
 
 function topButton(host: HTMLElement, text: string): HTMLButtonElement {
@@ -555,7 +586,40 @@ function lastSaved(): { start: number; end: number; comment: string }[] {
   }[];
 }
 
+describe("панель разметки: сенсорный экран", () => {
+  it("на устройстве с физической клавиатурой кнопок нет", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(host.querySelector(".editor-workbench")).toBeNull();
+    expect(
+      host.querySelector('[role="toolbar"][aria-label="Разметка фрагментов"]'),
+    ).toBeNull();
+    unmount();
+  });
+
+  it("на сенсорном экране — только значки без подписей и клавиш", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    const bar = host.querySelector<HTMLElement>(
+      '[role="toolbar"][aria-label="Разметка фрагментов"]',
+    )!;
+    expect(bar).toBeTruthy();
+    const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons).toHaveLength(7);
+    for (const button of buttons) {
+      expect(button.textContent?.trim()).toBe("");
+      expect(button.querySelector("svg.fragment-icon")).toBeTruthy();
+      expect(button.getAttribute("aria-label")).toBeTruthy();
+    }
+    expect(bar.querySelector("kbd")).toBeNull();
+    unmount();
+  });
+});
+
 describe("панель разметки", () => {
+  beforeEach(() => {
+    stubTouchOnly(true);
+  });
+
   it("все действия фрагмента доступны кнопками", async () => {
     const { host, unmount } = await mountEditor();
     for (const name of [
@@ -589,7 +653,7 @@ describe("панель разметки", () => {
   it("«Начало» и «Конец» создают фрагмент и сохраняют его", async () => {
     const { host, unmount } = await mountEditor();
     clickFragment(host, "Начало");
-    for (let i = 0; i < 10; i++) tap("ArrowRight");
+    seekToFrame(host, 11);
     clickFragment(host, "Конец");
     expect(lastSaved()).toEqual([{ start: 0, end: 10, comment: "" }]);
     unmount();
@@ -598,7 +662,7 @@ describe("панель разметки", () => {
   it("«Создать» ставит начало, «Завершить» — конец", async () => {
     const { host, unmount } = await mountEditor();
     clickFragment(host, "Создать");
-    for (let i = 0; i < 10; i++) tap("ArrowRight");
+    seekToFrame(host, 11);
     clickFragment(host, "Завершить");
     expect(lastSaved()).toEqual([{ start: 0, end: 10, comment: "" }]);
     unmount();
@@ -607,7 +671,7 @@ describe("панель разметки", () => {
   it("«Удалить» убирает фрагмент под курсором", async () => {
     pairDetail.fragments = [{ start: 0, end: 10, comment: "" }];
     const { host, unmount } = await mountEditor();
-    for (let i = 0; i < 5; i++) tap("ArrowRight");
+    seekToFrame(host, 6);
     clickFragment(host, "Удалить");
     expect(lastSaved()).toEqual([]);
     unmount();
@@ -651,6 +715,7 @@ describe("экспорт без фрагментов", () => {
   });
 
   it("после создания первого фрагмента кнопка включается", async () => {
+    stubTouchOnly(true);
     const { host, unmount } = await mountEditor();
     clickFragment(host, "Начало");
     const btn = topButton(host, "Экспорт");
