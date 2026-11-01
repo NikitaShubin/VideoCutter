@@ -1158,6 +1158,16 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       ? ` · Превью: ${pair.preview_name}`
       : ""
   }`;
+  // Пропорции кадра: в портрете область видео сжимается до них, чтобы
+  // чёрные поля не съедали половину экрана. На десктопе высоту задаёт
+  // flex, поэтому aspect-ratio не мешает.
+  const frameAspect =
+    pair.width > 0 && pair.height > 0
+      ? `${pair.width} / ${pair.height}`
+      : undefined;
+  // Подсказка о повороте нужна только широкому кадру: квадратному она
+  // ничего не даст (он и так занимает всю ширину).
+  const wideFrame = pair.width > 0 && pair.width / pair.height >= 1.5;
 
   return (
     <div ref={editorRef} className={isFullscreen ? "editor fullscreen" : "editor"}>
@@ -1389,7 +1399,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         </header>
       )}
 
-      <div className="video-area">
+      <div className="video-area" style={{ aspectRatio: frameAspect }}>
         <img
           ref={imageRef}
           alt={`Кадр ${formatNumber(position + 1)} из ${formatNumber(pair.total_frames)}`}
@@ -1448,6 +1458,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
           ) : null
         )}
       </div>
+
+      {!isFullscreen && wideFrame && (
+        <p className="rotate-hint">
+          <b>Поверните телефон горизонтально</b> — кадр станет крупнее.
+        </p>
+      )}
 
       {!isFullscreen && (
         <div className="editor-transport">

@@ -1524,6 +1524,12 @@ select option {
   border-color: var(--accent);
 }
 
+/* Подсказка о повороте нужна только в портретной раскладке телефона;
+ * на широком экране кадр и так крупный. */
+.rotate-hint {
+  display: none;
+}
+
 .video-area {
   flex: 1;
   min-height: 0;
@@ -2069,6 +2075,122 @@ select option {
 
   .editor-global-actions {
     margin-left: 0;
+  }
+}
+
+/* ─── Портрет: кадр по пропорциям, управление — внизу ─────────────────────
+ * На телефоне 16:9-кадр занимает по высоте лишь ширину × 9/16, а область
+ * видео растягивалась на весь остаток экрана: половину портрета занимали
+ * чёрные поля. Здесь область видео равна кадру, а освободившееся место
+ * уходит нижней панели разметки — она ближе к большому пальцу, чем шапка.
+ * Шапка и рабочая панель — прямые дети редактора (display: contents),
+ * поэтому порядок задаётся order, а не перестановкой DOM. */
+@media (orientation: portrait) and (max-width: 640px) {
+  .editor {
+    gap: 6px;
+    padding: 0;
+    overflow-y: auto;
+  }
+
+  .editor-top {
+    display: contents;
+  }
+
+  .editor-context {
+    order: 1;
+    padding: 6px 8px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--edge);
+  }
+
+  .video-area {
+    order: 2;
+    flex: 0 0 auto;
+    border-radius: 0;
+  }
+
+  .statusbar {
+    order: 3;
+    height: 32px;
+    border-radius: 0;
+  }
+
+  .rotate-hint {
+    order: 4;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    margin: 0 8px;
+    color: var(--muted);
+    font-size: 0.85em;
+  }
+
+  .rotate-hint b {
+    color: var(--text);
+  }
+
+  /* Транспорт держится у таймлайна, а панель разметки прижимается к низу:
+   * между ними остаётся воздух, а не пустая полоса под панелью. */
+  .editor-transport {
+    order: 5;
+    gap: 4px 8px;
+    margin: 0 8px;
+    padding: 4px 8px;
+    font-size: 0.82em;
+  }
+
+  .editor-workbench {
+    order: 6;
+    margin: auto 8px 8px;
+  }
+}
+
+/* Сенсорный портрет: панель разметки — сетка с подписями под значками.
+ * Подписи снимают «запоминание иконок»; на десктопе они не нужны и
+ * остаются скрытыми. */
+@media (orientation: portrait) and (max-width: 640px) and (hover: none) and (pointer: coarse) {
+  .editor-workbench {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    padding: 8px;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: var(--r-s);
+  }
+
+  .fragment-actions,
+  .editor-history {
+    display: contents;
+  }
+
+  .fragment-actions-label {
+    display: none;
+  }
+
+  .fragment-actions button,
+  .editor-history button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    width: 100%;
+    min-width: 0;
+    height: 58px;
+    padding: 4px 2px;
+    white-space: normal;
+  }
+
+  .fragment-action-text {
+    display: block;
+    font-size: 0.72em;
+    line-height: 1.15;
+    text-align: center;
+  }
+
+  .fragment-actions kbd {
+    display: none;
   }
 }
 

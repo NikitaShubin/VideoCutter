@@ -225,6 +225,24 @@ describe("первый кадр редактора", () => {
   });
 });
 
+describe("подсказка о повороте телефона", () => {
+  it("широкому кадру говорит повернуть телефон", async () => {
+    pairDetail = { ...oneFrame(50, 0), width: 1920, height: 1080 };
+    const { host, unmount } = await mountEditor();
+    expect(host.querySelector(".rotate-hint")?.textContent).toContain(
+      "Поверните телефон",
+    );
+    unmount();
+  });
+
+  it("квадратному кадру не показывается", async () => {
+    pairDetail = { ...oneFrame(50, 0), width: 32, height: 32 };
+    const { host, unmount } = await mountEditor();
+    expect(host.querySelector(".rotate-hint")).toBeNull();
+    unmount();
+  });
+});
+
 describe("ошибка загрузки кадра", () => {
   it("кольцо не прячется, попытки завершаются сообщением и паузой", async () => {
     const { host, unmount } = await mountEditor();
