@@ -2363,12 +2363,24 @@ select option {
 }
 
 /* Та же ландшафтная раскладка, но с сенсорной панелью разметки:
- * сетка 2×4 из квадратных кнопок со значками. */
+ * сетка 2×4 из квадратных кнопок со значками. Панель — левая рейка вне
+ * кадра: видео начинается правее неё, поэтому кнопки не закрывают
+ * изображение даже на широком кадре. */
 @media (orientation: landscape) and (max-height: 520px) and (hover: none) and (pointer: coarse) {
+  .editor {
+    --workbench-left: max(8px, env(safe-area-inset-left));
+    /* 2×44 + gap 6 + padding 12 + border 2. */
+    --workbench-w: 108px;
+  }
+
   .editor-workbench {
     display: grid;
     grid-template-columns: repeat(2, 44px);
     gap: 6px;
+  }
+
+  .video-area {
+    left: calc(var(--workbench-left) + var(--workbench-w) + 12px);
   }
 
   .fragment-actions {
@@ -2384,6 +2396,11 @@ select option {
  * 2×4 не помещается между шапкой и транспортом. Раскладываем те же
  * кнопки в 4×2 — панель ниже и оставляет кадру больше высоты. */
 @media (orientation: landscape) and (max-height: 340px) and (hover: none) and (pointer: coarse) {
+  .editor {
+    /* 4×44 + gap 18 + padding 12 + border 2. */
+    --workbench-w: 208px;
+  }
+
   .editor-workbench {
     grid-template-columns: repeat(4, 44px);
   }
@@ -2392,6 +2409,11 @@ select option {
 /* Ещё ниже (около 300 px): 4×2 с кнопками 44 px уже не влезает —
  * аккуратно уменьшаем кнопки до 40 px. */
 @media (orientation: landscape) and (max-height: 300px) and (hover: none) and (pointer: coarse) {
+  .editor {
+    /* 4×40 + gap 12 + padding 8 + border 2. */
+    --workbench-w: 182px;
+  }
+
   .editor-workbench {
     grid-template-columns: repeat(4, 40px);
     gap: 4px;
