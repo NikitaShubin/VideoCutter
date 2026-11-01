@@ -48,6 +48,12 @@ import { type ExportItem, type ExportStatus, type VideoPairDetail } from "../typ
 const STATUS_W = 800;
 const STATUS_H = 36;
 
+// Ландшафт телефона: верхняя шапка лежит поверх кадра. Прячем её после
+// бездействия, как в видеоплеере: кадр остаётся чистым, а движение/тап
+// возвращают управление. Левую рейку разметки не трогаем — она вне кадра.
+const LANDSCAPE_QUERY = "(orientation: landscape) and (max-height: 520px)";
+const CONTROLS_IDLE_MS = 2500;
+
 /** Закрывает верхний оверлей редактора. true — «назад» обработан. */
 export type BackGuard = () => boolean;
 
@@ -117,6 +123,69 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [openMenu, setOpenMenu] = useState<EditorMenu>(null);
   const openMenuRef = useRef<EditorMenu>(null);
   openMenuRef.current = openMenu;
+
+  // Автоскрытие шапки в ландшафте: состояние выводится из бездействия,
+  // а не хранится как «режим». Пока открыт оверлей или фокус в шапке,
+  // таймер не прячет управление.
+  const [landscape, setLandscape] = useState(false);
+  const [controlsHidden, setControlsHidden] = useState(false);
+  const editorTopRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
+      return;
+    }
+    const mq = window.matchMedia(LANDSCAPE_QUERY);
+    const sync = () => setLandscape(mq.matches);
+    sync();
+    mq.addEventListener?.("change", sync);
+    return () => mq.removeEventListener?.("change", sync);
+  }, []);
+
+  useEffect(() => {
+    const pinned =
+      openMenu !== null || helpOpen || editingComment || isFullscreen;
+    if (!landscape || pinned) {
+      setControlsHidden(false);
+      return;
+    }
+    let timer: number | null = null;
+    const schedule = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        const active = document.activeElement;
+        if (
+          active instanceof HTMLElement &&
+          editorTopRef.current?.contains(active)
+        ) {
+          return;
+        }
+        setControlsHidden(true);
+      }, CONTROLS_IDLE_MS);
+    };
+    const wake = () => {
+      setControlsHidden(false);
+      schedule();
+    };
+    schedule();
+    window.addEventListener("pointermove", wake, { passive: true });
+    window.addEventListener("pointerdown", wake, { passive: true });
+    window.addEventListener("keydown", wake, true);
+    window.addEventListener("focusin", wake, true);
+    window.addEventListener("focusout", wake, true);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      window.removeEventListener("pointermove", wake);
+      window.removeEventListener("pointerdown", wake);
+      window.removeEventListener("keydown", wake, true);
+      window.removeEventListener("focusin", wake, true);
+      window.removeEventListener("focusout", wake, true);
+    };
+  }, [landscape, openMenu, helpOpen, editingComment, isFullscreen]);
 
   // Системная «Назад» (Android/браузер) сначала закрывает верхний оверлей:
   // справку, меню, список экспорта или комментарий. Только потом App
@@ -1195,7 +1264,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         </button>
       )}
       {!isFullscreen && (
-        <header className="editor-top">
+        <header
+          ref={editorTopRef}
+          className={controlsHidden ? "editor-top controls-hidden" : "editor-top"}
+        >
           <div className="editor-context">
             <button type="button" className="editor-back" onClick={handleBack}>
               ← Назад

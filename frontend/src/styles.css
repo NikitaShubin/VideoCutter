@@ -2465,9 +2465,37 @@ select option {
     );
     border: none;
     border-radius: 0;
+    transition: background 0.18s ease;
+  }
+
+  /* Бездействие: шапка растворяется, кадр становится чистым. Клик по
+   * кадру при этом продолжает играть/ставить на паузу — pointer-events
+   * снят только с шапки, рейка разметки остаётся кликабельной. */
+  .editor-top.controls-hidden {
+    background: transparent;
+    pointer-events: none;
+  }
+
+  .editor-top.controls-hidden .editor-context {
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-8px);
+    pointer-events: none;
+    transition:
+      opacity 0.18s ease,
+      transform 0.18s ease,
+      visibility 0s linear 0.18s;
+  }
+
+  .editor-top.controls-hidden .editor-workbench {
+    pointer-events: auto;
   }
 
   .editor-context {
+    transition:
+      opacity 0.18s ease,
+      transform 0.18s ease,
+      visibility 0s linear 0s;
     flex-wrap: nowrap;
     gap: 6px 10px;
   }

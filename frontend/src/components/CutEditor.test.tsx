@@ -165,6 +165,25 @@ function keyPress(input: HTMLInputElement, key: string): void {
   });
 }
 
+/** Телефон в ландшафте: автоскрытие шапки включено, остальные медиа —
+ * как в jsdom (не совпадают). */
+function stubLandscape(): void {
+  vi.stubGlobal(
+    "matchMedia",
+    (query: string) =>
+      ({
+        matches: query.includes("orientation: landscape"),
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as unknown as MediaQueryList,
+  );
+}
+
 const frameInput = (host: HTMLElement): HTMLInputElement =>
   host.querySelector<HTMLInputElement>("input.frame-input")!;
 
@@ -1103,6 +1122,66 @@ describe("полноэкранный режим", () => {
       host.querySelector<HTMLButtonElement>(".fullscreen-exit")!.click();
     });
     expect(exitFullscreen).toHaveBeenCalled();
+    unmount();
+  });
+});
+
+describe("ландшафтная шапка", () => {
+  it("скрывается после бездействия", async () => {
+    stubLandscape();
+    const { host, unmount } = await mountEditor();
+    const top = host.querySelector(".editor-top")!;
+    expect(top.classList.contains("controls-hidden")).toBe(false);
+    act(() => {
+      vi.advanceTimersByTime(2600);
+    });
+    expect(top.classList.contains("controls-hidden")).toBe(true);
+    unmount();
+  });
+
+  it("возвращается движением указателя", async () => {
+    stubLandscape();
+    const { host, unmount } = await mountEditor();
+    act(() => {
+      vi.advanceTimersByTime(2600);
+    });
+    expect(
+      host.querySelector(".editor-top")!.classList.contains("controls-hidden"),
+    ).toBe(true);
+    act(() => {
+      window.dispatchEvent(new Event("pointermove"));
+    });
+    expect(
+      host.querySelector(".editor-top")!.classList.contains("controls-hidden"),
+    ).toBe(false);
+    unmount();
+  });
+
+  it("не прячется, пока фокус в шапке", async () => {
+    stubLandscape();
+    const { host, unmount } = await mountEditor();
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".editor-back")!.focus();
+      vi.advanceTimersByTime(2600);
+    });
+    expect(
+      host.querySelector(".editor-top")!.classList.contains("controls-hidden"),
+    ).toBe(false);
+    unmount();
+  });
+
+  it("не прячется, пока открыто меню", async () => {
+    stubLandscape();
+    const { host, unmount } = await mountEditor();
+    const view = [...host.querySelectorAll<HTMLButtonElement>(".popover-trigger")]
+      .find((b) => b.textContent?.includes("Вид"))!;
+    act(() => {
+      view.click();
+      vi.advanceTimersByTime(2600);
+    });
+    expect(
+      host.querySelector(".editor-top")!.classList.contains("controls-hidden"),
+    ).toBe(false);
     unmount();
   });
 });
