@@ -9,6 +9,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+// На сервере useLayoutEffect не работает и шумит предупреждением; в
+// браузере он нужен, чтобы панель не мигнула в углу до позиционирования.
+const useIsoLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect;
+
 interface Props {
   /** Имя меню: подпись кнопки и доступное имя панели. */
   label: string;
@@ -18,6 +23,8 @@ interface Props {
   triggerLabel?: string;
   /** Подсказка при наведении на кнопку-триггер. */
   triggerTitle?: string;
+  /** Дополнительный класс кнопки-триггера (например, квадрат строки). */
+  triggerClassName?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: ReactNode;
@@ -36,6 +43,7 @@ export function Popover({
   trigger,
   triggerLabel,
   triggerTitle,
+  triggerClassName,
   open,
   onOpenChange,
   children,
@@ -67,7 +75,7 @@ export function Popover({
     setPos({ top, left, minWidth: Math.min(r.width, width) });
   }, []);
 
-  useLayoutEffect(() => {
+  useIsoLayoutEffect(() => {
     if (open) place();
   }, [open, place]);
 
@@ -111,7 +119,11 @@ export function Popover({
       <button
         ref={triggerRef}
         type="button"
-        className="popover-trigger"
+        className={
+          triggerClassName
+            ? `popover-trigger ${triggerClassName}`
+            : "popover-trigger"
+        }
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? id : undefined}

@@ -581,6 +581,12 @@ select option {
   flex: 0 0 auto;
 }
 
+/* Меню «⋯» — только для узкого экрана: на десктопе действия остаются
+ * отдельными кнопками, чтобы не прятать их за лишним кликом. */
+.pair-list .row-actions > .popover {
+  display: none;
+}
+
 .pair-list .pair-actions .pair-edit-btn,
 .pair-list .pair-actions .pair-delete {
   display: flex;
@@ -2244,6 +2250,26 @@ select option {
   .pair-list .pair-actions .pair-delete {
     width: 38px;
     height: 38px;
+  }
+
+  /* Строка задачи: вместо двух постоянных кнопок — одно меню «⋯».
+   * Подпись получает освободившиеся 52 px, корзина не соседствует
+   * с зоной открытия задачи. */
+  .pair-list .row-actions > .pair-edit-btn,
+  .pair-list .row-actions > .pair-delete {
+    display: none;
+  }
+
+  .pair-list .row-actions > .popover {
+    display: inline-flex;
+  }
+
+  .pair-list .row-actions .popover-trigger {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    justify-content: center;
+    font-size: 1.1em;
   }
 
   .export-list {

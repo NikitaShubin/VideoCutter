@@ -45,6 +45,7 @@ import { pluralCount } from "../model/plural";
 import { StatusbarPreview } from "./StatusbarPreview";
 import { TimelineLegend } from "./TimelineLegend";
 import { PairRowFrame } from "./PairRowFrame";
+import { Popover } from "./Popover";
 import { RoleField } from "./RoleFields";
 import { Hint } from "./Hint";
 import { FileButton } from "./FileButton";
@@ -304,6 +305,9 @@ export function PairList({
   // Сортировка и проект — не основные действия: на телефоне они живут
   // под раскрывашкой, чтобы шапка не съедала пол-экрана до первой задачи.
   const [filtersOpen, setFiltersOpen] = useState(false);
+  // На телефоне постоянные ✎/🗑 отнимают четверть ширины строки. Там они
+  // живут в одном меню «⋯»; на десктопе остаются отдельными кнопками.
+  const [rowMenu, setRowMenu] = useState<string | null>(null);
 
   const listed =
     visible === null
@@ -1438,7 +1442,7 @@ export function PairList({
                   </span>
                 )}
               </button>
-              <div className="pair-actions">
+              <div className="pair-actions row-actions">
                 <button
                   className="pair-edit-btn"
                   title="Изменить"
@@ -1455,6 +1459,42 @@ export function PairList({
                 >
                   <span aria-hidden="true">🗑</span>
                 </button>
+                <Popover
+                  label={`Действия: ${p.name || p.id}`}
+                  trigger={<span aria-hidden="true">⋯</span>}
+                  triggerLabel={`Действия: ${p.name || p.id}`}
+                  triggerTitle="Действия"
+                  triggerClassName="pair-edit-btn"
+                  open={rowMenu === p.id}
+                  onOpenChange={(v) => setRowMenu(v ? p.id : null)}
+                >
+                  <div className="menu-stack">
+                    <button
+                      type="button"
+                      className="menu-action"
+                      onClick={() => {
+                        setRowMenu(null);
+                        openEdit(p);
+                      }}
+                    >
+                      <span className="menu-action-title">
+                        <span aria-hidden="true">✎</span> Изменить
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="menu-action pair-menu-danger"
+                      onClick={() => {
+                        setRowMenu(null);
+                        void remove(p);
+                      }}
+                    >
+                      <span className="menu-action-title">
+                        <span aria-hidden="true">🗑</span> Удалить
+                      </span>
+                    </button>
+                  </div>
+                </Popover>
               </div>
             </div>
             {editingId === p.id && renderEdit(p)}

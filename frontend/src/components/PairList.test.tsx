@@ -11,7 +11,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { PairList } from "./PairList";
 import { RoleField } from "./RoleFields";
 import type { VideoPair } from "../types";
@@ -130,6 +130,12 @@ function pencil(): HTMLButtonElement {
 }
 
 const BROKEN = makePair();
+
+beforeEach(() => {
+  // Тесты делят один jsdom: вкладка/фильтры, записанные предыдущим
+  // сценарием, иначе утекают в следующий и прячут строки задач.
+  window.localStorage.clear();
+});
 
 describe("сломанная задача в списке", () => {
   it("рисуется в общем каркасе (есть рамка .pair-open)", () => {
@@ -336,6 +342,56 @@ describe("кнопки-иконки названы словами", () => {
     );
     expect(restore).toBeTruthy();
     expect(restore?.type).toBe("button");
+    unmount();
+  });
+});
+
+describe("действия строки в мобильном меню", () => {
+  it("у строки есть одно меню действий", () => {
+    const { host, unmount } = mountList([
+      makePair({ broken: false, name: "Длинная задача" }),
+    ]);
+    const more = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Действия: Длинная задача"]',
+    );
+    expect(more).toBeTruthy();
+    expect(more?.textContent).toContain("⋯");
+    unmount();
+  });
+
+  it("меню открывает изменение и удаление", () => {
+    const { host, unmount } = mountList([
+      makePair({ broken: false, name: "Длинная задача" }),
+    ]);
+    const more = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Действия: Длинная задача"]',
+    )!;
+    act(() => {
+      more.click();
+    });
+    const panel = document.querySelector(".popover-panel");
+    expect(panel?.textContent).toContain("Изменить");
+    expect(panel?.textContent).toContain("Удалить");
+    unmount();
+  });
+
+  it("«Изменить» из меню открывает панель задачи", () => {
+    const { host, unmount } = mountList([
+      makePair({ broken: false, name: "Длинная задача" }),
+    ]);
+    const more = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Действия: Длинная задача"]',
+    )!;
+    act(() => {
+      more.click();
+    });
+    const edit = [...document.querySelectorAll<HTMLButtonElement>(".popover-panel button")]
+      .find((b) => b.textContent?.includes("Изменить"))!;
+    act(() => {
+      edit.click();
+    });
+    expect(host.querySelector(".pair-edit")).toBeTruthy();
+    expect(document.querySelector(".popover-panel")).toBeNull();
     unmount();
   });
 });
