@@ -2552,7 +2552,7 @@ select option {
 /* Низкий ландшафт (высоту съедает браузерная панель): колонка 2×4 не
  * помещается между шапкой и транспортом. Раскладываем те же кнопки в
  * 4×2 — панель ниже и оставляет кадру больше высоты. */
-@media (orientation: landscape) and (max-height: 360px) and (hover: none) and (pointer: coarse) {
+@media (orientation: landscape) and (max-height: 350px) and (hover: none) and (pointer: coarse) {
   .editor {
     /* 4×60 + gap 18 + padding 12 + border 2. */
     --workbench-w: 272px;
