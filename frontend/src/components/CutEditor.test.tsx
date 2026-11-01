@@ -267,21 +267,52 @@ describe("первый кадр редактора", () => {
   });
 });
 
+/** Портретный вьюпорт телефона (jsdom по умолчанию 1024×768). */
+function stubViewport(w: number, h: number): void {
+  vi.stubGlobal("innerWidth", w);
+  vi.stubGlobal("innerHeight", h);
+}
+
 describe("подсказка о повороте телефона", () => {
-  it("широкому кадру говорит повернуть телефон", async () => {
+  it("16:9 на узком экране — поворот заметно крупнее, подсказка есть", async () => {
     pairDetail = { ...oneFrame(50, 0), width: 1920, height: 1080 };
+    stubTouchOnly(true);
+    stubViewport(360, 740);
+    const rect = vi
+      .spyOn(HTMLImageElement.prototype, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(0, 0, 360, 202.5));
     const { host, unmount } = await mountEditor();
     expect(host.querySelector(".rotate-hint")?.textContent).toContain(
       "Поверните телефон",
     );
     unmount();
+    rect.mockRestore();
+  });
+
+  it("кадру 3:2 поворот почти ничего не даёт — подсказки нет", async () => {
+    pairDetail = { ...oneFrame(50, 0), width: 1800, height: 1200 };
+    stubTouchOnly(true);
+    stubViewport(360, 740);
+    const rect = vi
+      .spyOn(HTMLImageElement.prototype, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(0, 0, 360, 240));
+    const { host, unmount } = await mountEditor();
+    expect(host.querySelector(".rotate-hint")).toBeNull();
+    unmount();
+    rect.mockRestore();
   });
 
   it("квадратному кадру не показывается", async () => {
     pairDetail = { ...oneFrame(50, 0), width: 32, height: 32 };
+    stubTouchOnly(true);
+    stubViewport(360, 740);
+    const rect = vi
+      .spyOn(HTMLImageElement.prototype, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(0, 0, 360, 360));
     const { host, unmount } = await mountEditor();
     expect(host.querySelector(".rotate-hint")).toBeNull();
     unmount();
+    rect.mockRestore();
   });
 });
 

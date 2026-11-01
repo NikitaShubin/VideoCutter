@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -24,6 +25,10 @@ import {
 } from "../api";
 import { formatNumber, formatPercent } from "../model/format";
 import { FragmentModel } from "../model/fragmentModel";
+import {
+  predictRotateGain,
+  type RotatePrediction,
+} from "../model/rotateHint";
 import { DataMenu } from "./DataMenu";
 import { DiagnosticsMenu } from "./DiagnosticsMenu";
 import { FragmentIcon } from "./FragmentIcon";
@@ -293,6 +298,62 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const schedRef = useRef<FrameScheduler | null>(null);
   if (!schedRef.current) schedRef.current = new FrameScheduler(MAX_CACHE);
   const [shownFrame, setShownFrame] = useState(-1);
+  // Прогноз «поворот даст крупнее»: подсказка показывается только тогда,
+  // когда ландшафт реально шире портретного кадра (см. model/rotateHint).
+  const [viewport, setViewport] = useState(() => ({
+    w: typeof window === "undefined" ? 0 : window.innerWidth,
+    h: typeof window === "undefined" ? 0 : window.innerHeight,
+  }));
+  const [rotateGain, setRotateGain] = useState<RotatePrediction | null>(null);
+  useEffect(() => {
+    const sync = () =>
+      setViewport({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, []);
+  const frameVisible = shownFrame >= 0;
+  useLayoutEffect(() => {
+    // Портрет телефона и не полноэкранный режим — единственная ситуация,
+    // где совет «поверните» вообще уместен.
+    if (
+      keyboard ||
+      isFullscreen ||
+      viewport.w <= 0 ||
+      viewport.h <= 0 ||
+      viewport.w >= viewport.h ||
+      viewport.w > 640
+    ) {
+      setRotateGain(null);
+      return;
+    }
+    const img = imageRef.current;
+    const rect = img?.getBoundingClientRect();
+    const natW = img?.naturalWidth ?? 0;
+    const natH = img?.naturalHeight ?? 0;
+    // Пропорции — у нарисованного кадра: метаданные пары могут врать
+    // (повёрнутая запись), а object-fit считает по натуральным размерам.
+    const ratio =
+      natW > 0 && natH > 0
+        ? natW / natH
+        : pair && pair.width > 0 && pair.height > 0
+          ? pair.width / pair.height
+          : 0;
+    if (!rect || rect.width <= 0 || rect.height <= 0 || ratio <= 0) {
+      setRotateGain(null);
+      return;
+    }
+    const portraitFrameWidth = preserveAspect
+      ? Math.min(rect.width, rect.height * ratio)
+      : rect.width;
+    setRotateGain(
+      predictRotateGain({
+        frameRatio: ratio,
+        portraitFrameWidth,
+        viewportWidth: viewport.w,
+        viewportHeight: viewport.h,
+      }),
+    );
+  }, [keyboard, isFullscreen, viewport, frameVisible, preserveAspect, pair]);
   const chaseRef = useRef(false);
   const heldDirRef = useRef<1 | -1>(1);
   const epochRef = useRef(0);
@@ -1249,9 +1310,6 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     pair.width > 0 && pair.height > 0
       ? `${pair.width} / ${pair.height}`
       : undefined;
-  // Подсказка о повороте нужна только широкому кадру: квадратному она
-  // ничего не даст (он и так занимает всю ширину).
-  const wideFrame = pair.width > 0 && pair.width / pair.height >= 1.5;
 
   return (
     <div ref={editorRef} className={isFullscreen ? "editor fullscreen" : "editor"}>
@@ -1545,7 +1603,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         )}
       </div>
 
-      {!isFullscreen && wideFrame && (
+      {!isFullscreen && rotateGain?.worthRotating && (
         <p className="rotate-hint">
           <b>Поверните телефон горизонтально</b> — кадр станет крупнее.
         </p>
