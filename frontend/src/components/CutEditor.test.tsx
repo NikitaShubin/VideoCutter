@@ -868,6 +868,49 @@ describe("комментарий к сегменту", () => {
     unmount();
   });
 
+  it("после «Сохранить» фокус возвращается на кнопку комментария", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect(document.activeElement).toBe(commentButton(host));
+    unmount();
+  });
+
+  it("после «Отмена» фокус возвращается на кнопку комментария", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-cancel")!.click();
+    });
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect(document.activeElement).toBe(commentButton(host));
+    unmount();
+  });
+
+  it("после Escape фокус возвращается на кнопку комментария", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    act(() => {
+      area.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect(document.activeElement).toBe(commentButton(host));
+    unmount();
+  });
+
   it("пока сохранение идёт, статус это показывает", async () => {
     let finish: () => void = () => {};
     vi.mocked(replaceFragments).mockImplementationOnce(

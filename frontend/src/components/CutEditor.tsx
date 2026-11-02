@@ -995,9 +995,25 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   };
 
   const commentRef = useRef<HTMLTextAreaElement | null>(null);
+  const commentEditRef = useRef<HTMLButtonElement | null>(null);
+  const commentToolRef = useRef<HTMLButtonElement | null>(null);
+  const commentTriggerRef = useRef<HTMLElement | null>(null);
   const committedRef = useRef(false);
 
-  const startCommentEdit = () => {
+  /** Возврат фокуса туда, откуда открыли редактор: иначе после Save/Cancel
+   * клавиатурный пользователь оказывается в начале страницы. */
+  const restoreCommentFocus = () => {
+    const trigger = commentTriggerRef.current;
+    commentTriggerRef.current = null;
+    window.setTimeout(() => {
+      const target = trigger?.isConnected
+        ? trigger
+        : (commentEditRef.current ?? commentToolRef.current);
+      target?.focus();
+    }, 0);
+  };
+
+  const startCommentEdit = (trigger?: HTMLElement | null) => {
     const p = modelRef.current;
     if (!p) return;
     const f = p.fragmentAt(position);
@@ -1005,6 +1021,8 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       flash("Комментарии можно добавлять только к выделенным участкам", "error");
       return;
     }
+    commentTriggerRef.current =
+      trigger ?? commentEditRef.current ?? commentToolRef.current;
     setCommentDraft(f.comment);
     setEditingComment(true);
     committedRef.current = false;
@@ -1016,6 +1034,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     if (!p || committedRef.current) return;
     committedRef.current = true;
     setEditingComment(false);
+    restoreCommentFocus();
     if (p.setComment(position, commentDraft)) {
       rerender();
       drawStatusbar();
@@ -1026,6 +1045,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const cancelComment = () => {
     committedRef.current = true;
     setEditingComment(false);
+    restoreCommentFocus();
   };
 
   // Действия разметки — один источник для клавиатуры и видимой панели.
@@ -1653,7 +1673,8 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={startCommentEdit}
+                  ref={commentToolRef}
+                  onClick={(e) => startCommentEdit(e.currentTarget)}
                   title="Комментарий к фрагменту (I)"
                   aria-label="Комментарий к фрагменту"
                 >
@@ -1763,8 +1784,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
             <div className="editor-comment">
               <button
                 type="button"
+                ref={commentEditRef}
                 className="comment-edit"
-                onClick={startCommentEdit}
+                onClick={(e) => startCommentEdit(e.currentTarget)}
                 title="Изменить комментарий"
               >
                 <span className="sr-only">Редактировать комментарий: </span>
