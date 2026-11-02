@@ -1844,7 +1844,9 @@ select option {
   bottom: 10px;
   z-index: 2;
   max-width: min(60%, 520px);
-  padding: 6px 10px;
+  /* В режиме просмотра padding живёт внутри кнопки: вся видимая полоса —
+   * кликабельная цель, а не только строка текста. */
+  padding: 0;
   background: rgba(0, 0, 0, 0.65);
   border-radius: var(--r-s);
   font-size: 0.9em;
@@ -1860,11 +1862,12 @@ select option {
  * карандаш показывает, что текст можно править. */
 .editor-comment .comment-edit {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   width: 100%;
+  min-height: 44px;
   margin: 0;
-  padding: 0;
+  padding: 10px 12px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -1882,7 +1885,6 @@ select option {
   flex: 0 0 auto;
   width: 16px;
   height: 16px;
-  margin-top: 2px;
   color: var(--muted);
   opacity: 0.8;
   transition: color 0.15s ease, opacity 0.15s ease;
@@ -1928,6 +1930,7 @@ select option {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  padding: 6px 10px;
 }
 
 .comment-actions {
@@ -2588,10 +2591,14 @@ select option {
   .editor:not(.fullscreen) .editor-comment {
     position: static;
     max-width: none;
-    padding: 8px 12px;
+    padding: 0;
     border-radius: 0;
     background: var(--panel);
     border-bottom: 1px solid var(--edge);
+  }
+
+  .editor:not(.fullscreen) .editor-comment.is-editing {
+    padding: 8px 12px;
   }
 
   .editor:not(.fullscreen) .editor-comment .comment-text {
