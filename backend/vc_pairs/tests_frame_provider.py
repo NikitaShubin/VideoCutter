@@ -899,21 +899,30 @@ class SpeculationGenTest(SimpleTestCase):
         import types
         import unittest.mock as mock
         prov = fp._Provider("/nonexistent/clip.mp4")
-        fp._providers["/nonexistent/clip.mp4"] = prov
-        self.addCleanup(fp._providers.pop, "/nonexistent/clip.mp4", None)
-        prov._ensure_index = lambda: types.SimpleNamespace(
-            bounds=[0, 25, 50, 75, 96])
-        prov._last_demand = 0.0  # спрос умер давно
-        with mock.patch.object(fp._PREFETCH_POOL, "submit") as sub:
-            prov._prefetch(1, fp.JPEG_QUALITY, fp.FRAME_SCALE, chained=True)
-            self.assertEqual(
-                sub.call_count, 0,
-                "цепочки без свежего спроса запрещены")
-            prov._note_demand()  # свежий спрос
-            prov._prefetch(1, fp.JPEG_QUALITY, fp.FRAME_SCALE, chained=True)
-            self.assertGreater(
-                sub.call_count, 0,
-                "цепочки со свежим спросом идут")
+        # Реестр подменяем целиком: чужие провайдеры со свежим спросом
+        # не должны открывать ворота цепочкам (тест герметичен).
+        with fp._providers_lock:
+            saved = dict(fp._providers)
+            fp._providers.clear()
+            fp._providers["/nonexistent/clip.mp4"] = prov
+        try:
+            prov._ensure_index = lambda: types.SimpleNamespace(
+                bounds=[0, 25, 50, 75, 96])
+            prov._last_demand = 0.0  # спрос умер давно
+            with mock.patch.object(fp._PREFETCH_POOL, "submit") as sub:
+                prov._prefetch(1, fp.JPEG_QUALITY, fp.FRAME_SCALE, chained=True)
+                self.assertEqual(
+                    sub.call_count, 0,
+                    "цепочки без свежего спроса запрещены")
+                prov._note_demand()  # свежий спрос
+                prov._prefetch(1, fp.JPEG_QUALITY, fp.FRAME_SCALE, chained=True)
+                self.assertGreater(
+                    sub.call_count, 0,
+                    "цепочки со свежим спросом идут")
+        finally:
+            with fp._providers_lock:
+                fp._providers.clear()
+                fp._providers.update(saved)
 
 class DemandFairnessTest(SimpleTestCase):
     """Честность demand: зависший провайдер не душит соседний."""
@@ -1002,7 +1011,7 @@ class DemandFairnessTest(SimpleTestCase):
         release = threading.Event()
         errors = []
 
-        def slow_build(path):
+        def slow_build(path, background=False):
             entered.set()
             self.assertTrue(release.wait(timeout=30))
             raise RuntimeError("sentinel")
@@ -1101,6 +1110,54 @@ class IndexThrottleTest(SimpleTestCase):
                 fp._providers.clear()
                 fp._providers.update(saved)
 
+    def test_path_demand_hot_tracks_fresh_demand(self):
+        # Свой спрос — свежее обращение к этому файлу; после паузы гаснет.
+        prov = fp._Provider("/nonexistent/own.mp4")
+        with fp._providers_lock:
+            saved = dict(fp._providers)
+            fp._providers.clear()
+            fp._providers["/nonexistent/own.mp4"] = prov
+        try:
+            self.assertFalse(fp._path_demand_hot("/nonexistent/own.mp4"))
+            prov._note_demand()
+            self.assertTrue(fp._path_demand_hot("/nonexistent/own.mp4"))
+            with prov._ilock:
+                prov._last_demand = 0.0
+            self.assertFalse(fp._path_demand_hot("/nonexistent/own.mp4"))
+        finally:
+            with fp._providers_lock:
+                fp._providers.clear()
+                fp._providers.update(saved)
+
+    def test_path_demand_hot_finds_absolute_alias(self):
+        # Провайдер зарегистрирован по пути с «..»/относительному — спрос
+        # всё равно относится к тому же файлу (сравнение по abspath).
+        prov = fp._Provider("/nonexistent/own.mp4")
+        prov._note_demand()
+        with fp._providers_lock:
+            saved = dict(fp._providers)
+            fp._providers.clear()
+            fp._providers["/nonexistent/own.mp4"] = prov
+        try:
+            self.assertTrue(
+                fp._path_demand_hot("/nonexistent/sub/../own.mp4"))
+        finally:
+            with fp._providers_lock:
+                fp._providers.clear()
+                fp._providers.update(saved)
+
+    def test_path_demand_hot_unknown_path_is_cold(self):
+        # Неоткрытый файл не имеет спроса и не мешает фоновой сборке.
+        with fp._providers_lock:
+            saved = dict(fp._providers)
+            fp._providers.clear()
+        try:
+            self.assertFalse(fp._path_demand_hot("/nonexistent/none.mp4"))
+        finally:
+            with fp._providers_lock:
+                fp._providers.clear()
+                fp._providers.update(saved)
+
     def test_scan_visible_throttled_matches_unthrottled(self):
         # Троттлинг меняет только темп запусков, не результат.
         import unittest.mock as mock
@@ -1113,10 +1170,41 @@ class IndexThrottleTest(SimpleTestCase):
             calls.append(1)
             return len(calls) <= 4
 
-        with mock.patch.object(fp, "_global_demand_hot", side_effect=hot):
-            throttled = fp._scan_visible(self.clip, float(tb), kf_us, 4)
+        with mock.patch.object(fp, "_global_demand_hot", side_effect=hot), \
+             mock.patch.object(fp, "_path_demand_hot", return_value=False):
+            throttled = fp._scan_visible(
+                self.clip, float(tb), kf_us, 4, background=True)
         self.assertEqual(throttled, full)
         self.assertGreater(len(calls), 4)
+
+    def test_demand_build_ignores_other_demand(self):
+        # Первый кадр открытой задачи — сборка по требованию: чужое
+        # воспроизведение не имеет права её останавливать.
+        import unittest.mock as mock
+        tb, _fps, _w, _h, _total, kf_us, _off = fp._scan_packets(self.clip)
+        full = fp._scan_visible(self.clip, float(tb), kf_us, 4)
+        with mock.patch.object(fp, "_global_demand_hot", return_value=True), \
+             mock.patch.object(
+                 fp.time, "sleep",
+                 side_effect=AssertionError("сборка по требованию уснула")):
+            demand = fp._scan_visible(
+                self.clip, float(tb), kf_us, 4, background=False)
+        self.assertEqual(demand, full)
+
+    def test_background_build_resumes_for_own_demand(self):
+        # Фоновая сборка уступает чужому спросу, но не своему: как только
+        # эту задачу открыли, её первый кадр не должен ждать вечно.
+        import unittest.mock as mock
+        tb, _fps, _w, _h, _total, kf_us, _off = fp._scan_packets(self.clip)
+        full = fp._scan_visible(self.clip, float(tb), kf_us, 4)
+        with mock.patch.object(fp, "_global_demand_hot", return_value=True), \
+             mock.patch.object(fp, "_path_demand_hot", return_value=True), \
+             mock.patch.object(
+                 fp.time, "sleep",
+                 side_effect=AssertionError("своя сборка уснула")):
+            own = fp._scan_visible(
+                self.clip, float(tb), kf_us, 4, background=True)
+        self.assertEqual(own, full)
 
 
 class DecodeCancelTests(SimpleTestCase):
@@ -1228,7 +1316,7 @@ class DecodeCancelTests(SimpleTestCase):
         path = self._unique_copy()
         key = os.path.abspath(path)
 
-        def boom(self):
+        def boom(self, background=False):
             raise fp._DecodeCancelled(path)
 
         with mock.patch.object(fp._Provider, "_ensure_index", boom):

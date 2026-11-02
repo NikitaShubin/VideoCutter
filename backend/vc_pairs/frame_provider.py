@@ -652,7 +652,8 @@ def _is_mono(part) -> bool:
     return all(b > a for a, b in zip(part, part[1:]))
 
 
-def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None):
+def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None,
+                  *, background: bool = False):
     """Фаза 2: видимые PTS N сегментами (по группам ключевых кадров).
 
     Возвращает (список PTS, mono_ok): mono_ok=False — выход декодера
@@ -662,6 +663,11 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None):
 
     ``progress`` (опц.) — callable(доля 0..1) по готовым сегментам.
     Порядок кадров сохраняется (части раскладываются по индексам запусков).
+
+    ``background`` — сборка идёт фоном (задача ещё не открыта): новые
+    сегменты уступают чужому живому спросу. Сборка по требованию (первый
+    кадр открытой задачи) не уступает никому: иначе чужое воспроизведение
+    навсегда останавливает первый кадр этой задачи.
     """
     n_seg = max(1, min(int(n_seg), len(kf_us) or 1))
     if n_seg <= 1:
@@ -700,7 +706,8 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None):
         futs = {}
         done = 0
         while queue or futs:
-            while queue and len(futs) < n_seg and not _global_demand_hot():
+            while (queue and len(futs) < n_seg
+                   and not _index_should_pause(path, background)):
                 k, (sk, e, fb) = queue.pop(0)
                 futs[ex.submit(_decode_range, path, f_tb, sk, e, sk, fb)] = k
             if not futs:
@@ -733,13 +740,13 @@ def _scan_visible(path: str, tb: float, kf_us, n_seg: int, progress=None):
     return dedup, mono_ok
 
 
-def _build_index(path: str) -> _Index:
+def _build_index(path: str, background: bool = False) -> _Index:
     """Собрать индекс, переиспользуя in-memory кэш по (path, size, mtime_ns)."""
     try:
         st = os.stat(path)
         key = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
     except OSError:
-        return _Index(path)
+        return _Index(path, background=background)
 
     with _INDEX_CACHE_LOCK:
         idx = _INDEX_CACHE.get(key)
@@ -747,7 +754,7 @@ def _build_index(path: str) -> _Index:
             _INDEX_CACHE.move_to_end(key)
             return idx
 
-    idx = _Index(path)
+    idx = _Index(path, background=background)
     with _INDEX_CACHE_LOCK:
         _INDEX_CACHE[key] = idx
         _INDEX_CACHE.move_to_end(key)
@@ -776,7 +783,7 @@ class _Index:
     (seek'и, bisect) трогает только сырые значения.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, background: bool = False) -> None:
         try:
             st = os.stat(path)
             size, mtime_ns = st.st_size, st.st_mtime_ns
@@ -814,7 +821,8 @@ class _Index:
                 n_seg = min(INDEX_WORKERS, len(kf_us)) if kf_us else 1
                 scanned, mono_ok = _scan_visible(
                     path, float(tb), kf_us, n_seg,
-                    lambda f: _report_index_progress(key, 0.15 + 0.85 * f))
+                    lambda f: _report_index_progress(key, 0.15 + 0.85 * f),
+                    background=background)
                 visible = array.array("q", scanned)
                 # Недостоверные метки: пакетов с PTS нет вообще либо выход
                 # декодера немонотонен (гадание по DTS). Порядок выдачи при
@@ -1004,7 +1012,7 @@ class _Provider:
         return n * idx.width * idx.height * 3
 
     # --- индекс ---
-    def _ensure_index(self) -> _Index:
+    def _ensure_index(self, background: bool = False) -> _Index:
         with self._ilock:
             if self._index is not None:
                 return self._index
@@ -1014,7 +1022,7 @@ class _Provider:
             with self._ilock:
                 if self._index is not None:
                     return self._index
-            idx = _build_index(self.path)
+            idx = _build_index(self.path, background=background)
             with self._ilock:
                 if self._index is None:
                     self._index = idx
@@ -1843,7 +1851,7 @@ def _bg_index_build(key: str) -> None:
         if sem is not None:
             sem.acquire()
         try:
-            _get_provider(key)._ensure_index()
+            _get_provider(key)._ensure_index(background=True)
         finally:
             if sem is not None:
                 sem.release()
@@ -1973,6 +1981,33 @@ def _global_demand_hot() -> bool:
             if now - p._last_demand <= PREFETCH_IDLE_S:
                 return True
     return False
+
+
+def _path_demand_hot(path: str) -> bool:
+    """Есть ли живой спрос на конкретный файл (ждуны или свежее обращение)."""
+    key = os.path.abspath(path)
+    with _providers_lock:
+        p = _providers.get(path)
+        if p is None:
+            p = _providers.get(key)
+    if p is None:
+        return False
+    now = time.monotonic()
+    with p._ilock:
+        if now - p._last_demand <= PREFETCH_IDLE_S:
+            return True
+        return any(t.waiters > 0 for t in p._tasks.values())
+
+
+def _index_should_pause(path: str, background: bool) -> bool:
+    """Пауза сегментов сборки индекса.
+
+    Фоновая сборка уступает чужому живому спросу, но не собственному:
+    как только эту задачу открыли и ждут её кадр, сборка обязана ехать —
+    иначе чужое воспроизведение держит первый кадр вечно (голодание).
+    Сборка по требованию не уступает вовсе.
+    """
+    return background and not _path_demand_hot(path) and _global_demand_hot()
 
 
 def _demand_fresh() -> bool:
