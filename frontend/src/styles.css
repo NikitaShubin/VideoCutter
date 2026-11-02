@@ -2817,9 +2817,9 @@ select option {
   }
 }
 
-/* Сенсорный портрет: панель разметки — сетка крупных кнопок-значков.
- * Подписи не нужны: действие читается по значку, полный список —
- * в справке «?» и в подсказках кнопок. */
+/* Сенсорный портрет: панель разметки — сетка крупных кнопок. Подписи
+ * возвращены: значок «фрагмент с уголками» сам по себе не объясняет
+ * действие. Клавиатурных подсказок здесь нет — их нечем выполнить. */
 @media (orientation: portrait) and (max-width: 640px) and (hover: none) and (pointer: coarse) {
   .editor-workbench {
     display: grid;
@@ -2838,9 +2838,13 @@ select option {
 
   .fragment-actions button,
   .editor-history button {
+    flex-direction: column;
+    gap: 2px;
     width: 100%;
     min-width: 0;
-    height: 58px;
+    height: 64px;
+    font-size: 0.72em;
+    line-height: 1.1;
   }
 }
 
@@ -3065,6 +3069,12 @@ select option {
     display: grid;
     grid-template-columns: repeat(2, 44px);
     gap: 6px;
+  }
+
+  /* В плавающей рейке 44×44 подписи не помещаются: действие читается
+   * по значку, доступное имя остаётся у кнопки. */
+  .fragment-action-text {
+    display: none;
   }
 
   .fragment-actions {

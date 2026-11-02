@@ -4,6 +4,9 @@ interface Props {
   scale: number;
   quality: number;
   preserveAspect: boolean;
+  /** Показывать ли клавиатурные шорткаты: на сенсорном экране они
+   * превращаются в инструкции, которые нечем выполнить. */
+  showShortcuts: boolean;
   onScale: (value: number) => void;
   onQuality: (value: number) => void;
   onPreserveAspect: (value: boolean) => void;
@@ -15,6 +18,7 @@ export function ViewMenu({
   scale,
   quality,
   preserveAspect,
+  showShortcuts,
   onScale,
   onQuality,
   onPreserveAspect,
@@ -60,12 +64,12 @@ export function ViewMenu({
           onChange={(e) => onPreserveAspect(e.target.checked)}
         />
         <span>Сохранять пропорции кадра</span>
-        <kbd>A</kbd>
+        {showShortcuts && <kbd>A</kbd>}
       </label>
       <button type="button" className="menu-action" onClick={onFullscreen}>
         <span className="menu-action-title">
           <span>Во весь экран</span>
-          <kbd>F</kbd>
+          {showShortcuts && <kbd>F</kbd>}
         </span>
       </button>
     </div>

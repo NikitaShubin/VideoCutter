@@ -708,13 +708,31 @@ describe("панель разметки: десктоп", () => {
 });
 
 describe("панель разметки: сенсорный экран", () => {
-  it("на сенсорном экране — только значки без подписей и клавиш", async () => {
+  it("в портрете подписывает действия, но не показывает клавиши", async () => {
     stubTouchOnly(true);
     const { host, unmount } = await mountEditor();
     const bar = host.querySelector<HTMLElement>(
       '[role="toolbar"][aria-label="Разметка фрагментов"]',
     )!;
-    expect(bar).toBeTruthy();
+    const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons).toHaveLength(7);
+    for (const button of buttons) {
+      expect(button.querySelector(".fragment-action-text")).toBeTruthy();
+      expect(button.querySelector("svg.fragment-icon")).toBeTruthy();
+      expect(button.getAttribute("aria-label")).toBeTruthy();
+    }
+    expect(bar.textContent).toContain("Начало");
+    expect(bar.textContent).toContain("Коммент.");
+    expect(bar.querySelector("kbd")).toBeNull();
+    unmount();
+  });
+
+  it("в ландшафте оставляет только значки", async () => {
+    stubTouchLandscape();
+    const { host, unmount } = await mountEditor();
+    const bar = host.querySelector<HTMLElement>(
+      '[role="toolbar"][aria-label="Разметка фрагментов"]',
+    )!;
     const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button")];
     expect(buttons).toHaveLength(7);
     for (const button of buttons) {
@@ -1143,6 +1161,15 @@ describe("смысловые зоны верха редактора", () => {
     unmount();
   });
 
+  it("на десктопе меню сохраняет клавиатурные подсказки", async () => {
+    const { host, unmount } = await mountEditor();
+    openMenu(host, "Вид");
+    const panel = menuPanel("Вид")!;
+    expect(panel.querySelector("kbd")?.textContent).toBe("A");
+    expect(panel.textContent).toContain("F");
+    unmount();
+  });
+
   it("галочка пропорций переключает режим кадра", async () => {
     const { host, unmount } = await mountEditor();
     const img = host.querySelector("img")!;
@@ -1303,6 +1330,26 @@ describe("телефонная шапка: одно меню «Ещё»", () => 
     expect(
       panel!.querySelector('input[aria-label="Масштаб кадров"]'),
     ).toBeTruthy();
+    unmount();
+  });
+
+  it("в тач-меню «Ещё» нет клавиатурных подсказок", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    openMenu(host, "Ещё");
+    const panel = menuPanel("Ещё")!;
+    expect(panel.querySelector("kbd")).toBeNull();
+    expect(panel.textContent).not.toContain("Клавиши");
+    unmount();
+  });
+
+  it("в тач-меню воспроизведения нет клавиатурной инструкции", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    act(() => playbackSettings(host).click());
+    const panel = menuPanel("Направление и скорость")!;
+    expect(panel.textContent).not.toContain("Клавиши 0–9");
+    expect(panel.textContent).toContain("Скорость и направление");
     unmount();
   });
 

@@ -3,6 +3,8 @@ import { formatNumber } from "../model/format";
 interface Props {
   direction: 1 | -1;
   speed: number;
+  /** Клавиатурные подсказки: на сенсорном экране их нечем выполнить. */
+  showShortcuts: boolean;
   onDirection: (direction: 1 | -1) => void;
   onSpeed: (speed: number) => void;
 }
@@ -11,6 +13,7 @@ interface Props {
 export function PlaybackMenu({
   direction,
   speed,
+  showShortcuts,
   onDirection,
   onSpeed,
 }: Props) {
@@ -21,7 +24,11 @@ export function PlaybackMenu({
         <button
           type="button"
           aria-label={`Направление: ${direction === -1 ? "назад" : "вперёд"}. Сменить`}
-          title="Сменить направление (R)"
+          title={
+            showShortcuts
+              ? "Сменить направление (R)"
+              : "Сменить направление"
+          }
           onClick={() => onDirection(direction === 1 ? -1 : 1)}
         >
           <span aria-hidden="true">{direction === -1 ? "◀" : "▶"}</span>
@@ -44,7 +51,9 @@ export function PlaybackMenu({
         />
       </label>
       <p className="menu-note">
-        Клавиши 0–9 задают скорость x1…x512, R меняет направление.
+        {showShortcuts
+          ? "Клавиши 0–9 задают скорость x1…x512, R меняет направление."
+          : "Скорость и направление задаются ползунком и кнопкой."}
       </p>
     </div>
   );

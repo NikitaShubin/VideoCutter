@@ -223,6 +223,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [landscape, setLandscape] = useState(false);
   const [controlsHidden, setControlsHidden] = useState(false);
   const editorTopRef = useRef<HTMLElement | null>(null);
+  // Подписи действий нужны и на телефоне в портрете: значок «фрагмент с
+  // уголками» не объясняет, что именно произойдёт. В низком ландшафте
+  // подписи отнимают ширину у плавающей рейки 44×44 — там остаются значки.
+  const showWorkbenchLabels = keyboard || !landscape;
 
   useEffect(() => {
     if (
@@ -1593,6 +1597,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                   scale={scale}
                   quality={quality}
                   preserveAspect={preserveAspect}
+                  showShortcuts={keyboard}
                   onScale={setScale}
                   onQuality={setQuality}
                   onPreserveAspect={setPreserveAspect}
@@ -1688,6 +1693,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                           scale={scale}
                           quality={quality}
                           preserveAspect={preserveAspect}
+                          showShortcuts={keyboard}
                           onScale={setScale}
                           onQuality={setQuality}
                           onPreserveAspect={setPreserveAspect}
@@ -1801,12 +1807,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 aria-label="Начало фрагмента"
               >
                 <FragmentIcon name="start" />
-                {keyboard && (
-                  <>
-                    <span className="fragment-action-text">Начало</span>
-                    <kbd>[</kbd>
-                  </>
+                {showWorkbenchLabels && (
+                  <span className="fragment-action-text">Начало</span>
                 )}
+                {keyboard && <kbd>[</kbd>}
               </button>
               <button
                 type="button"
@@ -1815,12 +1819,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 aria-label="Конец фрагмента"
               >
                 <FragmentIcon name="end" />
-                {keyboard && (
-                  <>
-                    <span className="fragment-action-text">Конец</span>
-                    <kbd>]</kbd>
-                  </>
+                {showWorkbenchLabels && (
+                  <span className="fragment-action-text">Конец</span>
                 )}
+                {keyboard && <kbd>]</kbd>}
               </button>
               <button
                 type="button"
@@ -1837,14 +1839,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 }
               >
                 <FragmentIcon name={keyPose === null ? "create" : "complete"} />
-                {keyboard && (
-                  <>
-                    <span className="fragment-action-text">
-                      {keyPose === null ? "Создать" : "Завершить"}
-                    </span>
-                    <kbd>K</kbd>
-                  </>
+                {showWorkbenchLabels && (
+                  <span className="fragment-action-text">
+                    {keyPose === null ? "Создать" : "Завершить"}
+                  </span>
                 )}
+                {keyboard && <kbd>K</kbd>}
               </button>
               <button
                 type="button"
@@ -1853,12 +1853,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 aria-label="Удалить фрагмент"
               >
                 <FragmentIcon name="delete" />
-                {keyboard && (
-                  <>
-                    <span className="fragment-action-text">Удалить</span>
-                    <kbd>D</kbd>
-                  </>
+                {showWorkbenchLabels && (
+                  <span className="fragment-action-text">Удалить</span>
                 )}
+                {keyboard && <kbd>D</kbd>}
               </button>
               <button
                 type="button"
@@ -1868,12 +1866,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 aria-label="Комментарий к фрагменту"
               >
                 <FragmentIcon name="comment" />
-                {keyboard && (
-                  <>
-                    <span className="fragment-action-text">Комментарий</span>
-                    <kbd>I</kbd>
-                  </>
+                {showWorkbenchLabels && (
+                  <span className="fragment-action-text">
+                    {keyboard ? "Комментарий" : "Коммент."}
+                  </span>
                 )}
+                {keyboard && <kbd>I</kbd>}
               </button>
               <div
                 className="editor-history"
@@ -1888,12 +1886,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                   aria-label="Отменить последнее изменение"
                 >
                   <FragmentIcon name="undo" />
-                  {keyboard && (
-                    <>
-                      <span className="fragment-action-text">Отменить</span>
-                      <kbd>Ctrl+Z</kbd>
-                    </>
+                  {showWorkbenchLabels && (
+                    <span className="fragment-action-text">Отменить</span>
                   )}
+                  {keyboard && <kbd>Ctrl+Z</kbd>}
                 </button>
                 <button
                   type="button"
@@ -1903,12 +1899,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                   aria-label="Повторить отменённое"
                 >
                   <FragmentIcon name="redo" />
-                  {keyboard && (
-                    <>
-                      <span className="fragment-action-text">Повторить</span>
-                      <kbd>Ctrl+Shift+Z</kbd>
-                    </>
+                  {showWorkbenchLabels && (
+                    <span className="fragment-action-text">Повторить</span>
                   )}
+                  {keyboard && <kbd>Ctrl+Shift+Z</kbd>}
                 </button>
               </div>
             </div>
@@ -2124,6 +2118,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               <PlaybackMenu
                 direction={direction}
                 speed={speed}
+                showShortcuts={keyboard}
                 onDirection={setDirection}
                 onSpeed={setSpeed}
               />
