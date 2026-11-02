@@ -223,6 +223,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [landscape, setLandscape] = useState(false);
   const [controlsHidden, setControlsHidden] = useState(false);
   const editorTopRef = useRef<HTMLElement | null>(null);
+  // Тап, которым пользователь возвращает скрытую шапку, не должен
+  // доходить до кадра: иначе «покажи кнопки» заодно переключает видео.
+  const controlsHiddenRef = useRef(false);
+  controlsHiddenRef.current = controlsHidden;
+  const wakeTapRef = useRef(false);
   // Подписи действий нужны и на телефоне в портрете: значок «фрагмент с
   // уголками» не объясняет, что именно произойдёт. В низком ландшафте
   // подписи отнимают ширину у плавающей рейки 44×44 — там остаются значки.
@@ -250,6 +255,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       return;
     }
     let timer: number | null = null;
+    let wakeTapTimer: number | null = null;
     const schedule = () => {
       if (timer !== null) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
@@ -264,11 +270,27 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         setControlsHidden(true);
       }, CONTROLS_IDLE_MS);
     };
-    const wake = () => {
+    const wake = (event: Event) => {
+      if (event.type === "pointerdown" && controlsHiddenRef.current) {
+        // Тот же тап, который разбудил шапку, не должен нажать кадр.
+        wakeTapRef.current = true;
+        if (wakeTapTimer !== null) window.clearTimeout(wakeTapTimer);
+        wakeTapTimer = window.setTimeout(() => {
+          wakeTapRef.current = false;
+          wakeTapTimer = null;
+        }, 400);
+      }
       setControlsHidden(false);
       schedule();
     };
+    const swallowWakeTap = (event: MouseEvent) => {
+      if (!wakeTapRef.current) return;
+      wakeTapRef.current = false;
+      event.preventDefault();
+      event.stopPropagation();
+    };
     schedule();
+    window.addEventListener("click", swallowWakeTap, true);
     window.addEventListener("pointermove", wake, { passive: true });
     window.addEventListener("pointerdown", wake, { passive: true });
     window.addEventListener("keydown", wake, true);
@@ -276,6 +298,8 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     window.addEventListener("focusout", wake, true);
     return () => {
       if (timer !== null) window.clearTimeout(timer);
+      if (wakeTapTimer !== null) window.clearTimeout(wakeTapTimer);
+      window.removeEventListener("click", swallowWakeTap, true);
       window.removeEventListener("pointermove", wake);
       window.removeEventListener("pointerdown", wake);
       window.removeEventListener("keydown", wake, true);

@@ -1890,6 +1890,45 @@ describe("ландшафтная шапка", () => {
     ).toBe(false);
     unmount();
   });
+
+  it("первый тап после бездействия только возвращает управление", async () => {
+    stubTouchLandscape();
+    const { host, unmount } = await mountEditor();
+    act(() => {
+      vi.advanceTimersByTime(2600);
+    });
+    const top = host.querySelector(".editor-top")!;
+    expect(top.classList.contains("controls-hidden")).toBe(true);
+    const img = host.querySelector("img")!;
+    const play = host.querySelector<HTMLButtonElement>(".transport-play")!;
+    expect(play.getAttribute("aria-pressed")).toBe("false");
+
+    act(() => {
+      img.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      img.click();
+    });
+
+    expect(top.classList.contains("controls-hidden")).toBe(false);
+    expect(play.getAttribute("aria-pressed")).toBe("false");
+    unmount();
+  });
+
+  it("следующий тап по кадру снова управляет воспроизведением", async () => {
+    stubTouchLandscape();
+    const { host, unmount } = await mountEditor();
+    act(() => {
+      vi.advanceTimersByTime(2600);
+    });
+    const img = host.querySelector("img")!;
+    const play = host.querySelector<HTMLButtonElement>(".transport-play")!;
+    act(() => {
+      img.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      img.click();
+      img.click();
+    });
+    expect(play.getAttribute("aria-pressed")).toBe("true");
+    unmount();
+  });
 });
 
 describe("телеметрия клиента", () => {
