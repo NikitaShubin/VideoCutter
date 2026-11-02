@@ -63,6 +63,71 @@ const CONTROLS_IDLE_MS = 2500;
 /** Закрывает верхний оверлей редактора. true — «назад» обработан. */
 export type BackGuard = () => boolean;
 
+// Полноэкранный режим: стандартный API + WebKit-префиксы. На iPhone
+// Element.requestFullscreen отсутствует вовсе — для него есть резервный
+// режим (класс fullscreen-fallback), который держит редактор и кадр по
+// всему вьюпорту без нативного API.
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitCurrentFullScreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+  webkitCancelFullScreen?: () => Promise<void> | void;
+};
+
+type FullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+  webkitRequestFullScreen?: () => Promise<void> | void;
+};
+
+/** Элемент нативного полного экрана (стандарт или WebKit-префикс). */
+function nativeFullscreenElement(): Element | null {
+  const doc = document as FullscreenDocument;
+  return (
+    doc.fullscreenElement ??
+    doc.webkitFullscreenElement ??
+    doc.webkitCurrentFullScreenElement ??
+    null
+  );
+}
+
+/** Выход из нативного полного экрана любым доступным API. */
+function exitNativeFullscreen(): void {
+  const doc = document as FullscreenDocument;
+  const fn =
+    doc.exitFullscreen ?? doc.webkitExitFullscreen ?? doc.webkitCancelFullScreen;
+  if (!fn) return;
+  try {
+    const result = fn.call(doc);
+    if (result && typeof result.catch === "function") result.catch(() => {});
+  } catch {
+    // Уже вышли (или браузер запретил) — состояние синхронизирует событие.
+  }
+}
+
+/**
+ * Запрос нативного полного экрана. false — API нет, нужен резервный режим.
+ * Отказ промиса (нет жеста, запрет политики) тоже уводит в резерв: кнопка
+ * не должна молча ничего не делать.
+ */
+function requestNativeFullscreen(
+  element: HTMLElement,
+  onFail: () => void,
+): boolean {
+  const node = element as FullscreenElement;
+  const fn =
+    node.requestFullscreen ??
+    node.webkitRequestFullscreen ??
+    node.webkitRequestFullScreen;
+  if (!fn) return false;
+  try {
+    const result = fn.call(node);
+    if (result && typeof result.catch === "function") result.catch(onFail);
+  } catch {
+    onFail();
+  }
+  return true;
+}
+
 interface Props {
   pairId: string;
   onBack: () => void;
@@ -79,6 +144,8 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [keyPose, setKeyPose] = useState<number | null>(null);
   const [preserveAspect, setPreserveAspect] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Резервный полный экран: браузер без Element.requestFullscreen (iPhone).
+  const [isFallbackFullscreen, setIsFallbackFullscreen] = useState(false);
   // Физическая клавиатура: тогда действия — только горячими клавишами,
   // их список — в справке «?». Кнопки-дубли нужны лишь сенсорному экрану.
   const keyboard = useKeyboardMode();
@@ -218,9 +285,14 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         setEditingComment(false);
         return true;
       }
-      if (document.fullscreenElement) {
-        if (typeof document.exitFullscreen === "function") {
-          document.exitFullscreen().catch(() => {});
+      if (fullscreenRef.current || nativeFullscreenElement()) {
+        if (nativeFullscreenElement()) {
+          exitNativeFullscreen();
+        } else {
+          fallbackFullscreenRef.current = false;
+          fullscreenRef.current = false;
+          setIsFallbackFullscreen(false);
+          setIsFullscreen(false);
         }
         return true;
       }
@@ -246,12 +318,33 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const fullscreenExitRef = useRef<HTMLButtonElement | null>(null);
   const wasFullscreenRef = useRef(false);
+  // keydown/back-guard замыкания несвежие (deps пустые) — режим читаем
+  // из ref, чтобы Esc и «Назад» видели текущее состояние.
+  const fullscreenRef = useRef(false);
+  const fallbackFullscreenRef = useRef(false);
 
-  // Синхронизация состояния с полноэкранным режимом браузера (вкл/выкл через Esc).
+  // Синхронизация состояния с полноэкранным режимом браузера (вкл/выкл через
+  // Esc и системную кнопку). Слушаем и WebKit-префикс: старые Safari не шлют
+  // стандартное событие.
   useEffect(() => {
-    const onChange = () => setIsFullscreen(document.fullscreenElement === editorRef.current);
+    const onChange = () => {
+      const native = nativeFullscreenElement() === editorRef.current;
+      if (native) {
+        fallbackFullscreenRef.current = false;
+        fullscreenRef.current = true;
+        setIsFallbackFullscreen(false);
+        setIsFullscreen(true);
+      } else if (!fallbackFullscreenRef.current) {
+        fullscreenRef.current = false;
+        setIsFullscreen(false);
+      }
+    };
     document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("webkitfullscreenchange", onChange);
+    };
   }, []);
 
   // В полном экране шапка исчезает: фокус ведём на видимую кнопку выхода,
@@ -268,12 +361,32 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     }
   }, [isFullscreen]);
 
-  const toggleFullscreen = () => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else {
-      editorRef.current?.requestFullscreen().catch(() => {});
+  const enterFallbackFullscreen = () => {
+    fallbackFullscreenRef.current = true;
+    fullscreenRef.current = true;
+    setIsFallbackFullscreen(true);
+    setIsFullscreen(true);
+  };
+
+  const exitFullscreenMode = () => {
+    if (nativeFullscreenElement()) {
+      exitNativeFullscreen();
+      return;
     }
+    fallbackFullscreenRef.current = false;
+    fullscreenRef.current = false;
+    setIsFallbackFullscreen(false);
+    setIsFullscreen(false);
+  };
+
+  const toggleFullscreen = () => {
+    if (fullscreenRef.current || nativeFullscreenElement()) {
+      exitFullscreenMode();
+      return;
+    }
+    const el = editorRef.current;
+    if (el && requestNativeFullscreen(el, enterFallbackFullscreen)) return;
+    enterFallbackFullscreen();
   };
 
   // Клиентский кэш кадров + предзагрузка: кадр подставляется в <img> только
@@ -1072,7 +1185,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         if (exportItemsRef.current) {
           e.preventDefault();
           setExportItems(null);
-        } else if (!document.fullscreenElement) {
+        } else if (fallbackFullscreenRef.current) {
+          // Резервный полный экран живёт только в приложении: нативного
+          // события Esc не будет, выходим сами.
+          e.preventDefault();
+          fallbackFullscreenRef.current = false;
+          fullscreenRef.current = false;
+          setIsFallbackFullscreen(false);
+          setIsFullscreen(false);
+        } else if (!fullscreenRef.current && !nativeFullscreenElement()) {
           handleBack();
         }
       }
@@ -1312,7 +1433,16 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       : undefined;
 
   return (
-    <div ref={editorRef} className={isFullscreen ? "editor fullscreen" : "editor"}>
+    <div
+      ref={editorRef}
+      className={
+        isFullscreen
+          ? isFallbackFullscreen
+            ? "editor fullscreen fullscreen-fallback"
+            : "editor fullscreen"
+          : "editor"
+      }
+    >
       <h1 className="sr-only">Редактор: {pair.name || pairId}</h1>
       {isFullscreen && (
         <button

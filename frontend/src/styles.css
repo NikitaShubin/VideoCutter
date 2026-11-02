@@ -972,6 +972,80 @@ select option {
   display: none;
 }
 
+/* Нативный полный экран: геометрию задаёт вьюпорт, а не React-состояние и
+ * не ширина документа. Некоторые мобильные браузеры оставляют у
+ * fullscreen-элемента ширину страницы — кадр уезжает к правому краю.
+ * Правила для стандартного и WebKit-префиксного псевдокласса раздельные:
+ * неизвестный селектор в общем списке отменил бы всё правило. */
+.editor:fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.editor:-webkit-full-screen {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.editor:fullscreen .video-area {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
+.editor:-webkit-full-screen .video-area {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
+.editor:fullscreen .video-area img,
+.editor:-webkit-full-screen .video-area img,
+.editor.fullscreen-fallback .video-area img {
+  object-position: center;
+}
+
+/* Резервный полный экран для браузеров без Element.requestFullscreen
+ * (iPhone Safari): тот же контракт — редактор и кадр по вьюпорту,
+ * изображение по центру. */
+.editor.fullscreen-fallback {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  padding: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.editor.fullscreen-fallback .video-area {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
 /* ─── Верх редактора: контекст, работа, утилиты ─────────────────────── */
 
 .editor-top {

@@ -1237,6 +1237,97 @@ describe("полноэкранный режим", () => {
     expect(exitFullscreen).toHaveBeenCalled();
     unmount();
   });
+
+  it("без нативного API включает полный экран внутри приложения", async () => {
+    // iPhone Safari не умеет Element.requestFullscreen: режим обязан
+    // включиться своим классом, иначе кнопка «Во весь экран» мертва.
+    const { host, unmount } = await mountEditor();
+    tap("KeyF");
+    const editor = host.querySelector(".editor")!;
+    expect(editor.classList.contains("fullscreen")).toBe(true);
+    expect(editor.classList.contains("fullscreen-fallback")).toBe(true);
+    expect(host.querySelector(".fullscreen-exit")).toBeTruthy();
+    unmount();
+  });
+
+  it("кнопка выхода выключает резервный полный экран", async () => {
+    const { host, unmount } = await mountEditor();
+    tap("KeyF");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".fullscreen-exit")!.click();
+    });
+    expect(host.querySelector(".editor")!.className).toBe("editor");
+    unmount();
+  });
+
+  it("Esc выходит из резервного полного экрана, не закрывая редактор", async () => {
+    const onBack = vi.fn();
+    const { host, unmount } = await mountEditor(onBack);
+    tap("KeyF");
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          code: "Escape",
+          bubbles: true,
+        }),
+      );
+    });
+    expect(host.querySelector(".editor")!.classList.contains("fullscreen"))
+      .toBe(false);
+    expect(onBack).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("использует webkit-полноэкранный API, если стандартного нет", async () => {
+    const webkitRequest = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "webkitRequestFullscreen", {
+      configurable: true,
+      value: webkitRequest,
+    });
+    try {
+      const { host, unmount } = await mountEditor();
+      tap("KeyF");
+      expect(webkitRequest).toHaveBeenCalledTimes(1);
+      Object.defineProperty(document, "webkitFullscreenElement", {
+        configurable: true,
+        get: () => host.querySelector(".editor"),
+      });
+      act(() => {
+        document.dispatchEvent(new Event("webkitfullscreenchange"));
+      });
+      const editor = host.querySelector(".editor")!;
+      expect(editor.classList.contains("fullscreen")).toBe(true);
+      expect(editor.classList.contains("fullscreen-fallback")).toBe(false);
+      unmount();
+    } finally {
+      delete (HTMLElement.prototype as { webkitRequestFullscreen?: unknown })
+        .webkitRequestFullscreen;
+      delete (document as { webkitFullscreenElement?: unknown })
+        .webkitFullscreenElement;
+    }
+  });
+
+  it("отказ нативного API включает резервный полный экран", async () => {
+    Object.defineProperty(HTMLElement.prototype, "requestFullscreen", {
+      configurable: true,
+      value: () => Promise.reject(new Error("нет разрешения")),
+    });
+    try {
+      const { host, unmount } = await mountEditor();
+      tap("KeyF");
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const editor = host.querySelector(".editor")!;
+      expect(editor.classList.contains("fullscreen")).toBe(true);
+      expect(editor.classList.contains("fullscreen-fallback")).toBe(true);
+      unmount();
+    } finally {
+      delete (HTMLElement.prototype as { requestFullscreen?: unknown })
+        .requestFullscreen;
+    }
+  });
 });
 
 describe("ландшафтная шапка", () => {
