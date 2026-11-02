@@ -1238,6 +1238,99 @@ describe("смысловые зоны верха редактора", () => {
   });
 });
 
+describe("телефонная шапка: одно меню «Ещё»", () => {
+  const setupTriggers = (host: HTMLElement) =>
+    [...host.querySelectorAll<HTMLButtonElement>(".editor-top .popover-trigger")];
+
+  it("на сенсорном экране вместо трёх меню — одно «Ещё»", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    const triggers = setupTriggers(host);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].textContent).toContain("Ещё");
+    unmount();
+  });
+
+  it("на устройстве с клавиатурой остаются три меню", async () => {
+    const { host, unmount } = await mountEditor();
+    const labels = setupTriggers(host).map((b) => b.textContent?.trim() ?? "");
+    expect(labels.some((l) => l.includes("Вид"))).toBe(true);
+    expect(labels.some((l) => l.includes("Данные"))).toBe(true);
+    expect(labels.some((l) => l.includes("Диагностика"))).toBe(true);
+    expect(labels.some((l) => l.includes("Ещё"))).toBe(false);
+    unmount();
+  });
+
+  it("«Ещё» открывает настройки вида по умолчанию", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    openMenu(host, "Ещё");
+    const panel = menuPanel("Ещё");
+    expect(panel).toBeTruthy();
+    expect(
+      panel!.querySelector('input[aria-label="Масштаб кадров"]'),
+    ).toBeTruthy();
+    unmount();
+  });
+
+  it("вкладка «Данные» показывает разметку и бэкап", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    openMenu(host, "Ещё");
+    const tab = [
+      ...menuPanel("Ещё")!.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((b) => b.textContent === "Данные")!;
+    act(() => {
+      tab.click();
+    });
+    expect(menuPanel("Ещё")!.textContent).toContain("Скачать разметку");
+    expect(menuPanel("Ещё")!.textContent).toContain("Скачать бэкап");
+    unmount();
+  });
+
+  it("«Диагностика» внутри «Ещё» грузит кэш только при выборе", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    openMenu(host, "Ещё");
+    expect(getCache).not.toHaveBeenCalled();
+    const tab = [
+      ...menuPanel("Ещё")!.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((b) => b.textContent === "Диагностика")!;
+    act(() => {
+      tab.click();
+    });
+    await act(async () => {});
+    expect(getCache).toHaveBeenCalledTimes(1);
+    expect(
+      menuPanel("Ещё")!.querySelector('button[aria-label^="GOP-кэш"]'),
+    ).toBeTruthy();
+    unmount();
+  });
+
+  it("Escape закрывает «Ещё» и возвращает фокус на кнопку", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    const trigger = menuTrigger(host, "Ещё");
+    act(() => {
+      trigger.focus();
+      trigger.click();
+    });
+    expect(menuPanel("Ещё")).toBeTruthy();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(menuPanel("Ещё")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    unmount();
+  });
+});
+
 describe("управление воспроизведением", () => {
   it("кнопка скорости открывает направление и скорость", async () => {
     const { host, unmount } = await mountEditor();

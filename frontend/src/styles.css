@@ -1330,6 +1330,33 @@ select option {
   gap: 8px;
 }
 
+/* Телефонное «Ещё»: три прежних меню — вкладками внутри одного поповера.
+ * Цель 44px: панель живёт в portal и не получает общий touch-размер шапки. */
+.menu-tabs {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--edge);
+}
+
+.menu-tabs [role="tab"] {
+  flex: 1 1 auto;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.menu-tabs [role="tab"][aria-selected="true"] {
+  border-color: var(--edge);
+  background: var(--btn);
+  color: var(--text);
+}
+
 /* Направление — один переключатель: двух кнопок «вперёд/назад» много. */
 .menu-direction {
   display: flex;
@@ -2796,11 +2823,12 @@ select option {
      * поверх светлого кадра. */
     background: linear-gradient(
       to bottom,
-      rgba(0, 0, 0, 0.82),
-      rgba(0, 0, 0, 0.45)
+      rgba(0, 0, 0, 0.9),
+      rgba(0, 0, 0, 0.6)
     );
     border: none;
     border-radius: 0;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
     transition: background 0.18s ease;
   }
 
@@ -2809,6 +2837,7 @@ select option {
    * снят только с шапки, рейка разметки остаётся кликабельной. */
   .editor-top.controls-hidden {
     background: transparent;
+    box-shadow: none;
     pointer-events: none;
   }
 
@@ -2870,10 +2899,6 @@ select option {
 
   .editor-warning {
     max-width: 180px;
-  }
-
-  .editor-top button {
-    min-height: 40px;
   }
 
   .video-area {

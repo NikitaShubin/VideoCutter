@@ -201,8 +201,16 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   // Верх редактора: открыто максимум одно меню. Пока оно открыто,
   // глобальные горячие клавиши не срабатывают — иначе «D» в меню
   // «Вид» удалила бы фрагмент, а Escape увёл бы из редактора.
-  type EditorMenu = "view" | "exchange" | "diagnostics" | "playback" | null;
+  type EditorMenu =
+    | "view"
+    | "exchange"
+    | "diagnostics"
+    | "more"
+    | "playback"
+    | null;
+  type MobileMenuTab = "view" | "exchange" | "diagnostics";
   const [openMenu, setOpenMenu] = useState<EditorMenu>(null);
+  const [mobileMenuTab, setMobileMenuTab] = useState<MobileMenuTab>("view");
   const openMenuRef = useRef<EditorMenu>(null);
   openMenuRef.current = openMenu;
 
@@ -1567,11 +1575,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 <span className="editor-warning-text">{pair.pair_warning}</span>
               </span>
             )}
-            <div
-              className="editor-utilities"
-              role="group"
-              aria-label="Настройки и сервис"
-            >
+            {keyboard && (
+              <div
+                className="editor-utilities"
+                role="group"
+                aria-label="Настройки и сервис"
+              >
               <Popover
                 label="Вид"
                 open={openMenu === "view"}
@@ -1623,8 +1632,101 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                   show={perf.show}
                 />
               </Popover>
-            </div>
+              </div>
+            )}
             <div className="editor-global-actions">
+              {/* На сенсорном экране три меню не помещаются в строку и
+               * отжимают имя задачи. Одно «Ещё» с вкладками оставляет
+               * экспорт видимым, а имя — крупным. */}
+              {!keyboard && (
+                <Popover
+                  label="Ещё"
+                  trigger={
+                    <>
+                      Ещё
+                      <span className="popover-caret" aria-hidden="true">
+                        ▾
+                      </span>
+                    </>
+                  }
+                  open={openMenu === "more"}
+                  onOpenChange={(v) => {
+                    setOpenMenu(v ? "more" : null);
+                    if (v) setMobileMenuTab("view");
+                  }}
+                >
+                  <div className="menu-stack">
+                    <div
+                      className="menu-tabs"
+                      role="tablist"
+                      aria-label="Настройки и сервис"
+                    >
+                      {(
+                        [
+                          ["view", "Вид"],
+                          ["exchange", "Данные"],
+                          ["diagnostics", "Диагностика"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          role="tab"
+                          aria-selected={mobileMenuTab === id}
+                          onClick={() => setMobileMenuTab(id)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div role="tabpanel" aria-label="Вид">
+                      {mobileMenuTab === "view" && (
+                        <ViewMenu
+                          scale={scale}
+                          quality={quality}
+                          preserveAspect={preserveAspect}
+                          onScale={setScale}
+                          onQuality={setQuality}
+                          onPreserveAspect={setPreserveAspect}
+                          onFullscreen={() => {
+                            setOpenMenu(null);
+                            toggleFullscreen();
+                          }}
+                        />
+                      )}
+                    </div>
+                    <div role="tabpanel" aria-label="Данные">
+                      {mobileMenuTab === "exchange" && (
+                        <DataMenu
+                          downloading={dlState?.key ?? null}
+                          downloadFrac={dlState?.frac ?? null}
+                          annBusy={annBusy}
+                          annProgress={annProgress}
+                          onDownload={(key) =>
+                            handleDownload(
+                              key,
+                              key === "ann"
+                                ? annotationsUrl(pairId)
+                                : taskBackupUrl(pairId),
+                              `${pairId}-${key === "ann" ? "annotations" : "backup"}.zip`,
+                            )
+                          }
+                          onImport={handleAnnotationsImport}
+                        />
+                      )}
+                    </div>
+                    <div role="tabpanel" aria-label="Диагностика">
+                      {mobileMenuTab === "diagnostics" && (
+                        <DiagnosticsMenu
+                          fps={perf.fps}
+                          load={perf.load}
+                          show={perf.show}
+                        />
+                      )}
+                    </div>
+                  </div>
+                </Popover>
+              )}
               <button
                 type="button"
                 className="toolbar-export"
