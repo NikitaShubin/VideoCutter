@@ -145,6 +145,28 @@ describe("кнопка «Назад» браузера", () => {
     unmount();
   });
 
+  it("после «Назад» фокус возвращается на строку задачи", async () => {
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {
+      window.dispatchEvent(
+        new PopStateEvent("popstate", { state: { vc: "list" } }),
+      );
+    });
+    const { host, unmount } = await mountApp();
+    act(() => {
+      host.querySelector<HTMLButtonElement>("button.pair-open")!.click();
+    });
+    await flush();
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".editor-back")!.click();
+    });
+    await flush();
+    expect(document.activeElement).toBe(
+      host.querySelector<HTMLButtonElement>("button.pair-open"),
+    );
+    back.mockRestore();
+    unmount();
+  });
+
   it("назад при открытой справке закрывает её, а не редактор", async () => {
     const { host, unmount } = await mountApp();
     act(() => {

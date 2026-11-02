@@ -53,6 +53,9 @@ export function App() {
   pairIdRef.current = pairId;
   // Верхний оверлей редактора (справка, меню, экспорт, комментарий).
   const backGuardRef = useRef<BackGuard | null>(null);
+  // Задача, из строки которой открыли редактор: после возврата к списку
+  // фокус должен вернуться туда же.
+  const returnFocusPairIdRef = useRef<string | null>(null);
 
   // Перезагрузка в редакторе оставляет в history «редактор», хотя экран
   // начинает со списка. Нормализуем запись, иначе первый «Назад» из
@@ -71,6 +74,9 @@ export function App() {
   }, [reload]);
 
   const openEditor = useCallback((id: string) => {
+    // Строку, из которой открыли задачу, вернём фокусом после «Назад»:
+    // иначе клавиатурный пользователь теряет место в списке.
+    returnFocusPairIdRef.current = id;
     setPairId(id);
     setScreen("editor");
     const st = window.history.state as { vc?: string } | null;
@@ -108,6 +114,20 @@ export function App() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, [closeEditor]);
+
+  // Возврат к списку: фокус — на строку, из которой открыли редактор.
+  // Строка пересоздаётся при смене экрана, поэтому ищем её по id задачи,
+  // а не держим ссылку на размонтированный узел.
+  useEffect(() => {
+    if (screen !== "list") return;
+    const id = returnFocusPairIdRef.current;
+    if (id === null) return;
+    returnFocusPairIdRef.current = null;
+    const row = [...document.querySelectorAll<HTMLButtonElement>(".pair-open")].find(
+      (button) => button.dataset.pairId === id,
+    );
+    row?.focus();
+  }, [screen]);
 
   // Зеркало списка для тика: слияние лёгкого статуса без лишних рендеров.
   const pairsRef = useRef<VideoPair[]>([]);

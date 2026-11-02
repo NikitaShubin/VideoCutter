@@ -1413,6 +1413,7 @@ export function PairList({
             <div className="pair-row">
               <button
                 className="pair-open"
+                data-pair-id={p.id}
                 onClick={() => onSelect(p.id)}
                 disabled={p.indexing}
                 title={p.indexing ? "Индексируется — подождите готовности" : `Открыть ${p.id}`}
