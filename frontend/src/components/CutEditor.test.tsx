@@ -836,6 +836,61 @@ describe("комментарий к сегменту", () => {
     unmount();
   });
 
+  it("успешное сохранение показывает локальный статус без тоста", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Новый комментарий");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    await act(async () => {});
+    expect(host.querySelector(".comment-saved")?.textContent).toContain(
+      "Сохранено",
+    );
+    expect(host.querySelector(".flash")).toBeNull();
+    expect(host.querySelector(".save-state")?.getAttribute("role")).toBeNull();
+    unmount();
+  });
+
+  it("локальный статус исчезает и возвращает комментарий", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Новый комментарий");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    await act(async () => {});
+    expect(host.querySelector(".comment-saved")).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(host.querySelector(".comment-saved")).toBeNull();
+    expect(
+      host.querySelector(".editor-comment .comment-text")?.textContent,
+    ).toContain("Новый комментарий");
+    unmount();
+  });
+
+  it("ошибка сохранения комментария не показывает локальный успех", async () => {
+    vi.mocked(replaceFragments).mockRejectedValueOnce(new Error("сеть"));
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Черновик");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    await act(async () => {});
+    expect(host.querySelector(".comment-saved")).toBeNull();
+    expect(host.querySelector(".flash")?.getAttribute("role")).toBe("alert");
+    unmount();
+  });
+
   it("«Отмена» закрывает поле без сохранения", async () => {
     const { host, unmount } = await mountEditor();
     openComment(host);

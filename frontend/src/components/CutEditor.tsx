@@ -187,6 +187,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [viewQuality, setViewQuality] = useState(78);
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
+  const [commentSavedFor, setCommentSavedFor] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   // Поле номера кадра: null — значение привязано к позиции (обновляется
   // при тапах/прыжках/проигрывании); строка — черновик ручного ввода
@@ -959,20 +960,29 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   };
 
   const saveSeqRef = useRef(0);
-  const saveToDb = (frags: { start: number; end: number; comment: string }[]) => {
+  const saveToDb = (
+    frags: { start: number; end: number; comment: string }[],
+    options: { commentStart?: number } = {},
+  ) => {
     const seq = ++saveSeqRef.current;
     setSaveState("saving");
     replaceFragments(pairId, frags, position)
       .then(() => {
         if (seq !== saveSeqRef.current) return;
         setSaveState("saved");
-        flash("Сохранено");
+        // Комментарий подтверждается на месте, а не тостом поверх шапки:
+        // у сохранения комментария один локальный live-region.
+        if (options.commentStart !== undefined) {
+          showCommentSaved(options.commentStart);
+        } else {
+          flash("Сохранено");
+        }
       })
       .catch((e) => {
         if (seq !== saveSeqRef.current) return;
         setSaveState("error");
         flash(`Ошибка сохранения: ${e.message}`, "error", () =>
-          saveToDb(frags),
+          saveToDb(frags, options),
         );
       });
   };
@@ -998,7 +1008,27 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const commentEditRef = useRef<HTMLButtonElement | null>(null);
   const commentToolRef = useRef<HTMLButtonElement | null>(null);
   const commentTriggerRef = useRef<HTMLElement | null>(null);
+  const commentSavedTimerRef = useRef<number | null>(null);
   const committedRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      if (commentSavedTimerRef.current !== null) {
+        window.clearTimeout(commentSavedTimerRef.current);
+      }
+    };
+  }, []);
+
+  const showCommentSaved = (fragmentStart: number) => {
+    if (commentSavedTimerRef.current !== null) {
+      window.clearTimeout(commentSavedTimerRef.current);
+    }
+    setCommentSavedFor(fragmentStart);
+    commentSavedTimerRef.current = window.setTimeout(() => {
+      setCommentSavedFor(null);
+      commentSavedTimerRef.current = null;
+    }, 1800);
+  };
 
   /** Возврат фокуса туда, откуда открыли редактор: иначе после Save/Cancel
    * клавиатурный пользователь оказывается в начале страницы. */
@@ -1023,6 +1053,13 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     }
     commentTriggerRef.current =
       trigger ?? commentEditRef.current ?? commentToolRef.current;
+    // Новое открытие редактора отменяет прежнее подтверждение: иначе
+    // «Сохранено» вернулось бы после закрытия нового черновика.
+    if (commentSavedTimerRef.current !== null) {
+      window.clearTimeout(commentSavedTimerRef.current);
+      commentSavedTimerRef.current = null;
+    }
+    setCommentSavedFor(null);
     setCommentDraft(f.comment);
     setEditingComment(true);
     committedRef.current = false;
@@ -1032,13 +1069,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const commitComment = () => {
     const p = modelRef.current;
     if (!p || committedRef.current) return;
+    const f = p.fragmentAt(position);
+    if (!f) return;
     committedRef.current = true;
     setEditingComment(false);
     restoreCommentFocus();
     if (p.setComment(position, commentDraft)) {
       rerender();
       drawStatusbar();
-      saveToDb(p.getFragments());
+      saveToDb(p.getFragments(), { commentStart: f.start });
     }
   };
 
@@ -1470,6 +1509,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     pair.width > 0 && pair.height > 0
       ? `${pair.width} / ${pair.height}`
       : undefined;
+  const currentFragment = modelRef.current?.fragmentAt(position);
+  const commentSavedHere =
+    commentSavedFor !== null && currentFragment?.start === commentSavedFor;
 
   return (
     <div
@@ -1784,21 +1826,31 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 </button>
               </div>
             </div>
-          ) : modelRef.current?.fragmentAt(position)?.comment ? (
-            <div className="editor-comment">
-              <button
-                type="button"
-                ref={commentEditRef}
-                className="comment-edit"
-                onClick={(e) => startCommentEdit(e.currentTarget)}
-                title="Изменить комментарий"
-              >
-                <span className="sr-only">Редактировать комментарий: </span>
-                <span className="comment-text">
-                  {modelRef.current?.fragmentAt(position)?.comment}
+          ) : currentFragment?.comment || commentSavedHere ? (
+            <div
+              className={`editor-comment${commentSavedHere ? " is-saved" : ""}${
+                currentFragment?.comment ? "" : " is-empty-saved"
+              }`}
+            >
+              {currentFragment?.comment ? (
+                <button
+                  type="button"
+                  ref={commentEditRef}
+                  className="comment-edit"
+                  onClick={(e) => startCommentEdit(e.currentTarget)}
+                  title="Изменить комментарий"
+                >
+                  <span className="sr-only">Редактировать комментарий: </span>
+                  <span className="comment-text">{currentFragment.comment}</span>
+                  <FragmentIcon name="edit" />
+                </button>
+              ) : null}
+              {commentSavedHere && (
+                <span className="comment-saved" role="status" aria-atomic="true">
+                  <span className="save-dot" aria-hidden="true" />
+                  Сохранено
                 </span>
-                <FragmentIcon name="edit" />
-              </button>
+              )}
             </div>
           ) : null
         )}
@@ -1847,12 +1899,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               onBlur={commitFrameInput}
             />{" "}
             / {formatNumber(pair.total_frames)}
-            <span
-              className="save-state"
-              data-state={saveState}
-              role="status"
-              aria-live="polite"
-            >
+            <span className="save-state" data-state={saveState}>
               {saveState !== "idle" && (
                 <span className="save-dot" aria-hidden="true" />
               )}

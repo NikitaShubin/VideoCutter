@@ -1642,7 +1642,7 @@ select option {
   align-items: center;
   gap: 5px;
   margin-left: auto;
-  font-size: 0.85em;
+  font-size: 1em;
   white-space: nowrap;
 }
 
@@ -1851,6 +1851,36 @@ select option {
   border-radius: var(--r-s);
   font-size: 0.9em;
   transition: background 0.15s ease;
+}
+
+/* Подтверждение привязано к полосе комментария: маленькая зелёная плашка
+ * над ней, не заменяет кнопку и не уводит фокус. */
+.editor-comment .comment-saved {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--green-strong);
+  border-radius: 999px;
+  background: #1f3d2a;
+  color: #d8f5e3;
+  font-size: 0.9em;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+.editor-comment .comment-saved .save-dot {
+  background: var(--green-bright);
+}
+
+.editor-comment.is-empty-saved {
+  background: transparent;
+  border-bottom: 0;
 }
 
 .editor-comment .comment-text {
@@ -2596,7 +2626,7 @@ select option {
   /* Комментарий не лежит поверх кадра: в узком портрете он съедал больше
    * половины изображения. Теперь это строка под кадром, привязанная к нему. */
   .editor:not(.fullscreen) .editor-comment {
-    position: static;
+    position: relative;
     max-width: none;
     padding: 0;
     border-radius: 0;
