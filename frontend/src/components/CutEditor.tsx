@@ -63,6 +63,10 @@ const CONTROLS_IDLE_MS = 2500;
 /** Закрывает верхний оверлей редактора. true — «назад» обработан. */
 export type BackGuard = () => boolean;
 
+/** Состояние последнего сохранения фрагментов: постоянный индикатор
+ * в транспорте, а не одноразовый flash. */
+type SaveState = "idle" | "saving" | "saved" | "error";
+
 // Полноэкранный режим: стандартный API + WebKit-префиксы. На iPhone
 // Element.requestFullscreen отсутствует вовсе — для него есть резервный
 // режим (класс fullscreen-fallback), который держит редактор и кадр по
@@ -183,6 +187,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [viewQuality, setViewQuality] = useState(78);
   const [editingComment, setEditingComment] = useState(false);
   const [commentDraft, setCommentDraft] = useState("");
+  const [saveState, setSaveState] = useState<SaveState>("idle");
   // Поле номера кадра: null — значение привязано к позиции (обновляется
   // при тапах/прыжках/проигрывании); строка — черновик ручного ввода
   // (пишется только под фокусом). Коммит — Enter или клик мимо поля,
@@ -953,14 +958,23 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     setMessage(null);
   };
 
+  const saveSeqRef = useRef(0);
   const saveToDb = (frags: { start: number; end: number; comment: string }[]) => {
+    const seq = ++saveSeqRef.current;
+    setSaveState("saving");
     replaceFragments(pairId, frags, position)
-      .then(() => flash("Сохранено"))
-      .catch((e) =>
+      .then(() => {
+        if (seq !== saveSeqRef.current) return;
+        setSaveState("saved");
+        flash("Сохранено");
+      })
+      .catch((e) => {
+        if (seq !== saveSeqRef.current) return;
+        setSaveState("error");
         flash(`Ошибка сохранения: ${e.message}`, "error", () =>
           saveToDb(frags),
-        ),
-      );
+        );
+      });
   };
 
   // Ввод номера кадра (1-based, как на экране): клампинг в 1..N, переход
@@ -1007,6 +1021,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       drawStatusbar();
       saveToDb(p.getFragments());
     }
+  };
+
+  const cancelComment = () => {
+    committedRef.current = true;
+    setEditingComment(false);
   };
 
   // Действия разметки — один источник для клавиатуры и видимой панели.
@@ -1671,38 +1690,40 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       )}
 
       <div
-        className="video-area"
+        className="video-stage"
         style={{ "--frame-aspect": frameAspect } as CSSProperties}
       >
-        <img
-          ref={imageRef}
-          alt={`Кадр ${formatNumber(position + 1)} из ${formatNumber(pair.total_frames)}`}
-          className={frameLoading ? "frame-loading" : undefined}
-          onClick={togglePlayback}
-          title="Клик — воспроизведение / пауза"
-          style={{
-            objectFit: preserveAspect ? "contain" : "fill",
-            width: "100%",
-            height: "100%",
-            // До первого кадра пустой <img> не рисуем (иначе вместо кадра
-            // виден «сломанный» значок с alt-текстом).
-            visibility: shownFrame < 0 ? "hidden" : undefined,
-          }}
-        />
-        {shownFrame < 0 && <div className="frame-empty">Кадр загружается…</div>}
-        {frameLoading && (
-          <div className="frame-wait">
-            <span className="frame-ring" aria-hidden="true" />
-            {frameStuck && (
-              <span className="frame-wait-text" role="alert">
-                Кадр не загрузился — перейдите на соседний кадр и вернитесь
-              </span>
-            )}
-          </div>
-        )}
+        <div className="video-area">
+          <img
+            ref={imageRef}
+            alt={`Кадр ${formatNumber(position + 1)} из ${formatNumber(pair.total_frames)}`}
+            className={frameLoading ? "frame-loading" : undefined}
+            onClick={togglePlayback}
+            title="Клик — воспроизведение / пауза"
+            style={{
+              objectFit: preserveAspect ? "contain" : "fill",
+              width: "100%",
+              height: "100%",
+              // До первого кадра пустой <img> не рисуем (иначе вместо кадра
+              // виден «сломанный» значок с alt-текстом).
+              visibility: shownFrame < 0 ? "hidden" : undefined,
+            }}
+          />
+          {shownFrame < 0 && <div className="frame-empty">Кадр загружается…</div>}
+          {frameLoading && (
+            <div className="frame-wait">
+              <span className="frame-ring" aria-hidden="true" />
+              {frameStuck && (
+                <span className="frame-wait-text" role="alert">
+                  Кадр не загрузился — перейдите на соседний кадр и вернитесь
+                </span>
+              )}
+            </div>
+          )}
+        </div>
         {(!isFullscreen || editingComment) && (
           editingComment ? (
-            <div className="editor-comment">
+            <div className="editor-comment is-editing">
               <textarea
                 ref={commentRef}
                 name="fragmentComment"
@@ -1714,20 +1735,44 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 onKeyDown={(e) => {
                   if (e.key === "Escape") {
                     e.preventDefault();
-                    setEditingComment(false);
+                    cancelComment();
                   } else if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     commitComment();
                   }
                 }}
-                onBlur={commitComment}
               />
+              <div className="comment-actions">
+                <button
+                  type="button"
+                  className="comment-save"
+                  onClick={commitComment}
+                >
+                  Сохранить
+                </button>
+                <button
+                  type="button"
+                  className="comment-cancel"
+                  onClick={cancelComment}
+                >
+                  Отмена
+                </button>
+              </div>
             </div>
           ) : modelRef.current?.fragmentAt(position)?.comment ? (
             <div className="editor-comment">
-              <span className="comment-text">
-                {modelRef.current?.fragmentAt(position)?.comment}
-              </span>
+              <button
+                type="button"
+                className="comment-edit"
+                onClick={startCommentEdit}
+                title="Изменить комментарий"
+              >
+                <span className="sr-only">Редактировать комментарий: </span>
+                <span className="comment-text">
+                  {modelRef.current?.fragmentAt(position)?.comment}
+                </span>
+                <FragmentIcon name="edit" />
+              </button>
             </div>
           ) : null
         )}
@@ -1776,6 +1821,23 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               onBlur={commitFrameInput}
             />{" "}
             / {formatNumber(pair.total_frames)}
+            <span
+              className="save-state"
+              data-state={saveState}
+              role="status"
+              aria-live="polite"
+            >
+              {saveState !== "idle" && (
+                <span className="save-dot" aria-hidden="true" />
+              )}
+              {saveState === "saving"
+                ? "Сохраняем…"
+                : saveState === "saved"
+                  ? "Сохранено"
+                  : saveState === "error"
+                    ? "Ошибка сохранения"
+                    : ""}
+            </span>
           </span>
           <span className="selection-readout">
             выделено {formatNumber(sel)} ({formatPercent(markedPct, 1)})

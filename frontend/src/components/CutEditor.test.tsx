@@ -165,6 +165,18 @@ function keyPress(input: HTMLInputElement, key: string): void {
   });
 }
 
+/** Управляемый textarea React'а: setter прототипа + событие input. */
+function typeIntoArea(area: HTMLTextAreaElement, text: string): void {
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!;
+    setter.call(area, text);
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 /** Сенсорный экран без физической клавиатуры (как на телефоне). */
 function stubTouchOnly(matches: boolean): void {
   vi.stubGlobal(
@@ -191,6 +203,26 @@ function stubLandscape(): void {
     (query: string) =>
       ({
         matches: query.includes("orientation: landscape"),
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as unknown as MediaQueryList,
+  );
+}
+
+/** Сенсорный телефон в ландшафте: совпадают и «нет мыши», и ориентация. */
+function stubTouchLandscape(): void {
+  vi.stubGlobal(
+    "matchMedia",
+    (query: string) =>
+      ({
+        matches:
+          query.includes("pointer: coarse") ||
+          query.includes("orientation: landscape"),
         media: query,
         onchange: null,
         addEventListener: vi.fn(),
@@ -547,6 +579,22 @@ function clickFragment(host: HTMLElement, text: string): void {
   });
 }
 
+function commentButton(host: HTMLElement): HTMLButtonElement {
+  const btn = host.querySelector<HTMLButtonElement>(
+    ".editor-comment .comment-edit",
+  );
+  if (!btn) throw new Error("кнопка комментария не найдена");
+  return btn;
+}
+
+/** Клик по плашке комментария и запуск отложенного фокуса textarea. */
+function openComment(host: HTMLElement): void {
+  act(() => commentButton(host).click());
+  act(() => {
+    vi.advanceTimersByTime(0);
+  });
+}
+
 /** Переход к кадру через поле номера: клавиши в поле не считаются
  * физической клавиатурой, поэтому панель разметки остаётся на месте. */
 function seekToFrame(host: HTMLElement, frame: number): void {
@@ -721,6 +769,147 @@ describe("панель разметки", () => {
     clickFragment(host, "Начало");
     clickFragment(host, "Отменить");
     expect(lastSaved()).toEqual([]);
+    unmount();
+  });
+});
+
+describe("комментарий к сегменту", () => {
+  beforeEach(() => {
+    pairDetail.fragments = [{ start: 0, end: 10, comment: "Проверить знак" }];
+  });
+
+  it("показанный комментарий — кнопка с доступным именем", async () => {
+    const { host, unmount } = await mountEditor();
+    const btn = commentButton(host);
+    expect(btn.type).toBe("button");
+    expect(btn.textContent).toContain("Редактировать комментарий");
+    expect(btn.textContent).toContain("Проверить знак");
+    unmount();
+  });
+
+  it("клик по комментарию открывает поле с текущим текстом и фокусом", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area = host.querySelector<HTMLTextAreaElement>(
+      ".editor-comment textarea",
+    );
+    expect(area?.value).toBe("Проверить знак");
+    expect(document.activeElement).toBe(area);
+    unmount();
+  });
+
+  it("на сенсорном экране в портрете клик тоже открывает поле", async () => {
+    stubTouchOnly(true);
+    stubViewport(390, 844);
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    expect(host.querySelector(".editor-comment textarea")).toBeTruthy();
+    unmount();
+  });
+
+  it("в ландшафте телефона клик тоже открывает поле", async () => {
+    stubTouchLandscape();
+    stubViewport(844, 390);
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    expect(host.querySelector(".editor-comment textarea")).toBeTruthy();
+    unmount();
+  });
+
+  it("«Сохранить» сохраняет новый текст и показывает статус", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Новый комментарий");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    await act(async () => {});
+    expect(lastSaved()).toEqual([
+      { start: 0, end: 10, comment: "Новый комментарий" },
+    ]);
+    expect(host.querySelector(".editor-comment textarea")).toBeNull();
+    expect(host.querySelector(".save-state")?.textContent).toContain(
+      "Сохранено",
+    );
+    unmount();
+  });
+
+  it("«Отмена» закрывает поле без сохранения", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Не сохранять");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-cancel")!.click();
+    });
+    expect(host.querySelector(".editor-comment textarea")).toBeNull();
+    expect(vi.mocked(replaceFragments)).not.toHaveBeenCalled();
+    expect(
+      host.querySelector(".editor-comment .comment-text")?.textContent,
+    ).toBe("Проверить знак");
+    unmount();
+  });
+
+  it("Escape закрывает поле без сохранения", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    act(() => {
+      area.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(host.querySelector(".editor-comment textarea")).toBeNull();
+    expect(vi.mocked(replaceFragments)).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("пока сохранение идёт, статус это показывает", async () => {
+    let finish: () => void = () => {};
+    vi.mocked(replaceFragments).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve([]);
+        }),
+    );
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Черновик");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    expect(host.querySelector(".save-state")?.textContent).toContain(
+      "Сохраняем",
+    );
+    await act(async () => {
+      finish();
+    });
+    expect(host.querySelector(".save-state")?.textContent).toContain(
+      "Сохранено",
+    );
+    unmount();
+  });
+
+  it("ошибка сохранения остаётся в статусе", async () => {
+    vi.mocked(replaceFragments).mockRejectedValueOnce(new Error("сеть"));
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Черновик");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    await act(async () => {});
+    expect(host.querySelector(".save-state")?.textContent).toContain(
+      "Ошибка сохранения",
+    );
     unmount();
   });
 });

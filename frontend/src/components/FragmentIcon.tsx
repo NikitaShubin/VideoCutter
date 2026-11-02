@@ -7,6 +7,7 @@ export type FragmentIconName =
   | "complete"
   | "delete"
   | "comment"
+  | "edit"
   | "undo"
   | "redo";
 
@@ -44,6 +45,13 @@ const PATHS: Record<FragmentIconName, ReactNode> = {
     </>
   ),
   comment: <path d="M4 5h16v11H9l-5 4V5z" />,
+  // Карандаш: клик по комментарию открывает его для правки.
+  edit: (
+    <>
+      <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4z" />
+      <path d="m13.5 6.5 4 4" />
+    </>
+  ),
   undo: (
     <>
       <path d="M9 7 4 12l5 5" />

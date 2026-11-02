@@ -1635,6 +1635,56 @@ select option {
   color: var(--muted);
 }
 
+/* Постоянный статус сохранения: точка + короткая подпись. Живёт в строке
+ * кадра, поэтому виден и в портрете, и в ландшафте, и на десктопе. */
+.save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.save-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.save-state[data-state="saving"] {
+  color: var(--warn);
+}
+
+.save-state[data-state="saving"] .save-dot {
+  background: var(--warn);
+  animation: save-pulse 1s ease-in-out infinite;
+}
+
+.save-state[data-state="saved"] {
+  color: var(--green-bright);
+}
+
+.save-state[data-state="saved"] .save-dot {
+  background: var(--green-bright);
+}
+
+.save-state[data-state="error"] {
+  color: var(--red);
+}
+
+.save-state[data-state="error"] .save-dot {
+  background: var(--red);
+}
+
+@keyframes save-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .transport-playback {
   display: inline-flex;
   align-items: stretch;
@@ -1694,6 +1744,14 @@ select option {
  * на широком экране кадр и так крупный. */
 .rotate-hint {
   display: none;
+}
+
+.video-stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .video-area {
@@ -1784,11 +1842,13 @@ select option {
   position: absolute;
   left: 10px;
   bottom: 10px;
-  max-width: 60%;
+  z-index: 2;
+  max-width: min(60%, 520px);
   padding: 6px 10px;
   background: rgba(0, 0, 0, 0.65);
   border-radius: var(--r-s);
   font-size: 0.9em;
+  transition: background 0.15s ease;
 }
 
 .editor-comment .comment-text {
@@ -1796,7 +1856,62 @@ select option {
   white-space: pre-wrap;
 }
 
+/* Комментарий — действие, а не подпись: вся плашка кликабельна,
+ * карандаш показывает, что текст можно править. */
+.editor-comment .comment-edit {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.editor-comment .comment-edit .comment-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.editor-comment .comment-edit .fragment-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  color: var(--muted);
+  opacity: 0.8;
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.editor-comment .comment-edit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.editor-comment .comment-edit:focus-visible .fragment-icon {
+  color: var(--text);
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .editor-comment:hover {
+    background: rgba(0, 0, 0, 0.8);
+  }
+
+  .editor-comment .comment-edit:hover .fragment-icon {
+    color: var(--text);
+    opacity: 1;
+  }
+}
+
 .editor-comment textarea {
+  display: block;
   width: 300px;
   max-width: 50vw;
   min-height: 56px;
@@ -1809,6 +1924,43 @@ select option {
   font: inherit;
 }
 
+.editor-comment.is-editing {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.comment-actions button {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.comment-actions button:hover {
+  background: var(--btn-hover);
+}
+
+.comment-actions .comment-save {
+  border-color: var(--green-strong);
+  background: var(--green-strong);
+  color: #fff;
+  font-weight: 600;
+}
+
+.comment-actions .comment-save:hover {
+  background: var(--green-strong-hover);
+}
+
 .editor-footer {
   display: flex;
   flex-direction: column;
@@ -1819,7 +1971,8 @@ select option {
 
 .flash {
   position: fixed;
-  top: 12px;
+  /* Ниже шапки: на десктопе тост «Сохранено» перекрывал кнопку «Экспорт». */
+  top: 64px;
   right: 12px;
   z-index: 70;
   display: flex;
@@ -2404,8 +2557,25 @@ select option {
     border-bottom: 1px solid var(--edge);
   }
 
-  .video-area {
+  /* Имя задачи — до трёх строк: на телефоне хвост имени отличает похожие
+   * камеры и даты, а однострочный ellipsis его прятал. Двух строк не
+   * хватало: имя длиной 49 символов занимало третью. */
+  .pair-name {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    line-height: 1.2;
+  }
+
+  .video-stage {
     order: 2;
+    flex: 0 0 auto;
+  }
+
+  .video-stage .video-area {
     flex: 0 0 auto;
     /* Только в портрете: на десктопе и в ландшафте высоту области задаёт
      * раскладка, а пропорции кадра — object-fit. */
@@ -2413,10 +2583,46 @@ select option {
     border-radius: 0;
   }
 
+  /* Комментарий не лежит поверх кадра: в узком портрете он съедал больше
+   * половины изображения. Теперь это строка под кадром, привязанная к нему. */
+  .editor:not(.fullscreen) .editor-comment {
+    position: static;
+    max-width: none;
+    padding: 8px 12px;
+    border-radius: 0;
+    background: var(--panel);
+    border-bottom: 1px solid var(--edge);
+  }
+
+  .editor:not(.fullscreen) .editor-comment .comment-text {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+  }
+
+  .editor:not(.fullscreen) .editor-comment textarea {
+    width: 100%;
+    max-width: none;
+    min-height: 72px;
+  }
+
+  /* Кнопки завершения — полноценные сенсорные цели, а не 28-пиксельные
+   * ярлыки: на телефоне в них попадает большой палец. */
+  .editor:not(.fullscreen) .comment-actions button {
+    min-height: 44px;
+    padding: 8px 14px;
+  }
+
   /* В полноэкранном портрете кадр занимает весь экран, как и на десктопе:
    * сжатие до пропорций здесь только вернуло бы чёрные поля. */
+  .editor.fullscreen .video-stage {
+    flex: 1 1 auto;
+  }
+
   .editor.fullscreen .video-area {
     flex: 1 1 auto;
+    aspect-ratio: auto;
   }
 
   /* В портрете есть вертикальный запас: отдаём его таймлайну — по нему
@@ -2541,10 +2747,13 @@ select option {
     padding: max(6px, env(safe-area-inset-top))
       max(10px, env(safe-area-inset-right)) 6px
       max(10px, env(safe-area-inset-left));
+    /* Нижняя строка имени лежит в третьей строке шапки: градиент не должен
+     * растворять под ней фон до нуля, иначе белый текст теряет контраст
+     * поверх светлого кадра. */
     background: linear-gradient(
       to bottom,
       rgba(0, 0, 0, 0.82),
-      rgba(0, 0, 0, 0)
+      rgba(0, 0, 0, 0.45)
     );
     border: none;
     border-radius: 0;
@@ -2594,6 +2803,19 @@ select option {
 
   .pair-source {
     display: none;
+  }
+
+  /* В ландшафте имя тоже может занять три строки: шапка лежит поверх
+   * кадра и прячется при бездействии, поэтому лишние строки не отнимают
+   * место у изображения. */
+  .pair-name {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    line-height: 1.2;
   }
 
   .editor-utilities,
@@ -2655,12 +2877,27 @@ select option {
 
   .editor-comment {
     /* Комментарий живёт в нижнем чёрном поле широкого кадра, а не поверх
-     * изображения. На 16:9 поля нет — там он остаётся у нижней кромки. */
-    bottom: 8px;
+     * изображения. На 16:9 поля нет — там он остаётся у нижней кромки.
+     * Справа — чтобы не спорить с плавающей рейкой разметки слева. */
+    right: max(10px, env(safe-area-inset-right));
+    bottom: calc(var(--landscape-band) + 8px);
+    left: auto;
+    max-width: min(55%, 420px);
+  }
+
+  .editor.fullscreen .editor-comment {
+    right: 10px;
+    bottom: 10px;
+    max-width: min(60%, 520px);
   }
 
   .editor-comment textarea {
     min-height: 36px;
+  }
+
+  .comment-actions button {
+    min-height: 44px;
+    padding: 8px 14px;
   }
 
   /* Панель разметки уходит из потока шапки: плавающая колонка слева.
