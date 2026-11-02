@@ -1749,6 +1749,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 ref={commentRef}
                 name="fragmentComment"
                 aria-label="Комментарий к фрагменту"
+                aria-describedby="comment-hint"
                 rows={3}
                 value={commentDraft}
                 placeholder="Комментарий к сегменту…"
@@ -1757,12 +1758,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                   if (e.key === "Escape") {
                     e.preventDefault();
                     cancelComment();
-                  } else if (e.key === "Enter" && !e.shiftKey) {
+                  } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();
                     commitComment();
                   }
                 }}
               />
+              <p className="comment-hint" id="comment-hint">
+                Enter — новая строка · Ctrl+Enter — сохранить
+              </p>
               <div className="comment-actions">
                 <button
                   type="button"

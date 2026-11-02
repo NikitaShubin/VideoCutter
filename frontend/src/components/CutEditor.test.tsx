@@ -911,6 +911,48 @@ describe("комментарий к сегменту", () => {
     unmount();
   });
 
+  it("Enter оставляет новую строку, а не сохраняет", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Первая строка");
+    act(() => {
+      area.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(host.querySelector(".editor-comment textarea")).toBe(area);
+    expect(vi.mocked(replaceFragments)).not.toHaveBeenCalled();
+    expect(host.querySelector(".comment-hint")?.textContent).toContain(
+      "Ctrl+Enter",
+    );
+    unmount();
+  });
+
+  it("Ctrl+Enter сохраняет комментарий", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Новая строка");
+    act(() => {
+      area.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    await act(async () => {});
+    expect(host.querySelector(".editor-comment textarea")).toBeNull();
+    expect(lastSaved()).toEqual([
+      { start: 0, end: 10, comment: "Новая строка" },
+    ]);
+    unmount();
+  });
+
   it("пока сохранение идёт, статус это показывает", async () => {
     let finish: () => void = () => {};
     vi.mocked(replaceFragments).mockImplementationOnce(
