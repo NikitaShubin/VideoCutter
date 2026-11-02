@@ -665,16 +665,49 @@ function lastSaved(): { start: number; end: number; comment: string }[] {
   }[];
 }
 
-describe("панель разметки: сенсорный экран", () => {
-  it("на устройстве с физической клавиатурой кнопок нет", async () => {
+describe("панель разметки: десктоп", () => {
+  it("рейка видна по умолчанию и подписывает действия", async () => {
     const { host, unmount } = await mountEditor();
-    expect(host.querySelector(".editor-workbench")).toBeNull();
-    expect(
-      host.querySelector('[role="toolbar"][aria-label="Разметка фрагментов"]'),
-    ).toBeNull();
+    const bar = host.querySelector<HTMLElement>(
+      '[role="toolbar"][aria-label="Разметка фрагментов"]',
+    );
+    expect(bar).toBeTruthy();
+    expect(bar!.hasAttribute("hidden")).toBe(false);
+    for (const name of [
+      "Начало",
+      "Конец",
+      "Создать",
+      "Удалить",
+      "Комментарий",
+      "Отменить",
+      "Повторить",
+    ]) {
+      expect(fragmentButton(host, name).textContent?.trim()).toContain(name);
+    }
     unmount();
   });
 
+  it("кнопка «Разметка» сворачивает и раскрывает рейку", async () => {
+    const { host, unmount } = await mountEditor();
+    const toggle = host.querySelector<HTMLButtonElement>(".workbench-toggle")!;
+    const bar = host.querySelector<HTMLElement>(
+      '[role="toolbar"][aria-label="Разметка фрагментов"]',
+    )!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.getAttribute("aria-controls")).toBe(bar.id);
+
+    act(() => toggle.click());
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(bar.hasAttribute("hidden")).toBe(true);
+
+    act(() => toggle.click());
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(bar.hasAttribute("hidden")).toBe(false);
+    unmount();
+  });
+});
+
+describe("панель разметки: сенсорный экран", () => {
   it("на сенсорном экране — только значки без подписей и клавиш", async () => {
     stubTouchOnly(true);
     const { host, unmount } = await mountEditor();

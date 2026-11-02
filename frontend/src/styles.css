@@ -1148,17 +1148,67 @@ select option {
 }
 
 .editor-workbench {
-  /* Панель-дубль горячих клавиш рендерится только на сенсорных экранах
-   * (см. useKeyboardMode в CutEditor): на устройствах с клавиатурой её
-   * нет вовсе — действия живут в шорткатах и справке «?».
-   * В низком ландшафте панель уходит в рейку (см. медиазапросы ниже),
-   * в полноэкранном режиме шапки нет. */
+  /* Рейка разметки видна на всех устройствах: на десктопе — подписанные
+   * действия и шорткаты (её можно свернуть), на сенсорном экране —
+   * крупные кнопки. В низком ландшафте панель уходит в рейку (см.
+   * медиазапросы ниже), в полноэкранном режиме шапки нет. */
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   padding-top: 6px;
   border-top: 1px solid var(--edge);
+}
+
+/* Свёрнутая рейка остаётся в DOM: aria-controls всегда указывает на
+ * существующий узел, а не на исчезнувший. */
+.editor-workbench .fragment-actions[hidden] {
+  display: none;
+}
+
+/* Переключатель рейки: в раскрытом виде — тихая подпись, в свёрнутом —
+ * заметная точка входа в разметку. */
+.editor-top .workbench-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  color: var(--muted);
+  font-size: 0.78em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.editor-top .workbench-toggle[aria-expanded="true"] {
+  border-color: transparent;
+  background: transparent;
+}
+
+.editor-top .workbench-toggle[aria-expanded="true"]:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--btn);
+  color: var(--text);
+}
+
+.editor-top .workbench-toggle[aria-expanded="false"] {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.workbench-toggle-caret {
+  font-size: 0.9em;
+  opacity: 0.8;
+}
+
+.editor-workbench kbd {
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--inset);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78em;
 }
 
 /* На сенсорном экране текст и клавиши не нужны: квадратные кнопки

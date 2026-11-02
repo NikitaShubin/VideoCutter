@@ -150,9 +150,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   // Резервный полный экран: браузер без Element.requestFullscreen (iPhone).
   const [isFallbackFullscreen, setIsFallbackFullscreen] = useState(false);
-  // Физическая клавиатура: тогда действия — только горячими клавишами,
-  // их список — в справке «?». Кнопки-дубли нужны лишь сенсорному экрану.
+  // Физическая клавиатура: шорткаты — ускоритель, но рейка разметки
+  // остаётся видимой: главное действие не должно жить только в памяти.
   const keyboard = useKeyboardMode();
+  // Рейка на десктопе раскрыта по умолчанию; пользователь может свернуть
+  // её до одной подписи и вернуть обратно.
+  const [railOpen, setRailOpen] = useState(true);
   const [exportItems, setExportItems] = useState<ExportItem[] | null>(null);
   const exportItemsRef = useRef<ExportItem[] | null>(null);
   exportItemsRef.current = exportItems;
@@ -1768,89 +1771,148 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
             </div>
           </div>
 
-          {!keyboard && (
-            <div className="editor-workbench">
+          <div className={keyboard ? "editor-workbench is-rail" : "editor-workbench"}>
+            {keyboard && (
+              <button
+                type="button"
+                className="workbench-toggle"
+                aria-expanded={railOpen}
+                aria-controls="editor-markup-tools"
+                title={railOpen ? "Свернуть разметку" : "Развернуть разметку"}
+                onClick={() => setRailOpen((open) => !open)}
+              >
+                <span>Разметка</span>
+                <span className="workbench-toggle-caret" aria-hidden="true">
+                  {railOpen ? "▾" : "▸"}
+                </span>
+              </button>
+            )}
+            <div
+              id="editor-markup-tools"
+              className="fragment-actions"
+              role="toolbar"
+              aria-label="Разметка фрагментов"
+              hidden={keyboard && !railOpen}
+            >
+              <button
+                type="button"
+                onClick={markStart}
+                title="Начало фрагмента ([ или ↑)"
+                aria-label="Начало фрагмента"
+              >
+                <FragmentIcon name="start" />
+                {keyboard && (
+                  <>
+                    <span className="fragment-action-text">Начало</span>
+                    <kbd>[</kbd>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={markEnd}
+                title="Конец фрагмента (] или ↓)"
+                aria-label="Конец фрагмента"
+              >
+                <FragmentIcon name="end" />
+                {keyboard && (
+                  <>
+                    <span className="fragment-action-text">Конец</span>
+                    <kbd>]</kbd>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                className="fragment-create"
+                onClick={createOrComplete}
+                aria-pressed={keyPose !== null}
+                aria-label={
+                  keyPose === null ? "Создать фрагмент" : "Завершить фрагмент"
+                }
+                title={
+                  keyPose === null
+                    ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
+                    : "Завершить фрагмент в текущем кадре (K)"
+                }
+              >
+                <FragmentIcon name={keyPose === null ? "create" : "complete"} />
+                {keyboard && (
+                  <>
+                    <span className="fragment-action-text">
+                      {keyPose === null ? "Создать" : "Завершить"}
+                    </span>
+                    <kbd>K</kbd>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={deleteAtPosition}
+                title="Удалить фрагмент под курсором (D или Del)"
+                aria-label="Удалить фрагмент"
+              >
+                <FragmentIcon name="delete" />
+                {keyboard && (
+                  <>
+                    <span className="fragment-action-text">Удалить</span>
+                    <kbd>D</kbd>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                ref={commentToolRef}
+                onClick={(e) => startCommentEdit(e.currentTarget)}
+                title="Комментарий к фрагменту (I)"
+                aria-label="Комментарий к фрагменту"
+              >
+                <FragmentIcon name="comment" />
+                {keyboard && (
+                  <>
+                    <span className="fragment-action-text">Комментарий</span>
+                    <kbd>I</kbd>
+                  </>
+                )}
+              </button>
               <div
-                className="fragment-actions"
-                role="toolbar"
-                aria-label="Разметка фрагментов"
+                className="editor-history"
+                role="group"
+                aria-label="История изменений"
               >
                 <button
                   type="button"
-                  onClick={markStart}
-                  title="Начало фрагмента ([ или ↑)"
-                  aria-label="Начало фрагмента"
+                  onClick={undoEdit}
+                  disabled={!canUndo}
+                  title="Отменить последнее изменение (Ctrl+Z)"
+                  aria-label="Отменить последнее изменение"
                 >
-                  <FragmentIcon name="start" />
+                  <FragmentIcon name="undo" />
+                  {keyboard && (
+                    <>
+                      <span className="fragment-action-text">Отменить</span>
+                      <kbd>Ctrl+Z</kbd>
+                    </>
+                  )}
                 </button>
                 <button
                   type="button"
-                  onClick={markEnd}
-                  title="Конец фрагмента (] или ↓)"
-                  aria-label="Конец фрагмента"
+                  onClick={redoEdit}
+                  disabled={!canRedo}
+                  title="Повторить отменённое (Ctrl+Shift+Z или Z)"
+                  aria-label="Повторить отменённое"
                 >
-                  <FragmentIcon name="end" />
+                  <FragmentIcon name="redo" />
+                  {keyboard && (
+                    <>
+                      <span className="fragment-action-text">Повторить</span>
+                      <kbd>Ctrl+Shift+Z</kbd>
+                    </>
+                  )}
                 </button>
-                <button
-                  type="button"
-                  className="fragment-create"
-                  onClick={createOrComplete}
-                  aria-pressed={keyPose !== null}
-                  aria-label={
-                    keyPose === null ? "Создать фрагмент" : "Завершить фрагмент"
-                  }
-                  title={
-                    keyPose === null
-                      ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
-                      : "Завершить фрагмент в текущем кадре (K)"
-                  }
-                >
-                  <FragmentIcon name={keyPose === null ? "create" : "complete"} />
-                </button>
-                <button
-                  type="button"
-                  onClick={deleteAtPosition}
-                  title="Удалить фрагмент под курсором (D или Del)"
-                  aria-label="Удалить фрагмент"
-                >
-                  <FragmentIcon name="delete" />
-                </button>
-                <button
-                  type="button"
-                  ref={commentToolRef}
-                  onClick={(e) => startCommentEdit(e.currentTarget)}
-                  title="Комментарий к фрагменту (I)"
-                  aria-label="Комментарий к фрагменту"
-                >
-                  <FragmentIcon name="comment" />
-                </button>
-                <div
-                  className="editor-history"
-                  role="group"
-                  aria-label="История изменений"
-                >
-                  <button
-                    type="button"
-                    onClick={undoEdit}
-                    disabled={!canUndo}
-                    title="Отменить последнее изменение (Ctrl+Z)"
-                    aria-label="Отменить последнее изменение"
-                  >
-                    <FragmentIcon name="undo" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={redoEdit}
-                    disabled={!canRedo}
-                    title="Повторить отменённое (Ctrl+Shift+Z или Z)"
-                    aria-label="Повторить отменённое"
-                  >
-                    <FragmentIcon name="redo" />
-                  </button>
-                </div>
               </div>
             </div>
-          )}
+          </div>
         </header>
       )}
 
