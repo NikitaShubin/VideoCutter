@@ -1207,14 +1207,15 @@ select option {
   opacity: 0.8;
 }
 
-.editor-workbench kbd {
+/* Клавиатурная подсказка: один вид в рейке, меню, шапке и транспорте. */
+kbd {
   padding: 0 4px;
   border: 1px solid var(--line);
   border-radius: 3px;
   background: var(--inset);
   color: var(--muted);
   font: inherit;
-  font-size: 0.78em;
+  font-size: 0.8em;
 }
 
 /* На сенсорном экране текст и клавиши не нужны: квадратные кнопки
@@ -1222,10 +1223,6 @@ select option {
 @media (hover: none) and (pointer: coarse) {
   .fragment-actions {
     gap: 6px;
-  }
-
-  .hotkey-hint {
-    display: none;
   }
 
   .fragment-actions button {
@@ -1317,16 +1314,6 @@ select option {
 
 .fragment-actions button.fragment-create:hover:not(:disabled) {
   background: var(--green-strong-hover);
-}
-
-.menu-stack kbd {
-  padding: 0 4px;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: var(--inset);
-  color: var(--muted);
-  font: inherit;
-  font-size: 0.8em;
 }
 
 .editor-history {

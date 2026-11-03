@@ -1563,6 +1563,38 @@ describe("телефонная шапка: одно меню «Ещё»", () => 
   });
 });
 
+describe("единый вид клавиатурных подсказок", () => {
+  it("на десктопе экспорт показывает E клавишей", async () => {
+    const { host, unmount } = await mountEditor();
+    const btn = topButton(host, "Экспорт");
+    expect(btn.querySelector("kbd")?.textContent).toBe("E");
+    expect(btn.textContent).not.toContain("(E)");
+    unmount();
+  });
+
+  it("на сенсорном экране экспорт не показывает клавишу", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    expect(topButton(host, "Экспорт").querySelector("kbd")).toBeNull();
+    unmount();
+  });
+
+  it("на десктопе кнопка направления показывает R клавишей", async () => {
+    const { host, unmount } = await mountEditor();
+    act(() => playbackSettings(host).click());
+    expect(directionButton().querySelector("kbd")?.textContent).toBe("R");
+    unmount();
+  });
+
+  it("на сенсорном экране у направления нет клавиши", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    act(() => playbackSettings(host).click());
+    expect(directionButton().querySelector("kbd")).toBeNull();
+    unmount();
+  });
+});
+
 describe("управление воспроизведением", () => {
   it("кнопка скорости открывает направление и скорость", async () => {
     const { host, unmount } = await mountEditor();

@@ -1855,7 +1855,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                     `${formatPercent(Math.round(exportProgress * 100))} · Отмена`
                   ) : (
                     <>
-                      Экспорт <span className="hotkey-hint">(E)</span>
+                      Экспорт {keyboard && <kbd>E</kbd>}
                     </>
                   )}
                 </span>

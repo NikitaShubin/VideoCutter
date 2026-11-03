@@ -33,6 +33,7 @@ export function PlaybackMenu({
         >
           <span aria-hidden="true">{direction === -1 ? "◀" : "▶"}</span>
           {direction === -1 ? "Назад" : "Вперёд"}
+          {showShortcuts && <kbd>R</kbd>}
         </button>
       </div>
       <label className="menu-slider">
