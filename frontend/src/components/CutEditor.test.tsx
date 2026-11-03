@@ -1875,6 +1875,17 @@ describe("полноэкранный режим", () => {
 });
 
 describe("ландшафтная шапка", () => {
+  it("полное имя задачи остаётся в title даже при обрезке", async () => {
+    stubTouchLandscape();
+    const longName = "camera_2_30-09-2024_длинное_имя_задачи";
+    pairDetail = { ...oneFrame(50, 0), name: longName };
+    const { host, unmount } = await mountEditor();
+    expect(
+      host.querySelector(".pair-name")!.getAttribute("title"),
+    ).toBe(longName);
+    unmount();
+  });
+
   it("скрывается после бездействия", async () => {
     stubLandscape();
     const { host, unmount } = await mountEditor();

@@ -2964,14 +2964,14 @@ select option {
     display: none;
   }
 
-  /* В ландшафте имя тоже может занять три строки: шапка лежит поверх
-   * кадра и прячется при бездействии, поэтому лишние строки не отнимают
-   * место у изображения. */
+  /* В ландшафте шапка лежит поверх кадра, но имя всё равно не должно
+   * залезать в изображение: на 667×375 третья строка пересекалась с
+   * кадром. Две строки + полное имя в title — компромисс. */
   .pair-name {
     display: -webkit-box;
     overflow: hidden;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
+    -webkit-line-clamp: 2;
     overflow-wrap: anywhere;
     white-space: normal;
     line-height: 1.2;

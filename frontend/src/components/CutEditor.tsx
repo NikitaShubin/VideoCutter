@@ -1604,7 +1604,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               ← Назад
             </button>
             <div className="editor-identity" title={pairTitle}>
-              <span className="pair-name">{pair.name || pairId}</span>
+              <span className="pair-name" title={pair.name || pairId}>
+                {pair.name || pairId}
+              </span>
               <span className="pair-source">
                 источник {pair.source_name}
                 {pair.preview_name !== pair.source_name && (
