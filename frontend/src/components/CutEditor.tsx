@@ -60,6 +60,12 @@ const STATUS_H = 36;
 const LANDSCAPE_QUERY = "(orientation: landscape) and (max-height: 520px)";
 const CONTROLS_IDLE_MS = 2500;
 
+// Короткий портрет (320×568): обычный нижний кластер не помещается, и
+// транспорт уезжает под сгиб. Компактная раскладка поднимает его над
+// панелью разметки и не даёт таймлайну сжаться ниже пальцевого размера.
+const COMPACT_PORTRAIT_QUERY =
+  "(orientation: portrait) and (max-width: 360px) and (max-height: 640px)";
+
 /** Закрывает верхний оверлей редактора. true — «назад» обработан. */
 export type BackGuard = () => boolean;
 
@@ -221,6 +227,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   // а не хранится как «режим». Пока открыт оверлей или фокус в шапке,
   // таймер не прячет управление.
   const [landscape, setLandscape] = useState(false);
+  const [compactPortrait, setCompactPortrait] = useState(false);
   const [controlsHidden, setControlsHidden] = useState(false);
   const editorTopRef = useRef<HTMLElement | null>(null);
   // Тап, которым пользователь возвращает скрытую шапку, не должен
@@ -240,11 +247,19 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     ) {
       return;
     }
-    const mq = window.matchMedia(LANDSCAPE_QUERY);
-    const sync = () => setLandscape(mq.matches);
+    const landscapeMq = window.matchMedia(LANDSCAPE_QUERY);
+    const compactMq = window.matchMedia(COMPACT_PORTRAIT_QUERY);
+    const sync = () => {
+      setLandscape(landscapeMq.matches);
+      setCompactPortrait(compactMq.matches);
+    };
     sync();
-    mq.addEventListener?.("change", sync);
-    return () => mq.removeEventListener?.("change", sync);
+    landscapeMq.addEventListener?.("change", sync);
+    compactMq.addEventListener?.("change", sync);
+    return () => {
+      landscapeMq.removeEventListener?.("change", sync);
+      compactMq.removeEventListener?.("change", sync);
+    };
   }, []);
 
   useEffect(() => {
@@ -1560,7 +1575,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
           ? isFallbackFullscreen
             ? "editor fullscreen fullscreen-fallback"
             : "editor fullscreen"
-          : "editor"
+          : compactPortrait
+            ? "editor is-compact"
+            : "editor"
       }
     >
       <h1 className="sr-only">Редактор: {pair.name || pairId}</h1>

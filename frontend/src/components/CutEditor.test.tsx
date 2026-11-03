@@ -234,6 +234,27 @@ function stubTouchLandscape(): void {
   );
 }
 
+/** Короткий портретный экран (320×568): включается компактная раскладка. */
+function stubCompactPortrait(): void {
+  vi.stubGlobal(
+    "matchMedia",
+    (query: string) =>
+      ({
+        matches:
+          query.includes("orientation: portrait") &&
+          query.includes("max-width: 360px") &&
+          query.includes("max-height: 640px"),
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as unknown as MediaQueryList,
+  );
+}
+
 const frameInput = (host: HTMLElement): HTMLInputElement =>
   host.querySelector<HTMLInputElement>("input.frame-input")!;
 
@@ -345,6 +366,27 @@ describe("подсказка о повороте телефона", () => {
     expect(host.querySelector(".rotate-hint")).toBeNull();
     unmount();
     rect.mockRestore();
+  });
+});
+
+describe("короткий портретный экран", () => {
+  it("320×568 включает компактную раскладку", async () => {
+    stubViewport(320, 568);
+    stubCompactPortrait();
+    const { host, unmount } = await mountEditor();
+    expect(
+      host.querySelector(".editor")!.classList.contains("is-compact"),
+    ).toBe(true);
+    unmount();
+  });
+
+  it("на 390×844 компактной раскладки нет", async () => {
+    stubViewport(390, 844);
+    const { host, unmount } = await mountEditor();
+    expect(
+      host.querySelector(".editor")!.classList.contains("is-compact"),
+    ).toBe(false);
+    unmount();
   });
 });
 
