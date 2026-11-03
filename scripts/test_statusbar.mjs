@@ -7,7 +7,7 @@
  */
 
 import assert from "node:assert/strict";
-import { statusbarOps } from "../frontend/src/model/statusbar.ts";
+import { statusbarOps, TIMELINE_FREE_FILL } from "../frontend/src/model/statusbar.ts";
 
 let passed = 0;
 
@@ -38,7 +38,7 @@ const base = {
 
 check("первая операция — зелёный фон на весь canvas", () => {
   const ops = statusbarOps(base);
-  assert.equal(ops[0].fill, "#00ff00");
+  assert.equal(ops[0].fill, TIMELINE_FREE_FILL);
   assert.deepEqual({ x: ops[0].x, y: ops[0].y, w: ops[0].w, h: ops[0].h }, { x: 0, y: 0, w: W, h: H });
 });
 
@@ -87,11 +87,11 @@ check("затемнение стартует на колонку правее п
   assert.deepEqual({ x: dim.x, w: dim.w }, { x: 78, w: 22 });
 });
 
-check("маркер — белая линия в 1px на пикселе позиции, последней операцией", () => {
+check("маркер — белая линия в 2px на пикселе позиции, последней операцией", () => {
   const ops = statusbarOps(base);
   const cur = ops[ops.length - 1];
   assert.equal(cur.fill, "#ffffff");
-  assert.deepEqual({ x: cur.x, w: cur.w, h: cur.h }, { x: 77, w: 1, h: H });
+  assert.deepEqual({ x: cur.x, w: cur.w, h: cur.h }, { x: 77, w: 2, h: H });
 });
 
 check("keyPose не задан — синего выделения нет", () => {
@@ -134,7 +134,7 @@ check("scheme creation заменены стадийными: фон свой, �
 
 check("scheme по умолчанию — timeline (редактор не меняется)", () => {
   const ops = statusbarOps({ ...base });
-  assert.equal(ops[0].fill, "#00ff00");
+  assert.equal(ops[0].fill, TIMELINE_FREE_FILL);
 });
 
 check("progress: слои base/fill/затемнение/маркер, доля clamp'ится", () => {
