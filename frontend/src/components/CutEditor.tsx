@@ -1023,13 +1023,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     replaceFragments(pairId, frags, position)
       .then(() => {
         if (seq !== saveSeqRef.current) return;
-        setSaveState("saved");
-        // Комментарий подтверждается на месте, а не тостом поверх шапки:
-        // у сохранения комментария один локальный live-region.
+        // У сохранения комментария одно подтверждение — локальный бейдж.
+        // Транспорт показывает только ход операции и ошибки, иначе рядом
+        // появлялись две одинаковые надписи «Сохранено».
         if (options.commentStart !== undefined) {
+          setSaveState("idle");
           if (options.commentDeleted) flash("Комментарий удалён");
           else showCommentSaved(options.commentStart);
         } else {
+          setSaveState("saved");
           flash("Сохранено");
         }
       })

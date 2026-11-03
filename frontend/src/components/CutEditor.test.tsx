@@ -923,9 +923,10 @@ describe("комментарий к сегменту", () => {
       { start: 0, end: 10, comment: "Новый комментарий" },
     ]);
     expect(host.querySelector(".editor-comment textarea")).toBeNull();
-    expect(host.querySelector(".save-state")?.textContent).toContain(
+    expect(host.querySelector(".comment-saved")?.textContent).toContain(
       "Сохранено",
     );
+    expect(host.querySelector(".save-state")?.textContent).toBe("");
     unmount();
   });
 
@@ -981,6 +982,7 @@ describe("комментарий к сегменту", () => {
     );
     expect(host.querySelector(".comment-saved")).toBeNull();
     expect(host.querySelector(".editor-comment")).toBeNull();
+    expect(host.querySelector(".save-state")?.textContent).toBe("");
     unmount();
   });
 
@@ -1169,7 +1171,7 @@ describe("комментарий к сегменту", () => {
     unmount();
   });
 
-  it("пока сохранение идёт, статус это показывает", async () => {
+  it("пока сохранение идёт, статус это показывает, затем убирает", async () => {
     let finish: () => void = () => {};
     vi.mocked(replaceFragments).mockImplementationOnce(
       () =>
@@ -1191,9 +1193,8 @@ describe("комментарий к сегменту", () => {
     await act(async () => {
       finish();
     });
-    expect(host.querySelector(".save-state")?.textContent).toContain(
-      "Сохранено",
-    );
+    // Успех подтверждает локальный бейдж, транспорт не повторяет «Сохранено».
+    expect(host.querySelector(".save-state")?.textContent).toBe("");
     unmount();
   });
 
