@@ -1283,7 +1283,7 @@ describe("экспорт без фрагментов", () => {
     clickFragment(host, "Начало");
     const btn = topButton(host, "Экспорт");
     expect(btn.disabled).toBe(false);
-    expect(btn.title).toBe("Экспорт (E)");
+    expect(btn.title).toBe("Экспорт");
     unmount();
   });
 });
@@ -1559,6 +1559,55 @@ describe("телефонная шапка: одно меню «Ещё»", () => 
     });
     expect(menuPanel("Ещё")).toBeNull();
     expect(document.activeElement).toBe(trigger);
+    unmount();
+  });
+});
+
+describe("подсказки клавиатуры в заголовках", () => {
+  it("на сенсорном экране кнопки разметки не обещают клавиш", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    expect(fragmentButton(host, "Начало").title).toBe("Начало фрагмента");
+    expect(fragmentButton(host, "Конец").title).toBe("Конец фрагмента");
+    expect(fragmentButton(host, "Создать").title).toBe(
+      "Создать фрагмент: первое нажатие — начало, второе — конец",
+    );
+    expect(fragmentButton(host, "Удалить").title).toBe(
+      "Удалить фрагмент под курсором",
+    );
+    expect(fragmentButton(host, "Комментарий").title).toBe(
+      "Комментарий к фрагменту",
+    );
+    expect(fragmentButton(host, "Отменить").title).toBe(
+      "Отменить последнее изменение",
+    );
+    expect(fragmentButton(host, "Повторить").title).toBe(
+      "Повторить отменённое",
+    );
+    unmount();
+  });
+
+  it("на сенсорном экране шапка и транспорт не обещают клавиш", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    expect(topButton(host, "?").title).toBe("Справка");
+    expect(topButton(host, "Экспорт").title).not.toContain("(E)");
+    expect(playButton(host).title).toBe("Воспроизвести");
+    expect(playbackSettings(host).title).toBe("Направление и скорость");
+    expect(frameInput(host).title).toBe("Номер кадра: введите число");
+    expect(host.querySelector(".statusbar")!.getAttribute("title")).toBe(
+      "Клик — переход по кадрам",
+    );
+    unmount();
+  });
+
+  it("на десктопе заголовки сохраняют шорткаты", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(topButton(host, "?").title).toBe("Справка (H)");
+    expect(fragmentButton(host, "Начало").title).toBe(
+      "Начало фрагмента ([ или ↑)",
+    );
+    expect(playButton(host).title).toContain("пробел");
     unmount();
   });
 });

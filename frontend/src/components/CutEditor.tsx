@@ -70,6 +70,11 @@ const COMPACT_PORTRAIT_QUERY =
 /** Закрывает верхний оверлей редактора. true — «назад» обработан. */
 export type BackGuard = () => boolean;
 
+/** title с клавиатурной подсказкой — только там, где клавиши доступны. */
+function keyTitle(label: string, keys: string, keyboard: boolean): string {
+  return keyboard ? `${label} (${keys})` : label;
+}
+
 /** Состояние последнего сохранения фрагментов: постоянный индикатор
  * в транспорте, а не одноразовый flash. */
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -1626,11 +1631,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
           type="button"
           className="fullscreen-exit"
           onClick={toggleFullscreen}
-          title="Выйти из полноэкранного режима (Esc)"
+          title={keyTitle(
+            "Выйти из полноэкранного режима",
+            "Esc",
+            keyboard,
+          )}
           aria-label="Выйти из полноэкранного режима"
         >
           <span aria-hidden="true">✕</span>
-          <span className="sr-only">Выйти (Esc)</span>
+          <span className="sr-only">{keyboard ? "Выйти (Esc)" : "Выйти"}</span>
         </button>
       )}
       {!isFullscreen && (
@@ -1838,10 +1847,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 disabled={exportDisabled}
                 title={
                   exporting
-                    ? "Отменить экспорт (E)"
+                    ? keyTitle("Отменить экспорт", "E", keyboard)
                     : exportDisabled
                       ? "Нет фрагментов для экспорта"
-                      : "Экспорт (E)"
+                      : keyTitle("Экспорт", "E", keyboard)
                 }
               >
                 {exportProgress !== null && (
@@ -1864,7 +1873,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 type="button"
                 className="toolbar-help"
                 onClick={() => setHelpOpen(true)}
-                title="Справка (H)"
+                title={keyTitle("Справка", "H", keyboard)}
                 aria-label="Справка"
               >
                 <span aria-hidden="true">?</span>
@@ -1886,7 +1895,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               <button
                 type="button"
                 onClick={markStart}
-                title="Начало фрагмента ([ или ↑)"
+                title={keyTitle("Начало фрагмента", "[ или ↑", keyboard)}
                 aria-label="Начало фрагмента"
               >
                 <FragmentIcon name="start" />
@@ -1898,7 +1907,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               <button
                 type="button"
                 onClick={markEnd}
-                title="Конец фрагмента (] или ↓)"
+                title={keyTitle("Конец фрагмента", "] или ↓", keyboard)}
                 aria-label="Конец фрагмента"
               >
                 <FragmentIcon name="end" />
@@ -1917,8 +1926,16 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 }
                 title={
                   keyPose === null
-                    ? "Создать фрагмент: первое нажатие — начало, второе — конец (K)"
-                    : "Завершить фрагмент в текущем кадре (K)"
+                    ? keyTitle(
+                        "Создать фрагмент: первое нажатие — начало, второе — конец",
+                        "K",
+                        keyboard,
+                      )
+                    : keyTitle(
+                        "Завершить фрагмент в текущем кадре",
+                        "K",
+                        keyboard,
+                      )
                 }
               >
                 <FragmentIcon name={keyPose === null ? "create" : "complete"} />
@@ -1932,7 +1949,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               <button
                 type="button"
                 onClick={deleteAtPosition}
-                title="Удалить фрагмент под курсором (D или Del)"
+                title={keyTitle(
+                  "Удалить фрагмент под курсором",
+                  "D или Del",
+                  keyboard,
+                )}
                 aria-label="Удалить фрагмент"
               >
                 <FragmentIcon name="delete" />
@@ -1945,7 +1966,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 type="button"
                 ref={commentToolRef}
                 onClick={(e) => startCommentEdit(e.currentTarget)}
-                title="Комментарий к фрагменту (I)"
+                title={keyTitle("Комментарий к фрагменту", "I", keyboard)}
                 aria-label="Комментарий к фрагменту"
               >
                 <FragmentIcon name="comment" />
@@ -1965,7 +1986,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                   type="button"
                   onClick={undoEdit}
                   disabled={!canUndo}
-                  title="Отменить последнее изменение (Ctrl+Z)"
+                  title={keyTitle(
+                    "Отменить последнее изменение",
+                    "Ctrl+Z",
+                    keyboard,
+                  )}
                   aria-label="Отменить последнее изменение"
                 >
                   <FragmentIcon name="undo" />
@@ -1978,7 +2003,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                   type="button"
                   onClick={redoEdit}
                   disabled={!canRedo}
-                  title="Повторить отменённое (Ctrl+Shift+Z или Z)"
+                  title={keyTitle(
+                    "Повторить отменённое",
+                    "Ctrl+Shift+Z или Z",
+                    keyboard,
+                  )}
                   aria-label="Повторить отменённое"
                 >
                   <FragmentIcon name="redo" />
@@ -2125,7 +2154,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               type="text"
               inputMode="numeric"
               aria-label="Номер кадра"
-              title="Номер кадра: введите число и нажмите Enter (Esc — отмена)"
+              title={keyTitle(
+                "Номер кадра: введите число",
+                "Enter (Esc — отмена)",
+                keyboard,
+              )}
               style={{
                 // Адаптивная ширина: запас по max длине total, черновика и
                 // позиции, +1 разряд под курсор — ввод не обрезается.
@@ -2182,8 +2215,16 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               }
               title={
                 playing
-                  ? "Пауза (пробел); R — сменить направление"
-                  : "Воспроизвести (пробел); R — сменить направление"
+                  ? keyTitle(
+                      "Пауза",
+                      "пробел; R — сменить направление",
+                      keyboard,
+                    )
+                  : keyTitle(
+                      "Воспроизвести",
+                      "пробел; R — сменить направление",
+                      keyboard,
+                    )
               }
             >
               <span aria-hidden="true">
@@ -2199,7 +2240,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
             <Popover
               label="Направление и скорость"
               triggerLabel="Направление и скорость"
-              triggerTitle="Направление и скорость (R, 0–9)"
+              triggerTitle={keyTitle(
+                "Направление и скорость",
+                "R, 0–9",
+                keyboard,
+              )}
               trigger={
                 <>
                   <span className="transport-speed">x{speed}</span>
@@ -2243,7 +2288,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         aria-valuemax={pair.total_frames}
         aria-valuenow={Math.min(pair.total_frames, position + 1)}
         aria-valuetext={`Кадр ${Math.min(pair.total_frames, position + 1)} из ${pair.total_frames}`}
-        title="Клик или стрелки — переход по кадрам; Home/End — начало и конец"
+        title={keyTitle(
+          "Клик — переход по кадрам",
+          "стрелки; Home/End — начало и конец",
+          keyboard,
+        )}
         onKeyDown={(e) => {
           const p = modelRef.current;
           if (!p) return;

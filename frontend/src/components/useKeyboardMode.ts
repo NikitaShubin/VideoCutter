@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 const TOUCH_ONLY = "(hover: none) and (pointer: coarse)";
 
-function touchOnly(): boolean {
+function isTouchOnly(): boolean {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
     return false;
   }
@@ -13,9 +13,14 @@ function touchOnly(): boolean {
  * Доступны ли горячие клавиши. На сенсорном экране без физической
  * клавиатуры — нет; первое же нажатие клавиши переключает справку
  * в клавиатурный режим (планшет с подключённой клавиатурой).
+ *
+ * Режим следует за текущим устройством: если экран стал сенсорным
+ * (эмуляция в DevTools, отключённая мышь), подсказки снова прячутся.
+ * Иначе флаг, вычисленный при загрузке, залипал бы на весь сеанс.
  */
 export function useKeyboardMode(): boolean {
-  const [keyboard, setKeyboard] = useState(() => !touchOnly());
+  const [touchOnly, setTouchOnly] = useState(isTouchOnly);
+  const [keySeen, setKeySeen] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -23,7 +28,11 @@ export function useKeyboardMode(): boolean {
     }
     const mq = window.matchMedia(TOUCH_ONLY);
     const onChange = () => {
-      if (!mq.matches) setKeyboard(true);
+      setTouchOnly(mq.matches);
+      // Переход в сенсорный режим — явный признак, что клавиатура больше
+      // не основной ввод; следы прошлых нажатий не должны оставлять
+      // подсказки на экране.
+      if (mq.matches) setKeySeen(false);
     };
     mq.addEventListener?.("change", onChange);
     return () => mq.removeEventListener?.("change", onChange);
@@ -41,11 +50,11 @@ export function useKeyboardMode(): boolean {
       ) {
         return;
       }
-      setKeyboard(true);
+      setKeySeen(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  return keyboard;
+  return !touchOnly || keySeen;
 }
