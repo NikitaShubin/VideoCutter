@@ -157,12 +157,13 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   // Резервный полный экран: браузер без Element.requestFullscreen (iPhone).
   const [isFallbackFullscreen, setIsFallbackFullscreen] = useState(false);
-  // Физическая клавиатура: шорткаты — ускоритель, но рейка разметки
-  // остаётся видимой: главное действие не должно жить только в памяти.
+  // Физическая клавиатура: шорткаты — основной путь, панель разметки —
+  // по требованию. На сенсорном экране панель видна всегда.
   const keyboard = useKeyboardMode();
-  // Рейка на десктопе раскрыта по умолчанию; пользователь может свернуть
-  // её до одной подписи и вернуть обратно.
-  const [railOpen, setRailOpen] = useState(true);
+  // Рейка разметки на десктопе свёрнута по умолчанию: горячие клавиши —
+  // основной путь, панель — по требованию. Развёрнутая добавляет строку,
+  // свёрнутая не занимает ничего: переключатель живёт в шапке.
+  const [railOpen, setRailOpen] = useState(false);
   const [exportItems, setExportItems] = useState<ExportItem[] | null>(null);
   const exportItemsRef = useRef<ExportItem[] | null>(null);
   exportItemsRef.current = exportItems;
@@ -1669,6 +1670,19 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 role="group"
                 aria-label="Настройки и сервис"
               >
+              <button
+                type="button"
+                className="workbench-toggle"
+                aria-expanded={railOpen}
+                aria-controls="editor-markup-tools"
+                title={railOpen ? "Свернуть разметку" : "Развернуть разметку"}
+                onClick={() => setRailOpen((open) => !open)}
+              >
+                <span>Разметка</span>
+                <span className="workbench-toggle-caret" aria-hidden="true">
+                  {railOpen ? "▾" : "▸"}
+                </span>
+              </button>
               <Popover
                 label="Вид"
                 open={openMenu === "view"}
@@ -1858,22 +1872,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
             </div>
           </div>
 
-          <div className={keyboard ? "editor-workbench is-rail" : "editor-workbench"}>
-            {keyboard && (
-              <button
-                type="button"
-                className="workbench-toggle"
-                aria-expanded={railOpen}
-                aria-controls="editor-markup-tools"
-                title={railOpen ? "Свернуть разметку" : "Развернуть разметку"}
-                onClick={() => setRailOpen((open) => !open)}
-              >
-                <span>Разметка</span>
-                <span className="workbench-toggle-caret" aria-hidden="true">
-                  {railOpen ? "▾" : "▸"}
-                </span>
-              </button>
-            )}
+          <div
+            className={keyboard ? "editor-workbench is-rail" : "editor-workbench"}
+            hidden={keyboard && !railOpen}
+          >
             <div
               id="editor-markup-tools"
               className="fragment-actions"

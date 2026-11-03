@@ -708,13 +708,27 @@ function lastSaved(): { start: number; end: number; comment: string }[] {
 }
 
 describe("панель разметки: десктоп", () => {
-  it("рейка видна по умолчанию и подписывает действия", async () => {
+  it("по умолчанию свёрнута и не занимает строку", async () => {
     const { host, unmount } = await mountEditor();
+    const toggle = host.querySelector<HTMLButtonElement>(".workbench-toggle")!;
+    const bench = host.querySelector<HTMLElement>(".editor-workbench")!;
     const bar = host.querySelector<HTMLElement>(
       '[role="toolbar"][aria-label="Разметка фрагментов"]',
-    );
-    expect(bar).toBeTruthy();
-    expect(bar!.hasAttribute("hidden")).toBe(false);
+    )!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe(bar.id);
+    expect(bench.hidden).toBe(true);
+    expect(bar.hidden).toBe(true);
+    unmount();
+  });
+
+  it("«Разметка» раскрывает подписанные действия", async () => {
+    const { host, unmount } = await mountEditor();
+    const toggle = host.querySelector<HTMLButtonElement>(".workbench-toggle")!;
+    act(() => toggle.click());
+    const bench = host.querySelector<HTMLElement>(".editor-workbench")!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(bench.hidden).toBe(false);
     for (const name of [
       "Начало",
       "Конец",
@@ -729,22 +743,14 @@ describe("панель разметки: десктоп", () => {
     unmount();
   });
 
-  it("кнопка «Разметка» сворачивает и раскрывает рейку", async () => {
+  it("повторное нажатие снова сворачивает панель", async () => {
     const { host, unmount } = await mountEditor();
     const toggle = host.querySelector<HTMLButtonElement>(".workbench-toggle")!;
-    const bar = host.querySelector<HTMLElement>(
-      '[role="toolbar"][aria-label="Разметка фрагментов"]',
-    )!;
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(toggle.getAttribute("aria-controls")).toBe(bar.id);
-
+    const bench = host.querySelector<HTMLElement>(".editor-workbench")!;
+    act(() => toggle.click());
     act(() => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(bar.hasAttribute("hidden")).toBe(true);
-
-    act(() => toggle.click());
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(bar.hasAttribute("hidden")).toBe(false);
+    expect(bench.hidden).toBe(true);
     unmount();
   });
 });
