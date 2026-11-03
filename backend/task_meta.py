@@ -115,8 +115,17 @@ def load(ws_path: str) -> Dict[str, Any]:
 
 
 def save(ws_path: str, meta: Dict[str, Any]) -> Dict[str, Any]:
-    """Валидирует и пишет task.json атомарно (tmp+rename). Возвращает итог."""
+    """Валидирует и пишет task.json атомарно (tmp+rename). Возвращает итог.
+
+    ``created_at`` — односторонняя дверь: рождается один раз (валидацией) и
+    не стирается снимком, прочитанным до неё. Иначе штамп открытия, легший
+    поверх паспорта, оставил бы задачу без даты рождения навсегда.
+    """
     checked = validate(meta)
+    if checked.get("created_at") is None:
+        born = load(ws_path).get("created_at")
+        if born is not None:
+            checked["created_at"] = born
     path = os.path.join(ws_path, TASK_FILE)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:

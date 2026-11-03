@@ -77,3 +77,18 @@ class TaskMetaTests(SimpleTestCase):
     def test_set_status_rejects_bad(self):
         with self.assertRaises(ValueError):
             task_meta.set_status(task_meta.defaults(), "assigned")
+
+    def test_save_keeps_created_at_born_on_disk(self):
+        """Паспорт рождается один раз: снимок без created_at его не стирает.
+
+        Detail штампует открытие по снимку, прочитанному до валидации; если
+        валидация успела сохранить паспорт, запись штампа не должна откатить
+        created_at в None — иначе задача навсегда остаётся без даты рождения.
+        """
+        born = task_meta.init_new()
+        task_meta.save(self._tmpdir, born)
+        stale = task_meta.defaults()
+        stale["last_opened_at"] = "2026-11-03T00:00:00+00:00"
+        task_meta.save(self._tmpdir, stale)
+        self.assertEqual(
+            task_meta.load(self._tmpdir)["created_at"], born["created_at"])
