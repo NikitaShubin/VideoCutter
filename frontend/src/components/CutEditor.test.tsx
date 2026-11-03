@@ -880,6 +880,22 @@ describe("комментарий к сегменту", () => {
     unmount();
   });
 
+  it("подписывает комментарий номером фрагмента и диапазоном кадров", async () => {
+    pairDetail = {
+      ...oneFrame(50, 15),
+      fragments: [
+        { start: 0, end: 10, comment: "" },
+        { start: 11, end: 20, comment: "Проверить знак" },
+        { start: 21, end: 30, comment: "" },
+      ],
+    };
+    const { host, unmount } = await mountEditor();
+    expect(host.querySelector(".comment-context")?.textContent).toBe(
+      "фрагмент 2 из 3 · кадры 12–21",
+    );
+    unmount();
+  });
+
   it("клик по комментарию открывает поле с текущим текстом и фокусом", async () => {
     const { host, unmount } = await mountEditor();
     openComment(host);

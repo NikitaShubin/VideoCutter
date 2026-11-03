@@ -1590,6 +1590,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       ? `${pair.width} / ${pair.height}`
       : undefined;
   const currentFragment = modelRef.current?.fragmentAt(position);
+  const fragmentList = modelRef.current?.fragments ?? [];
+  const fragmentNumber = currentFragment
+    ? fragmentList.indexOf(currentFragment) + 1
+    : 0;
+  const fragmentContext = currentFragment
+    ? `фрагмент ${fragmentNumber} из ${fragmentList.length} · кадры ${formatNumber(
+        currentFragment.start + 1,
+      )}–${formatNumber(currentFragment.end + 1)}`
+    : "";
   const commentSavedHere =
     commentSavedFor !== null && currentFragment?.start === commentSavedFor;
   const commentDraftEmpty = commentDraft.trim() === "";
@@ -2016,6 +2025,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         {(!isFullscreen || editingComment) && (
           editingComment ? (
             <div className="editor-comment is-editing">
+              <span className="comment-context">{fragmentContext}</span>
               <textarea
                 ref={commentRef}
                 name="fragmentComment"
@@ -2072,6 +2082,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 currentFragment?.comment ? "" : " is-empty-saved"
               }`}
             >
+              <span className="comment-context">{fragmentContext}</span>
               {currentFragment?.comment ? (
                 <button
                   type="button"

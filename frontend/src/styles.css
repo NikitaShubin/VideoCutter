@@ -1965,6 +1965,20 @@ select option {
   white-space: pre-wrap;
 }
 
+/* К какому фрагменту относится текст: при десятках сегментов одного текста
+ * мало, чтобы понять контекст, не возвращаясь к таймлайну. */
+.editor-comment .comment-context {
+  display: block;
+  padding: 8px 12px 0;
+  color: var(--muted);
+  font-size: 0.78em;
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-comment.is-editing .comment-context {
+  padding: 0 0 6px;
+}
+
 /* Комментарий — действие, а не подпись: вся плашка кликабельна,
  * карандаш показывает, что текст можно править. */
 .editor-comment .comment-edit {
