@@ -2078,6 +2078,24 @@ select option {
   background: var(--green-strong-hover);
 }
 
+/* Пустой черновик с прежним текстом — это удаление, а не сохранение:
+ * действие получает предупреждающий цвет и честное имя. */
+.comment-actions .comment-delete {
+  border-color: #8a3a3a;
+  background: var(--red-deep);
+  color: #ffd9d9;
+  font-weight: 600;
+}
+
+.comment-actions .comment-delete:hover {
+  background: #7d3030;
+}
+
+.comment-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .editor-footer {
   display: flex;
   flex-direction: column;

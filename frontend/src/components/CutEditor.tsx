@@ -1016,7 +1016,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const saveSeqRef = useRef(0);
   const saveToDb = (
     frags: { start: number; end: number; comment: string }[],
-    options: { commentStart?: number } = {},
+    options: { commentStart?: number; commentDeleted?: boolean } = {},
   ) => {
     const seq = ++saveSeqRef.current;
     setSaveState("saving");
@@ -1027,7 +1027,8 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         // Комментарий подтверждается на месте, а не тостом поверх шапки:
         // у сохранения комментария один локальный live-region.
         if (options.commentStart !== undefined) {
-          showCommentSaved(options.commentStart);
+          if (options.commentDeleted) flash("Комментарий удалён");
+          else showCommentSaved(options.commentStart);
         } else {
           flash("Сохранено");
         }
@@ -1123,6 +1124,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const commitComment = () => {
     const p = modelRef.current;
     if (!p || committedRef.current) return;
+    // Пустой черновик — не сохранение: удаление требует отдельной кнопки,
+    // иначе стёртый для правки текст пропадал бы по привычному Ctrl+Enter.
+    if (!commentDraft.trim()) return;
     const f = p.fragmentAt(position);
     if (!f) return;
     committedRef.current = true;
@@ -1132,6 +1136,26 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       rerender();
       drawStatusbar();
       saveToDb(p.getFragments(), { commentStart: f.start });
+    }
+  };
+
+  const deleteComment = () => {
+    const p = modelRef.current;
+    if (!p || committedRef.current) return;
+    const f = p.fragmentAt(position);
+    if (!f || !f.comment) return;
+    committedRef.current = true;
+    setEditingComment(false);
+    restoreCommentFocus();
+    if (p.setComment(position, "")) {
+      rerender();
+      drawStatusbar();
+      // Удаление не оставляет плашку «Сохранено» без текста.
+      setCommentSavedFor(null);
+      saveToDb(p.getFragments(), {
+        commentStart: f.start,
+        commentDeleted: true,
+      });
     }
   };
 
@@ -1566,6 +1590,8 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const currentFragment = modelRef.current?.fragmentAt(position);
   const commentSavedHere =
     commentSavedFor !== null && currentFragment?.start === commentSavedFor;
+  const commentDraftEmpty = commentDraft.trim() === "";
+  const canDeleteComment = commentDraftEmpty && !!currentFragment?.comment;
 
   return (
     <div
@@ -2011,13 +2037,24 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 Enter — новая строка · Ctrl+Enter — сохранить
               </p>
               <div className="comment-actions">
-                <button
-                  type="button"
-                  className="comment-save"
-                  onClick={commitComment}
-                >
-                  Сохранить
-                </button>
+                {canDeleteComment ? (
+                  <button
+                    type="button"
+                    className="comment-delete"
+                    onClick={deleteComment}
+                  >
+                    Удалить комментарий
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="comment-save"
+                    onClick={commitComment}
+                    disabled={commentDraftEmpty}
+                  >
+                    Сохранить
+                  </button>
+                )}
                 <button
                   type="button"
                   className="comment-cancel"

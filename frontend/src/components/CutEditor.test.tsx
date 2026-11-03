@@ -947,6 +947,74 @@ describe("комментарий к сегменту", () => {
     unmount();
   });
 
+  it("пустой черновик заменяет «Сохранить» на явное удаление", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "");
+    const labels = [
+      ...host.querySelectorAll<HTMLButtonElement>(".comment-actions button"),
+    ].map((b) => b.textContent);
+    expect(labels).toContain("Удалить комментарий");
+    expect(labels).not.toContain("Сохранить");
+    expect(vi.mocked(replaceFragments)).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("«Удалить комментарий» очищает текст только по нажатию", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "");
+    const del = [
+      ...host.querySelectorAll<HTMLButtonElement>(".comment-actions button"),
+    ].find((b) => b.textContent === "Удалить комментарий")!;
+    act(() => {
+      del.click();
+    });
+    await act(async () => {});
+    expect(lastSaved()).toEqual([{ start: 0, end: 10, comment: "" }]);
+    expect(host.querySelector(".flash")?.textContent).toContain(
+      "Комментарий удалён",
+    );
+    expect(host.querySelector(".comment-saved")).toBeNull();
+    expect(host.querySelector(".editor-comment")).toBeNull();
+    unmount();
+  });
+
+  it("Ctrl+Enter с пустым черновиком ничего не сохраняет", async () => {
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "   ");
+    act(() => {
+      area.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    await act(async () => {});
+    expect(vi.mocked(replaceFragments)).not.toHaveBeenCalled();
+    expect(host.querySelector(".editor-comment textarea")).toBeTruthy();
+    unmount();
+  });
+
+  it("пустой комментарий без прежнего текста сохранить нельзя", async () => {
+    pairDetail.fragments = [{ start: 0, end: 10, comment: "" }];
+    const { host, unmount } = await mountEditor();
+    clickFragment(host, "Комментарий");
+    const save = host.querySelector<HTMLButtonElement>(".comment-save");
+    expect(save?.textContent).toBe("Сохранить");
+    expect(save?.disabled).toBe(true);
+    unmount();
+  });
+
   it("локальный статус исчезает и возвращает комментарий", async () => {
     const { host, unmount } = await mountEditor();
     openComment(host);
