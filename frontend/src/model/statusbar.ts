@@ -97,7 +97,7 @@ export function statusbarOps(s: StatusbarState): StatusbarOp[] {
     ops.push({
       fill: "#ffffff",
       x: Math.min(Math.max(x, 0), width - 1),
-      y: 0, w: 1, h: height,
+      y: 0, w: 2, h: height,
     });
     return ops;
   }
@@ -144,13 +144,14 @@ export function statusbarOps(s: StatusbarState): StatusbarOp[] {
     });
   }
 
-  // Маркер текущего кадра — тонкая белая линия на пикселе позиции (поверх
-  // всех слоёв; тот же timelinePix, что и границы сегментов).
+  // Маркер текущего кадра — белая линия 2px на пикселе позиции (поверх
+  // всех слоёв; тот же timelinePix, что и границы сегментов). На длинном
+  // таймлайне 1px терялся среди цветных фрагментов.
   ops.push({
     fill: "#ffffff",
     x: timelinePix(position, width, totalFrames),
     y: 0,
-    w: 1,
+    w: 2,
     h: height,
   });
 
