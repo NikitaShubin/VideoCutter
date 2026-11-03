@@ -1230,6 +1230,25 @@ describe("комментарий к сегменту", () => {
     );
     unmount();
   });
+
+  it("сетевой сбой сохранения объясняет понятной причиной", async () => {
+    vi.mocked(replaceFragments).mockRejectedValueOnce(
+      new TypeError("Failed to fetch"),
+    );
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Черновик");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    await act(async () => {});
+    const text = host.querySelector(".flash")?.textContent ?? "";
+    expect(text).toContain("нет связи с сервером");
+    expect(text).not.toContain("Failed to fetch");
+    unmount();
+  });
 });
 
 describe("экспорт без фрагментов", () => {

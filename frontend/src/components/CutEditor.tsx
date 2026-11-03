@@ -47,6 +47,7 @@ import {
   timelineFrame,
 } from "../model/frameScheduler";
 import { paintStatusbar } from "../model/statusbar";
+import { failureReason } from "../model/errors";
 import { type ExportItem, type ExportStatus, type VideoPairDetail } from "../types";
 
 // Логический размер таймлайна. CSS задаёт высоту 36px; backing store
@@ -1038,7 +1039,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       .catch((e) => {
         if (seq !== saveSeqRef.current) return;
         setSaveState("error");
-        flash(`Ошибка сохранения: ${e.message}`, "error", () =>
+        flash(`Ошибка сохранения: ${failureReason(e)}`, "error", () =>
           saveToDb(frags, options),
         );
       });
@@ -1418,7 +1419,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         st = await getExportStatus(pairId);
       } catch (e) {
         finishExportUi();
-        flash(`Ошибка опроса экспорта: ${(e as Error).message}`, "error");
+        flash(`Ошибка опроса экспорта: ${failureReason(e)}`, "error");
         return;
       }
       if (st.state === "running" || st.state === "cancelling") {
@@ -1449,7 +1450,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       try {
         await cancelExport(pairId);
       } catch (e) {
-        flash(`Не удалось отменить экспорт: ${(e as Error).message}`, "error");
+        flash(`Не удалось отменить экспорт: ${failureReason(e)}`, "error");
       }
       return;
     }
@@ -1478,7 +1479,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       }
     } catch (e) {
       finishExportUi();
-      flash(`Ошибка экспорта: ${(e as Error).message}`, "error");
+      flash(`Ошибка экспорта: ${failureReason(e)}`, "error");
     }
   };
 
@@ -1495,7 +1496,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         return getPair(pairId);
       })
       .then((p) => loadPairInto(p))
-      .catch((e: Error) => flash(`Ошибка импорта разметки: ${e.message}`, "error"))
+      .catch((e: Error) => flash(`Ошибка импорта разметки: ${failureReason(e)}`, "error"))
       .finally(() => {
         setAnnBusy(false);
         setAnnProgress(null);
@@ -1512,7 +1513,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     if (dlState !== null || annBusy) return;
     setDlState({ key, frac: null });
     downloadFile(url, filename, (f) => setDlState({ key, frac: f }))
-      .catch((e: Error) => flash(`Ошибка скачивания: ${e.message}`, "error"))
+      .catch((e: Error) => flash(`Ошибка скачивания: ${failureReason(e)}`, "error"))
       .finally(() => setDlState(null));
   };
 
