@@ -83,13 +83,15 @@ class ExportLedger:
             return None
 
     def _write_sidecar(self, out_dir: str, task_hash, created: Sequence[str]) -> None:
+        path = os.path.join(out_dir, self.sidecar_name)
         try:
-            with open(os.path.join(out_dir, self.sidecar_name),
-                      "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump({
                     "hash": task_hash,
                     "files": [os.path.basename(p) for p in created],
                 }, f)
+            # Sidecar — такой же публичный артефакт, как нарезки.
+            os.chmod(path, 0o644)
         except OSError:
             pass
 
@@ -112,6 +114,15 @@ class ExportLedger:
                 remove(os.path.join(out_dir, filename))
             except OSError:
                 pass
+
+    def purge_outputs(self, ws, *, remove=os.remove) -> None:
+        """Корзина: сносит все наши нарезки и sidecar, чужие файлы целы."""
+        out_dir = self._out_dir(ws)
+        self.drop_outputs(ws, remove=remove)
+        try:
+            remove(os.path.join(out_dir, self.sidecar_name))
+        except OSError:
+            pass
 
     # ─── состояние для списка и статуса ──────────────────────────────────
 

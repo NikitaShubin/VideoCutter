@@ -10,6 +10,7 @@ import {
 import {
   annotationsUrl,
   cancelExport,
+  deleteExport,
   downloadFile,
   frameUrl,
   getExportStatus,
@@ -1489,6 +1490,20 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     }
   };
 
+  const handleDeleteExports = async () => {
+    const ok = window.confirm(
+      "Удалить все экспортированные фрагменты? Оригиналы не пострадают.",
+    );
+    if (!ok) return;
+    try {
+      await deleteExport(pairId);
+      setExportItems(null);
+      flash("Экспортированные фрагменты удалены");
+    } catch (e) {
+      flash(`Не удалось удалить экспорт: ${failureReason(e)}`, "error");
+    }
+  };
+
   // Импорт разметки из архива (только fragments.tsv): после применения
   // пару перечитываем с сервера — модель, позиция и превью списка свежие.
   const handleAnnotationsImport = (file: File) => {
@@ -2377,6 +2392,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         <div className="export-list">
           <h3>
             Фрагменты экспортированы (оригиналы):
+            <button
+              className="export-list-close export-list-trash"
+              onClick={handleDeleteExports}
+              title="Удалить все экспортированные фрагменты с сервера"
+              aria-label="Удалить все экспортированные фрагменты"
+            >🗑</button>
             <button
               className="export-list-close"
               onClick={() => handleExport(true)}

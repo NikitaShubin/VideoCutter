@@ -10,6 +10,7 @@ Run: cd backend && DJANGO_DEBUG=0 python manage.py test vc_pairs.tests_export_le
 
 import json
 import os
+import stat
 from unittest import mock
 
 from export_ledger import LEDGER
@@ -296,6 +297,12 @@ class ExportLedgerPersistenceTests(ExportLedgerTestBase):
         self.assertFalse(os.path.exists(
             os.path.join(self.out_dir, ".export-state.json")))
 
+    def test_finish_sidecar_is_world_readable(self):
+        path = self._out()
+        LEDGER.finish(self.ws_id, [path], "hash123")
+        sidecar = os.path.join(self.out_dir, ".export-state.json")
+        self.assertEqual(stat.S_IMODE(os.stat(sidecar).st_mode), 0o644)
+
     def test_fail_sets_error(self):
         LEDGER.fail("a", "boom")
         self.assertEqual(LEDGER.snapshot("a"),
@@ -331,6 +338,30 @@ class ExportLedgerOutputsTests(ExportLedgerTestBase):
         with mock.patch("os.path.getsize", side_effect=OSError("gone")):
             self.assertFalse(LEDGER.outputs_present(
                 self.out_dir, [{"filename": "out.mp4"}]))
+
+    def test_purge_outputs_removes_ours_and_sidecar(self):
+        self._out("video_fragment_1.mp4")
+        self._out(".video_fragment_9.mp4")
+        self._out("keep.txt")
+        self._write_sidecar({"hash": "h", "files": ["video_fragment_1.mp4"]})
+
+        LEDGER.purge_outputs(self.ws)
+
+        self.assertEqual(sorted(os.listdir(self.out_dir)), ["keep.txt"])
+
+    def test_purge_outputs_without_directory(self):
+        os.rmdir(self.out_dir)
+
+        LEDGER.purge_outputs(self.ws)
+
+    def test_purge_outputs_remove_oserror(self):
+        self._out("video_fragment_1.mp4")
+        remove = mock.Mock(side_effect=OSError("ro"))
+
+        LEDGER.purge_outputs(self.ws, remove=remove)
+
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.out_dir, "video_fragment_1.mp4")))
 
 
 class ExportLedgerIdentityTests(ExportLedgerTestBase):

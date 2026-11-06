@@ -6,6 +6,7 @@
 
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -44,6 +45,29 @@ class ExporterCancelTest(SimpleTestCase):
             self.assertTrue(os.path.isfile(created[0]))
         finally:
             shutil.rmtree(out, ignore_errors=True)
+
+
+class ExporterPublishTest(SimpleTestCase):
+    """Частичный файл скрыт и 0600; публикация — атомарный rename + 0644."""
+
+    def setUp(self):
+        self.out = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        src = os.path.join(
+            os.path.dirname(__file__), "..", "testdata", "test.mp4")
+        self.exporter = Exporter(src, self.out)
+
+    def test_partial_hidden_and_private_until_published(self):
+        partial = self.exporter.extract_fragments([(0, 9)])[0]
+        self.assertTrue(os.path.basename(partial).startswith("."))
+        self.assertEqual(stat.S_IMODE(os.stat(partial).st_mode), 0o600)
+        self.assertFalse(
+            os.path.exists(os.path.join(self.out, "test_fragment_1.mp4")))
+
+        final = self.exporter.publish(partial)
+        self.assertEqual(os.path.basename(final), "test_fragment_1.mp4")
+        self.assertEqual(stat.S_IMODE(os.stat(final).st_mode), 0o644)
+        self.assertFalse(os.path.exists(partial))
 
 
 class ExporterRangeTest(SimpleTestCase):
@@ -409,3 +433,36 @@ class FullVerifyTest(SimpleTestCase):
         with self.assertRaises(FFmpegError) as ctx:
             export_views._verify_cut(self.path, 10, cut, 10)
         self.assertIn("сдвиг", str(ctx.exception))
+
+    def test_full_verify_single_frame_has_no_neighbours(self):
+        """Один кадр: детект сдвига не ищет соседей (регресс min() пустого).
+
+        Сжатие crf20 даёт ssd заметно выше 1, но ниже порога контента:
+        прежний код уходил в поиск соседей и падал ValueError.
+        """
+        import vc_fragments.views as export_views
+        from vc_fragments.views import _frame_ts_bounds
+        from vc_pairs import frame_provider as fp
+
+        out = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, out, True)
+        cut = os.path.join(out, "one.mp4")
+        t0, t1 = _frame_ts_bounds(fp.get_visible_pts(self.path), 10, 10)
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", self.path, "-y",
+             "-vf", f"select=between(t\\,{t0}\\,{t1})", "-an", "-vsync", "0",
+             "-c:v", "libx264", "-preset", "slow", "-crf", "20",
+             "-tune", "animation", cut],
+            check=True, capture_output=True)
+        export_views._verify_cut(self.path, 10, cut, 1)
+
+    def test_single_frame_exports_png(self):
+        """Один кадр (start == end) — PNG с ровно одним кадром."""
+        cut = self._export(10, 10)
+        self.assertEqual(os.path.splitext(cut)[1], ".png")
+        self.assertEqual(_ffprobe_count(cut), 1)
+
+    def test_multi_frame_stays_video(self):
+        """Несколько кадров — по-прежнему видео, не PNG."""
+        cut = self._export(10, 11)
+        self.assertEqual(os.path.splitext(cut)[1], ".mp4")

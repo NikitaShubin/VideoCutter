@@ -2220,6 +2220,15 @@ kbd {
   color: #fff;
 }
 
+.export-list-trash:hover {
+  color: #ff6b6b;
+}
+
+/* Первая кнопка группы прижата вправо, остальные идут вплотную за ней. */
+.export-list-trash ~ .export-list-close {
+  margin-left: 0;
+}
+
 .export-list a {
   color: var(--accent);
 }

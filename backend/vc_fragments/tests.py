@@ -438,6 +438,9 @@ class ExportApiTests(WorkspaceApiTestBase):
                     fragments, progress=progress, cancelled=cancelled,
                     frame_ts_ranges=frame_ts_ranges)
 
+            def publish(self, path):
+                return self.real.publish(path)
+
         with mock.patch.object(export_views, "Exporter", FakeExporter):
             resp = self.client.post(self.export_url)
             self.assertEqual(resp.status_code, HTTP_OK)
@@ -535,6 +538,9 @@ class ExportApiTests(WorkspaceApiTestBase):
                     fragments, progress=progress, cancelled=cancelled,
                     frame_ts_ranges=frame_ts_ranges)
 
+            def publish(self, path):
+                return self.real.publish(path)
+
         with mock.patch.object(export_views, "Exporter", FakeExporter):
             resp = self.client.post(self.export_url)
             self.assertEqual(resp.json()["state"], "running")
@@ -581,6 +587,9 @@ class ExportApiTests(WorkspaceApiTestBase):
                 return self.real.extract_fragments(
                     fragments, progress=progress, cancelled=cancelled,
                     frame_ts_ranges=frame_ts_ranges)
+
+            def publish(self, path):
+                return self.real.publish(path)
 
         with mock.patch.object(export_views, "Exporter", FakeExporter):
             resp = self.client.post(self.export_url + "?force=1")
@@ -740,6 +749,9 @@ class ExportConsistencyTests(WorkspaceApiTestBase):
                 return self.real.extract_fragments(
                     fragments, progress=progress, cancelled=cancelled,
                     frame_ts_ranges=frame_ts_ranges)
+
+            def publish(self, path):
+                return self.real.publish(path)
 
         with mock.patch.object(export_views, "Exporter", FakeExporter):
             resp = self.client.post(self.export_url)
@@ -1492,6 +1504,47 @@ class RunExportErrorTests(WorkspaceApiTestBase):
         self.assertEqual(st["state"], "error")
         self.assertIn("boom-generic", st["error"])
 
+    def test_run_export_generic_error_cleanup(self):
+        """Любое исключение (не только FFmpegError) не оставляет файлов."""
+        import vc_fragments.views as v
+
+        class BoomExporter:
+            def __init__(self, src, out_dir, **k):
+                self.out_dir = out_dir
+
+            def extract_fragments(self, *a, **k):
+                with open(os.path.join(self.out_dir,
+                                       "video_fragment_1.mp4"), "wb") as f:
+                    f.write(b"x")
+                raise RuntimeError("boom-generic-cleanup")
+
+        vpts = [i * 100000 for i in range(12)]
+        with mock.patch.object(v.frame_provider, "get_visible_pts", return_value=vpts), \
+                mock.patch.object(v.frame_provider, "index_pts_unreliable", return_value=False), \
+                mock.patch.object(v, "Exporter", BoomExporter):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+        self.assertIn("boom-generic-cleanup", st["error"])
+        out_dir = os.path.join(self.ws_dir, "exports")
+        self.assertNotIn("video_fragment_1.mp4", os.listdir(out_dir))
+
+    def test_run_export_failure_before_exports_dir(self):
+        """Сбой до создания exports/ не пытается чистить несуществующий путь."""
+        import vc_fragments.views as v
+
+        class BoomWs:
+            def load_fragments(self):
+                raise RuntimeError("boom-early")
+
+        with mock.patch.object(v, "get_workspace", return_value=BoomWs()):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "error")
+        self.assertIn("boom-early", st["error"])
+
 
 class FragmentsValidationExtraTests(WorkspaceApiTestBase):
     def test_put_bad_json(self):
@@ -1659,6 +1712,97 @@ class ExportHttpExtraTests(WorkspaceApiTestBase):
         import vc_fragments.views as v
         with mock.patch.object(v, "_video_identity", return_value=None):
             self.assertIsNone(v._current_done(self.ws_id))
+
+
+class ExportDeleteTests(WorkspaceApiTestBase):
+    """DELETE /export — корзина: снести все наши нарезки и sidecar."""
+
+    def _seed(self):
+        out_dir = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        for name in ("video_fragment_1.mp4", "video_fragment_2.mp4"):
+            with open(os.path.join(out_dir, name), "wb") as f:
+                f.write(b"x")
+        with open(os.path.join(out_dir, ".export-state.json"), "w") as f:
+            json.dump({"hash": "h", "files": ["video_fragment_1.mp4"]}, f)
+        with open(os.path.join(out_dir, "keep.txt"), "w") as f:
+            f.write("чужой")
+        return out_dir
+
+    def test_delete_exports_removes_ours_and_sidecar(self):
+        out_dir = self._seed()
+
+        resp = self.client.delete(self.export_url)
+
+        self.assertEqual(resp.status_code, HTTP_OK)
+        self.assertEqual(resp.json(), {"state": "idle"})
+        self.assertEqual(os.listdir(out_dir), ["keep.txt"])
+        with EXPORTS_LOCK:
+            self.assertNotIn(self.ws_id, EXPORTS)
+
+    def test_delete_exports_missing_workspace(self):
+        resp = self.client.delete("/api/v1/pairs/nonexistent/export")
+        self.assertEqual(resp.status_code, HTTP_NOT_FOUND)
+
+    def test_delete_exports_without_directory_is_idle(self):
+        resp = self.client.delete(self.export_url)
+        self.assertEqual(resp.status_code, HTTP_OK)
+        self.assertEqual(resp.json(), {"state": "idle"})
+
+    def test_delete_exports_rejected_while_queued(self):
+        import export_ledger
+
+        out_dir = self._seed()
+        export_ledger.LEDGER.submit(self.ws_id, 2, 0)
+
+        resp = self.client.delete(self.export_url)
+
+        self.assertEqual(resp.status_code, HTTP_CONFLICT)
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "video_fragment_1.mp4")))
+
+    def test_delete_exports_rejected_while_running(self):
+        out_dir = self._seed()
+        with EXPORTS_LOCK:
+            EXPORTS[self.ws_id] = {"state": "running", "index": 0, "total": 2}
+
+        resp = self.client.delete(self.export_url)
+
+        # Снимаем фиктивное running до tearDown: иначе он ждёт 30 с.
+        with EXPORTS_LOCK:
+            EXPORTS.pop(self.ws_id, None)
+        self.assertEqual(resp.status_code, HTTP_CONFLICT)
+        self.assertTrue(os.path.isfile(
+            os.path.join(out_dir, "video_fragment_1.mp4")))
+
+    def test_delete_exports_forgets_error_state(self):
+        with EXPORTS_LOCK:
+            EXPORTS[self.ws_id] = {"state": "error", "error": "boom"}
+
+        resp = self.client.delete(self.export_url)
+
+        self.assertEqual(resp.json(), {"state": "idle"})
+        with EXPORTS_LOCK:
+            self.assertNotIn(self.ws_id, EXPORTS)
+
+
+class SingleFrameExportTests(WorkspaceApiTestBase):
+    def test_one_frame_fragment_exports_png_done(self):
+        """Регресс live-бага: фрагмент 1–1 — done, PNG, без min() пустого."""
+        import vc_fragments.views as v
+
+        tsv = os.path.join(self.ws_dir, "fragments.tsv")
+        with open(tsv, "w") as f:
+            f.write("start\tend\tcomment\n1\t1\t\n")
+
+        v._run_export(self.ws_id)
+
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "done")
+        self.assertEqual(
+            [item["filename"] for item in st["files"]],
+            ["visualization_fragment_1.png"])
 
 
 class DiskStatusExtraTests(WorkspaceApiTestBase):

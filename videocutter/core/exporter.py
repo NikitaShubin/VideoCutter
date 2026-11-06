@@ -81,33 +81,70 @@ class Exporter:
             vf = f"mpdecimate,{select}"
         else:
             vf = select
-        cmd = [
-            "ffmpeg",
-            "-loglevel",
-            "error",
-            "-i",
-            self.source_video_file,
-            "-y",
-            "-avoid_negative_ts",
-            "make_zero",
-            "-vf",
-            vf,
-            "-an",
-            "-vsync",
-            "0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            self.preset,
-            "-crf",
-            str(self.crf),
-            "-tune",
-            self.tune,
-            target_file,
-        ]
+        if target_file.lower().endswith(".png"):
+            # Одиночный кадр — картинка без видеокодека: PNG lossless,
+            # ровно один кадр, читается тем же ffprobe/ffmpeg-путём.
+            cmd = [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-i",
+                self.source_video_file,
+                "-y",
+                "-vf",
+                vf,
+                "-an",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "png",
+                target_file,
+            ]
+        else:
+            cmd = [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-i",
+                self.source_video_file,
+                "-y",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-vf",
+                vf,
+                "-an",
+                "-vsync",
+                "0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                self.preset,
+                "-crf",
+                str(self.crf),
+                "-tune",
+                self.tune,
+                target_file,
+            ]
         if self.nice is not None:
             cmd = ["nice", "-n", str(int(self.nice))] + cmd
         return cmd
+
+    @staticmethod
+    def _create_partial(path: str) -> None:
+        """Создаёт скрытый частичный файл с правами 0600 до записи ffmpeg."""
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.close(fd)
+        os.chmod(path, 0o600)
+
+    def publish(self, partial_path: str) -> str:
+        """Публикует проверенный частичный файл: 0644 + атомарный rename."""
+        directory, name = os.path.split(partial_path)
+        if not name.startswith("."):
+            raise FFmpegError(f"Не частичный файл экспорта: {partial_path}")
+        final_path = os.path.join(directory, name[1:])
+        os.chmod(partial_path, 0o644)
+        os.replace(partial_path, final_path)
+        return final_path
 
     def extract_fragments(
         self,
@@ -124,7 +161,7 @@ class Exporter:
             немедленно (не ждать границу фрагмента) и бросить ExportCancelled.
         :param frame_ts_ranges: опционально диапазоны меток кадров
             [(t0, t1), ...] параллельно fragments (None — отбор по счётчику n).
-        :return: пути к созданным файлам.
+        :return: пути к скрытым частичным файлам (публикация — publish()).
         """
         if not shutil.which("ffmpeg"):
             raise FFmpegError("FFmpeg не найден в PATH")
@@ -135,14 +172,21 @@ class Exporter:
         created: List[str] = []
         total = len(fragments)
         for fragment_ind, (start, end) in enumerate(fragments, 1):
-            target_file = (
-                f"{self.target_prefix}_fragment_{fragment_ind}{self.target_suffix}"
+            # Одиночный кадр (start == end) — PNG: видео-контейнер с одним
+            # кадром неудобен потребителю и хуже сверяется.
+            suffix = ".png" if start == end else self.target_suffix
+            final_file = (
+                f"{self.target_prefix}_fragment_{fragment_ind}{suffix}"
             )
+            partial_file = os.path.join(
+                os.path.dirname(final_file), "." + os.path.basename(final_file))
             if progress:
                 progress(fragment_ind, total, (start, end))
 
             frame_ts_range = frame_ts_ranges[fragment_ind - 1] if frame_ts_ranges is not None else None
-            cmd = self.build_command(start, end, target_file, frame_ts_range=frame_ts_range)
+            self._create_partial(partial_file)
+            cmd = self.build_command(start, end, partial_file,
+                                     frame_ts_range=frame_ts_range)
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 text=True)
@@ -177,6 +221,6 @@ class Exporter:
                     f"FFmpeg не смог обработать фрагмент {fragment_ind} "
                     f"(кадры {start}-{end}):\n{stderr[-2000:]}"
                 )
-            created.append(target_file)
+            created.append(partial_file)
 
         return created

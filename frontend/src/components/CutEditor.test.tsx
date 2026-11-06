@@ -11,6 +11,7 @@ import {
   getCache,
   replaceFragments,
   startExport,
+  deleteExport,
   type CacheState,
 } from "../api";
 
@@ -53,6 +54,7 @@ vi.mock("../api", async (importOriginal) => {
       }),
     ),
     getExportStatus: vi.fn(() => Promise.resolve({ state: "idle" as const })),
+    deleteExport: vi.fn(() => Promise.resolve({ state: "idle" as const })),
   };
 });
 
@@ -1404,6 +1406,56 @@ describe("смысловые зоны верха редактора", () => {
     });
     expect(host.querySelector(".export-list")).toBeNull();
     expect(onBack).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("корзина удаляет все экспортированные фрагменты", async () => {
+    pairDetail = {
+      ...oneFrame(50, 0),
+      fragments: [{ start: 0, end: 10, comment: "" }],
+    };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      topButton(host, "Экспорт").click();
+    });
+    await act(async () => {});
+    expect(host.querySelector(".export-list")).toBeTruthy();
+
+    const trash = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Удалить все экспортированные фрагменты"]',
+    )!;
+    await act(async () => {
+      trash.click();
+    });
+
+    expect(deleteExport).toHaveBeenCalledWith("ws-test");
+    expect(host.querySelector(".export-list")).toBeNull();
+    confirm.mockRestore();
+    unmount();
+  });
+
+  it("отказ от подтверждения не удаляет экспорт", async () => {
+    pairDetail = {
+      ...oneFrame(50, 0),
+      fragments: [{ start: 0, end: 10, comment: "" }],
+    };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { host, unmount } = await mountEditor();
+    await act(async () => {
+      topButton(host, "Экспорт").click();
+    });
+    await act(async () => {});
+    const trash = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Удалить все экспортированные фрагменты"]',
+    )!;
+    await act(async () => {
+      trash.click();
+    });
+
+    expect(deleteExport).not.toHaveBeenCalled();
+    expect(host.querySelector(".export-list")).toBeTruthy();
+    confirm.mockRestore();
     unmount();
   });
 

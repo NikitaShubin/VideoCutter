@@ -14,6 +14,7 @@ import numpy as np
 from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods
 
+import export_access
 from export_ledger import LEDGER
 from videocutter.core.exporter import (
     Exporter,
@@ -21,6 +22,7 @@ from videocutter.core.exporter import (
     FFmpegError,
 )
 from vc_pairs import frame_provider
+import workspace
 from workspace import get_workspace
 
 
@@ -246,11 +248,14 @@ def _verify_cut(src_path: str, start_index: int, cut_path: str,
         if nom > 1.0:
             # Тихий сдвиг проверяем ДО порога: соседний эталон совпал
             # на порядок лучше — вырезано не то, хотя счётчик сошёлся.
+            # У одиночного кадра соседей в нарезке нет: сдвиг ловить нечем,
+            # остаётся порог контента (регресс min() на пустом диапазоне).
             lo = max(0, i - _VERIFY_SHIFT_WINDOW)
             hi = min(expected_count, i + _VERIFY_SHIFT_WINDOW + 1)
+            neighbours = [j for j in range(lo, hi) if j != i]
             best = min(float(((exp[j] - got[i]) ** 2).mean())
-                       for j in range(lo, hi) if j != i)
-            if best <= nom / 10:
+                       for j in neighbours) if neighbours else None
+            if best is not None and best <= nom / 10:
                 raise FFmpegError(
                     f"Похоже на сдвиг границ: {what} кадр нарезки совпал "
                     f"с соседним эталоном (ssd={best:.1f}), а не со своим "
@@ -261,8 +266,25 @@ def _verify_cut(src_path: str, start_index: int, cut_path: str,
                 f"(ssd={nom:.1f} > {VERIFY_SSD_MAX}): {cut_path}")
 
 
+def _remove_created_since(out_dir: str, before: set) -> None:
+    """Удаляет файлы, появившиеся в out_dir с момента снапшота before."""
+    if not out_dir:
+        return
+    try:
+        after = set(os.listdir(out_dir))
+    except OSError:
+        return
+    for name in after - before:
+        try:
+            os.remove(os.path.join(out_dir, name))
+        except OSError:
+            pass
+
+
 def _run_export(ws_id: str) -> None:
     """Выполняет нарезку фрагментов в фоне."""
+    out_dir = ""
+    before = set()
     try:
         ws = get_workspace(ws_id)
         if ws is None:
@@ -275,7 +297,7 @@ def _run_export(ws_id: str) -> None:
             return
 
         out_dir = os.path.join(ws.path, "exports")
-        os.makedirs(out_dir, exist_ok=True)
+        export_access.ensure_access(ws.path, root=workspace.WORKSPACE_ROOT)
         before = set(os.listdir(out_dir))
 
         exporter = Exporter(ws.original, out_dir, nice=EXPORT_NICE)
@@ -314,12 +336,14 @@ def _run_export(ws_id: str) -> None:
         created = exporter.extract_fragments(
             fragments, progress=progress, cancelled=cancelled,
             frame_ts_ranges=frame_ts_ranges)
+        published = []
         for (start, end), path in zip(fragments, created):
             _verify_cut(ws.original, start, path, end - start + 1)
+            published.append(exporter.publish(path))
         vid = _video_identity(ws.original)
         task_hash = _task_hash(frags, vid["size"], vid["mtime_ns"]) \
             if vid is not None else None
-        _export_finished_ok(ws_id, created, task_hash)
+        _export_finished_ok(ws_id, published, task_hash)
     except (_ExportCancelled, ExportCancelled):
         # Файлы, появившиеся за этот запуск (готовые фрагменты валидны,
         # но пользователь просил зачистку) — удаляем по снапшоту каталога.
@@ -332,17 +356,11 @@ def _run_export(ws_id: str) -> None:
     except FFmpegError as e:
         # Проваленный прогон не оставляет мусора: чистим созданное сейчас
         # (как при отмене), чтобы следующий запуск начинался с чистого поля.
-        try:
-            after = set(os.listdir(out_dir))
-        except OSError:
-            after = set()
-        for name in after - before:
-            try:
-                os.remove(os.path.join(out_dir, name))
-            except OSError:
-                pass
+        _remove_created_since(out_dir, before)
         _export_failed(ws_id, str(e))
     except Exception as e:
+        # Любой сбой (не только FFmpegError) обязан зачистить частичные файлы.
+        _remove_created_since(out_dir, before)
         _export_failed(ws_id, str(e))
     finally:
         LEDGER.clear_cancel(ws_id)
@@ -506,20 +524,36 @@ def pair_settings(request, pair_id: str):
     return JsonResponse({"quality": quality, "scale": scale})
 
 
-@require_http_methods(["POST"])
+@require_http_methods(["POST", "DELETE"])
 def fragment_export(request, pair_id: str):
-    """Запускает ffmpeg-нарезку в фоне; прогресс — через status.
+    """POST — запуск нарезки; DELETE — корзина: удалить все наши нарезки.
 
-    Нарезки актуальны (хеш границ+видео совпал с готовыми) — сразу done
-    с файлами, без прогона. ``?force=1`` — всегда гнать заново.
+    POST: нарезки актуальны (хеш границ+видео совпал с готовыми) — сразу
+    done с файлами, без прогона. ``?force=1`` — всегда гнать заново.
     Слоты ограничены (_export_capacity): занято — заявка встаёт в FIFO
     (state queued + position), слот освобождается финишем любого экспорта.
     Повторный POST при running/queued — 409 (кроме force: старую заявку
     снимаем — бегущей шлём cancel, queued выкидываем — и встаём заново).
+
+    DELETE допустим только в спокойном состоянии (idle/done/error/cancelled):
+    running/queued — 409, иначе поток писал бы в удаляемые файлы. Чужие файлы
+    в exports/ не трогаются; sidecar забывается вместе с памятью.
     """
     ws = get_workspace(pair_id)
     if ws is None:
         return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
+
+    if request.method == "DELETE":
+        current = LEDGER.snapshot(pair_id)
+        if current and current["state"] in ("running", "queued"):
+            return JsonResponse(
+                {"error": "Экспорт уже выполняется/ожидает для этого workspace "
+                          "(state: %s)" % current["state"]},
+                status=409,
+            )
+        LEDGER.purge_outputs(ws, remove=os.remove)
+        LEDGER.forget(pair_id)
+        return JsonResponse({"state": "idle"})
 
     frags = ws.load_fragments()
     if not frags:

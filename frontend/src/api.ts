@@ -492,6 +492,12 @@ export function cancelExport(pairId: string): Promise<ExportStatus> {
   );
 }
 
+export function deleteExport(pairId: string): Promise<ExportStatus> {
+  return apiFetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export`, { method: "DELETE" }).then((r) =>
+    json<ExportStatus>(r),
+  );
+}
+
 // ─── Бэкап/восстановление и обмен разметкой (P3) ────────────────────────────
 // Скачивание — обычной ссылкой <a href download> (GET отдаёт zip потоком).
 // Заливка — через XHR (upload.onprogress), как остальные загрузки.
