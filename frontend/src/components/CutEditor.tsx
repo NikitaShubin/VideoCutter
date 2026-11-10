@@ -2305,7 +2305,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         aria-valuetext={`Кадр ${Math.min(pair.total_frames, position + 1)} из ${pair.total_frames}`}
         title={keyTitle(
           "Клик — переход по кадрам",
-          "стрелки; Home/End — начало и конец",
+          "←/→ — кадры; Home/End — края",
           keyboard,
         )}
         onKeyDown={(e) => {
@@ -2323,12 +2323,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
           const step = e.shiftKey ? SEEK_STEP : 1;
           let target: number;
           switch (e.key) {
+            // ↑/↓ — не навигация слайдера, а глобальные отметки границ
+            // (README/справка): не перехватываем, пусть событие дойдёт до window.
             case "ArrowLeft":
-            case "ArrowDown":
               target = position - step;
               break;
             case "ArrowRight":
-            case "ArrowUp":
               target = position + step;
               break;
             case "Home":

@@ -1912,6 +1912,32 @@ describe("таймлайн редактора", () => {
     unmount();
   });
 
+  it("ArrowUp на таймлайне ставит начало фрагмента", async () => {
+    pairDetail.fragments = [{ start: 0, end: 10, comment: "" }];
+    const { host, unmount } = await mountEditor();
+    seekToFrame(host, 6);
+    const tl = statusbar(host);
+    act(() => tl.focus());
+
+    keyOn(tl, "ArrowUp");
+
+    expect(lastSaved()).toEqual([{ start: 5, end: 10, comment: "" }]);
+    unmount();
+  });
+
+  it("ArrowDown на таймлайне ставит конец фрагмента", async () => {
+    pairDetail.fragments = [{ start: 0, end: 10, comment: "" }];
+    const { host, unmount } = await mountEditor();
+    seekToFrame(host, 6);
+    const tl = statusbar(host);
+    act(() => tl.focus());
+
+    keyOn(tl, "ArrowDown");
+
+    expect(lastSaved()).toEqual([{ start: 0, end: 5, comment: "" }]);
+    unmount();
+  });
+
   it("PageUp/PageDown прыгают по границам фрагментов", async () => {
     pairDetail.fragments = [
       { start: 0, end: 10, comment: "" },
