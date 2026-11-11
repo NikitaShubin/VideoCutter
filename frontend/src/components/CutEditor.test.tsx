@@ -678,6 +678,47 @@ describe("клавиатурная модель: глобальные клави
     unmount();
   });
 
+  it("V закрывает «Вид» повторным нажатием", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "v", code: "KeyV" });
+    press({ key: "v", code: "KeyV" });
+    expect(menuPanel("Вид")).toBeNull();
+    unmount();
+  });
+
+  it("B закрывает «Данные» повторным нажатием", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "b", code: "KeyB" });
+    press({ key: "b", code: "KeyB" });
+    expect(menuPanel("Данные")).toBeNull();
+    unmount();
+  });
+
+  it("G закрывает «Диагностику» повторным нажатием", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "g", code: "KeyG" });
+    await act(async () => {});
+    press({ key: "g", code: "KeyG" });
+    expect(menuPanel("Диагностика")).toBeNull();
+    unmount();
+  });
+
+  it("на русской раскладке своя клавиша тоже закрывает меню", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "v", code: "KeyV" });
+    press({ key: "м", code: "KeyV" });
+    expect(menuPanel("Вид")).toBeNull();
+    unmount();
+  });
+
+  it("удержание V не закрывает «Вид»", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "v", code: "KeyV" });
+    press({ key: "v", code: "KeyV", repeat: true });
+    expect(menuPanel("Вид")).toBeTruthy();
+    unmount();
+  });
+
   it("на десктопе триггеры меню показывают V, B и G", async () => {
     const { host, unmount } = await mountEditor();
     expect(menuTrigger(host, "Вид").querySelector("kbd")?.textContent).toBe("V");

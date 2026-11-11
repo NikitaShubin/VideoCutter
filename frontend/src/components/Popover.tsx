@@ -25,6 +25,8 @@ interface Props {
   triggerTitle?: string;
   /** Дополнительный класс кнопки-триггера (например, квадрат строки). */
   triggerClassName?: string;
+  /** Физическая клавиша, которая открыла меню и закрывает его повторно. */
+  toggleKey?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: ReactNode;
@@ -44,6 +46,7 @@ export function Popover({
   triggerLabel,
   triggerTitle,
   triggerClassName,
+  toggleKey,
   open,
   onOpenChange,
   children,
@@ -89,7 +92,17 @@ export function Popover({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      // Меню закрывается Escape и повторным нажатием своей же клавиши.
+      // Удержание не считается повторным нажатием: открытие и закрытие
+      // должны быть двумя осознанными нажатиями.
+      const ownKey =
+        toggleKey !== undefined &&
+        !e.repeat &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        (e.code === toggleKey || e.key === toggleKey);
+      if (e.key !== "Escape" && !ownKey) return;
       e.preventDefault();
       e.stopPropagation();
       onOpenChangeRef.current(false);
@@ -112,7 +125,7 @@ export function Popover({
       window.removeEventListener("resize", onResize);
       window.removeEventListener("scroll", onResize, true);
     };
-  }, [open, place]);
+  }, [open, place, toggleKey]);
 
   return (
     <span className="popover">

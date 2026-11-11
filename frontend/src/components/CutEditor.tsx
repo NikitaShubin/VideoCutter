@@ -1757,6 +1757,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               >
               <Popover
                 label="Вид"
+                toggleKey="KeyV"
                 trigger={
                   <>
                     Вид
@@ -1785,6 +1786,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               </Popover>
               <Popover
                 label="Данные"
+                toggleKey="KeyB"
                 trigger={
                   <>
                     Данные
@@ -1816,6 +1818,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               </Popover>
               <Popover
                 label="Диагностика"
+                toggleKey="KeyG"
                 trigger={
                   <>
                     Диагностика

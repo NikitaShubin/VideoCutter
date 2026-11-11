@@ -317,7 +317,7 @@ export function HelpModal({ open, onClose }: Props) {
                     <span className="kbd">V</span> / <span className="kbd">B</span> /{" "}
                     <span className="kbd">G</span>
                   </td>
-                  <td>меню «Вид» / «Данные» / «Диагностика»</td>
+                  <td>меню «Вид» / «Данные» / «Диагностика»; повторное нажатие закрывает его</td>
                 </tr>
                 <tr><td><span className="kbd">Esc</span></td><td>закрыть справку / комментарий / меню / список экспорта → выйти из полноэкранного режима → к списку</td></tr>
                 <tr><td><span className="kbd">Q</span></td><td>назад к списку пар (позиция кадра запоминается)</td></tr>
@@ -334,8 +334,9 @@ export function HelpModal({ open, onClose }: Props) {
           {keyboard && (
             <p>
               Пока меню открыто, глобальные клавиши редактора выключены;{" "}
-              <span className="kbd">Esc</span> закрывает его и возвращает
-              управление. Повторяются только стрелки, «,»/«.» и{" "}
+              <span className="kbd">Esc</span> или повторное нажатие той же
+              клавиши закрывает его и возвращает управление. Повторяются
+              только стрелки, «,»/«.» и{" "}
               <span className="kbd">PageUp</span>/<span className="kbd">PageDown</span>;
               остальные клавиши срабатывают один раз. Из модификаторов работают
               только <span className="kbd">Ctrl</span>+<span className="kbd">Z</span>,{" "}
