@@ -404,20 +404,22 @@ describe("превью таймлайна в списке", () => {
     expect(html).toContain('aria-hidden="true"');
   });
 
-  it("подсказывает, что означают цвета полосы", () => {
+  it("подсказывает значения цветов в подсказке полосы", () => {
     window.localStorage.setItem("vc-tab", "tasks");
     const html = renderList([
       makePair({ broken: false, total_frames: 100, fragments: [{ start: 1, end: 2, comment: "" }] }),
     ]);
-    expect(html).toContain("зелёный — свободные кадры");
+    expect(html).toContain("зелёный — свободно");
     expect(html).toContain("красный — фрагмент");
+    expect(html).toContain("фрагмент с комментарием");
+    expect(html).toContain("текущий кадр");
   });
 
-  it("держит свёрнутую легенду цветов рядом со списком", () => {
+  it("не занимает строку постоянной легендой", () => {
     window.localStorage.setItem("vc-tab", "tasks");
     const html = renderList([makePair({ broken: false })]);
-    expect(html).toContain("Легенда таймлайна");
-    expect(html).toContain("фрагмент с комментарием");
+    expect(html).not.toContain("list-legend-row");
+    expect(html).not.toContain("Легенда таймлайна");
   });
 });
 

@@ -36,7 +36,7 @@ import { FragmentIcon } from "./FragmentIcon";
 import { HelpModal } from "./HelpModal";
 import { PlaybackMenu } from "./PlaybackMenu";
 import { Popover } from "./Popover";
-import { TimelineLegend } from "./TimelineLegend";
+import { timelineLegendTitle } from "./timelineLegend";
 import { useKeyboardMode } from "./useKeyboardMode";
 import { ViewMenu } from "./ViewMenu";
 import {
@@ -2378,10 +2378,12 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         aria-valuemax={pair.total_frames}
         aria-valuenow={Math.min(pair.total_frames, position + 1)}
         aria-valuetext={`Кадр ${Math.min(pair.total_frames, position + 1)} из ${pair.total_frames}`}
-        title={keyTitle(
-          "Клик — переход по кадрам",
-          "←/→ — кадры; Home/End — края",
-          keyboard,
+        title={timelineLegendTitle(
+          keyTitle(
+            "Клик — переход по кадрам",
+            "←/→ — кадры; Home/End — края",
+            keyboard,
+          ),
         )}
         onKeyDown={(e) => {
           const p = modelRef.current;
@@ -2443,8 +2445,6 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
           seekTo(timelineFrame(pixel, canvas.width, p.totalFrames));
         }}
       />
-
-      {!isFullscreen && <TimelineLegend className="editor-legend" />}
 
       {message && (
         <div

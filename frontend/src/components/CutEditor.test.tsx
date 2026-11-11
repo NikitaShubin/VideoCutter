@@ -1960,9 +1960,11 @@ describe("подсказки клавиатуры в заголовках", () =
     expect(playButton(host).title).toBe("Воспроизвести");
     expect(playbackSettings(host).title).toBe("Направление и скорость");
     expect(frameInput(host).title).toBe("Номер кадра: введите число");
-    expect(host.querySelector(".statusbar")!.getAttribute("title")).toBe(
-      "Клик — переход по кадрам",
-    );
+    const [first, second] = (
+      host.querySelector(".statusbar")!.getAttribute("title") ?? ""
+    ).split("\n");
+    expect(first).toBe("Клик — переход по кадрам");
+    expect(second).toContain("Цвета:");
     unmount();
   });
 
@@ -2189,13 +2191,14 @@ function keyOn(el: HTMLElement, key: string): KeyboardEvent {
 }
 
 describe("таймлайн редактора", () => {
-  it("рядом свёрнутая легенда, объясняющая цвета", async () => {
+  it("легенда цветов — второй строкой подсказки, без отдельной строки", async () => {
     const { host, unmount } = await mountEditor();
-    const legend = host.querySelector<HTMLDetailsElement>(".editor-legend");
-    expect(legend).toBeTruthy();
-    expect(legend?.open).toBe(false);
-    expect(legend?.textContent).toContain("Легенда таймлайна");
-    expect(legend?.textContent).toContain("фрагмент с комментарием");
+    expect(host.querySelector(".editor-legend")).toBeNull();
+    const [first, ...rest] = (statusbar(host).getAttribute("title") ?? "")
+      .split("\n");
+    expect(first).toContain("Клик — переход по кадрам");
+    expect(rest.join("\n")).toContain("фрагмент с комментарием");
+    expect(rest.join("\n")).toContain("текущий кадр");
     unmount();
   });
 

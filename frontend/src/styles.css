@@ -1219,8 +1219,7 @@ kbd {
   .menu-direction button,
   .menu-check,
   .pair-list .pair-actions .pair-edit-btn,
-  .pair-list .pair-actions .pair-delete,
-  .timeline-legend summary {
+  .pair-list .pair-actions .pair-delete {
     min-width: 44px;
     min-height: 44px;
   }
@@ -2373,102 +2372,6 @@ kbd {
   border-radius: 3px;
 }
 
-/* ─── Легенда таймлайна: смысл цветов на месте ─────────────────────────────
- * Свёрнутая строка рядом с полосой: раскрывается по нажатию, в закрытом
- * виде занимает одну строку. Цвета дублируются словами — это не цвет-only
- * подсказка. */
-.timeline-legend {
-  color: var(--muted);
-  font-size: 0.85em;
-}
-
-.timeline-legend summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: 32px;
-  color: var(--muted);
-  cursor: pointer;
-  list-style: none;
-}
-
-.timeline-legend summary::-webkit-details-marker {
-  display: none;
-}
-
-.timeline-legend summary::before {
-  content: "▸";
-  margin-right: 6px;
-  font-size: 0.9em;
-}
-
-.timeline-legend[open] summary::before {
-  content: "▾";
-}
-
-.timeline-legend summary:hover,
-.timeline-legend summary:focus-visible {
-  color: var(--text);
-}
-
-/* Свой список: сбрасываем стили списка задач (он тоже ul). */
-.timeline-legend ul {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  margin: 2px 0 4px;
-  padding: 0;
-  list-style: none;
-}
-
-.timeline-legend li {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-}
-
-.legend-swatch {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 2px;
-}
-
-.legend-free {
-  background: var(--tl-green);
-}
-
-.legend-fragment {
-  background: #ff0000;
-}
-
-.legend-comment {
-  background: #ff8c00;
-}
-
-.legend-viewed {
-  background: #008000;
-}
-
-.legend-selected {
-  background: linear-gradient(90deg, #00ffff 50%, #ff00ff 50%);
-}
-
-.legend-current {
-  width: 3px;
-  background: #ffffff;
-}
-
-.list-legend-row {
-  margin-top: 4px;
-}
-
-.editor-legend {
-  margin: 0 2px;
-}
-
 /* ─── Экран входа (входной фильтр-токен) ─────────────────────────────────── */
 
 .login-wrap {
@@ -2754,14 +2657,8 @@ kbd {
     border-radius: 0;
   }
 
-  /* Легенда — сразу под таймлайном, к которому относится. */
-  .editor-legend {
-    order: 4;
-    margin: 0 8px;
-  }
-
   .rotate-hint {
-    order: 5;
+    order: 4;
     display: flex;
     flex-wrap: wrap;
     gap: 4px 6px;
@@ -2884,12 +2781,6 @@ kbd {
     gap: 0;
     padding: 0;
     background: #000;
-  }
-
-  /* В фокус-режиме легенда отнимала бы высоту у кадра; она остаётся в
-   * списке и в портретном редакторе. */
-  .editor-legend {
-    display: none;
   }
 
   .editor-top {

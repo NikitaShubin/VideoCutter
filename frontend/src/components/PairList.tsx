@@ -43,7 +43,7 @@ import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
 import { formatPercent } from "../model/format";
 import { pluralCount } from "../model/plural";
 import { StatusbarPreview } from "./StatusbarPreview";
-import { TimelineLegend } from "./TimelineLegend";
+import { timelineLegendTitle } from "./timelineLegend";
 import { PairRowFrame } from "./PairRowFrame";
 import { Popover } from "./Popover";
 import { RoleField } from "./RoleFields";
@@ -1045,11 +1045,6 @@ export function PairList({
             </div>
           </div>
         )}
-        {tab === "tasks" && (
-          <div className="list-legend-row">
-            <TimelineLegend />
-          </div>
-        )}
       </div>
 
       {tab === "projects" && (
@@ -1420,7 +1415,7 @@ export function PairList({
               >
                 <StatusbarPreview
                   className="pair-bg"
-                  title="Таймлайн задачи: зелёный — свободные кадры, красный — фрагмент, оранжевый — фрагмент с комментарием"
+                  title={timelineLegendTitle("Таймлайн задачи")}
                   totalFrames={p.total_frames}
                   fragments={p.fragments}
                   position={p.position}
