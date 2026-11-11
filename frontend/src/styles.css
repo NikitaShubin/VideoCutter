@@ -1148,10 +1148,9 @@ select option {
 }
 
 .editor-workbench {
-  /* Рейка разметки: на десктопе раскрывается по кнопке «Разметка» в шапке
-   * и в свёрнутом виде не занимает строку; на сенсорном экране — крупные
-   * кнопки. В низком ландшафте панель уходит в рейку (см. медиазапросы
-   * ниже), в полноэкранном режиме шапки нет. */
+  /* Рейка разметки: только сенсорный экран — крупные кнопки. На десктопе
+   * горячие клавиши, панель скрыта. В низком ландшафте панель уходит в
+   * рейку (см. медиазапросы ниже), в полноэкранном режиме шапки нет. */
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1160,51 +1159,13 @@ select option {
   border-top: 1px solid var(--edge);
 }
 
-/* display:flex выше перебивает UA-правило [hidden]; без этого свёрнутая
- * панель продолжала бы занимать строку целиком. */
+/* display:flex выше перебивает UA-правило [hidden]. */
 .editor-workbench[hidden] {
   display: none;
 }
 
-/* Свёрнутая рейка остаётся в DOM: aria-controls всегда указывает на
- * существующий узел, а не на исчезнувший. */
 .editor-workbench .fragment-actions[hidden] {
   display: none;
-}
-
-/* Переключатель живёт в шапке, а не отдельной строкой: свёрнутая панель
- * не должна отнимать высоту у кадра. */
-.editor-top .workbench-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  color: var(--muted);
-  font-size: 0.78em;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.editor-top .workbench-toggle[aria-expanded="true"] {
-  border-color: transparent;
-  background: transparent;
-}
-
-.editor-top .workbench-toggle[aria-expanded="true"]:hover:not(:disabled) {
-  border-color: var(--line);
-  background: var(--btn);
-  color: var(--text);
-}
-
-.editor-top .workbench-toggle[aria-expanded="false"] {
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.workbench-toggle-caret {
-  font-size: 0.9em;
-  opacity: 0.8;
 }
 
 /* Клавиатурная подсказка: один вид в рейке, меню, шапке и транспорте. */

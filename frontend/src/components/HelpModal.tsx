@@ -29,7 +29,14 @@ export function HelpModal({ open, onClose }: Props) {
     closeRef.current?.focus();
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" || e.code === "KeyH" || e.code === "KeyQ") {
+      // Удержание не должно открывать/закрывать справку несколько раз.
+      if (e.repeat) return;
+      if (
+        e.key === "Escape" ||
+        e.key === "?" ||
+        e.code === "KeyH" ||
+        e.code === "KeyQ"
+      ) {
         e.preventDefault();
         onCloseRef.current();
         return;
@@ -176,7 +183,11 @@ export function HelpModal({ open, onClose }: Props) {
                   <td>назад / вперёд на 1 кадр (серия быстрых нажатий — прыжок к последней)</td>
                 </tr>
                 <tr>
-                  <td>{k("Ctrl + ← / →")}</td>
+                  <td>
+                    {k("Ctrl+← / →")} (и{" "}
+                    <span className="kbd">Ctrl</span>+<span className="kbd">,</span>/
+                    <span className="kbd">.</span>)
+                  </td>
                   <td>10 кадров (одиночное нажатие — прыжок, удержание — догон)</td>
                 </tr>
                 <tr>
@@ -259,7 +270,7 @@ export function HelpModal({ open, onClose }: Props) {
                 <tr><td>{k("↑ / [ или ] / ↓")}</td><td>начало / конец фрагмента (ключевой кадр / граница)</td></tr>
                 <tr><td><span className="kbd">K</span> <span className="kbd">Ins</span></td><td>вставить пару границ: первое нажатие — начало, второе — конец</td></tr>
                 <tr><td>{k("D / Del")}</td><td>удалить фрагмент под позицией</td></tr>
-                <tr><td><span className="kbd">I</span></td><td>комментарий к сегменту (Enter — сохранить, Esc — отмена)</td></tr>
+                <tr><td><span className="kbd">I</span></td><td>комментарий к сегменту (Enter — новая строка, Ctrl+Enter — сохранить, Esc — отмена)</td></tr>
                 <tr><td>{k("Ctrl+Z / Ctrl+Shift+Z / Z")}</td><td>отменить / повторить (Ctrl+Shift+Z или Z)</td></tr>
               </tbody>
             </table>
@@ -301,9 +312,16 @@ export function HelpModal({ open, onClose }: Props) {
                 <tr><th scope="col">Клавиши</th><th scope="col">Действие</th></tr>
                 <tr><td><span className="kbd">F</span></td><td>полноэкранный режим</td></tr>
                 <tr><td><span className="kbd">A</span></td><td>сохранять пропорции кадра / растягивать</td></tr>
-                <tr><td><span className="kbd">Esc</span></td><td>закрыть справку / меню / выйти из полноэкранного режима</td></tr>
-                <tr><td>{k("Esc или Q")}</td><td>назад к списку пар (позиция кадра запоминается)</td></tr>
-                <tr><td>{k("H или ?")}</td><td>показать / скрыть эту справку</td></tr>
+                <tr>
+                  <td>
+                    <span className="kbd">V</span> / <span className="kbd">B</span> /{" "}
+                    <span className="kbd">G</span>
+                  </td>
+                  <td>меню «Вид» / «Данные» / «Диагностика»</td>
+                </tr>
+                <tr><td><span className="kbd">Esc</span></td><td>закрыть справку / комментарий / меню / список экспорта → выйти из полноэкранного режима → к списку</td></tr>
+                <tr><td><span className="kbd">Q</span></td><td>назад к списку пар (позиция кадра запоминается)</td></tr>
+                <tr><td>{k("H или ?")}</td><td>показать / скрыть эту справку (на любой раскладке)</td></tr>
               </tbody>
             </table>
           ) : (
@@ -311,6 +329,21 @@ export function HelpModal({ open, onClose }: Props) {
               Полноэкранный режим включается в меню <b>«Вид»</b>; там же
               сохраняются пропорции кадра. Чтобы вернуться к списку задач,
               нажмите <b>«← Назад»</b> в шапке.
+            </p>
+          )}
+          {keyboard && (
+            <p>
+              Пока меню открыто, глобальные клавиши редактора выключены;{" "}
+              <span className="kbd">Esc</span> закрывает его и возвращает
+              управление. Повторяются только стрелки, «,»/«.» и{" "}
+              <span className="kbd">PageUp</span>/<span className="kbd">PageDown</span>;
+              остальные клавиши срабатывают один раз. Из модификаторов работают
+              только <span className="kbd">Ctrl</span>+<span className="kbd">Z</span>,{" "}
+              <span className="kbd">Ctrl</span>+<span className="kbd">Shift</span>+
+              <span className="kbd">Z</span>,{" "}
+              <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> и{" "}
+              <span className="kbd">Ctrl</span>+<span className="kbd">←</span>/
+              <span className="kbd">→</span>: прочие сочетания остаются браузеру.
             </p>
           )}
         </div>

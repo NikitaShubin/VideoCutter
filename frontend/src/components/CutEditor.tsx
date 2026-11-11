@@ -163,13 +163,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   // Резервный полный экран: браузер без Element.requestFullscreen (iPhone).
   const [isFallbackFullscreen, setIsFallbackFullscreen] = useState(false);
-  // Физическая клавиатура: шорткаты — основной путь, панель разметки —
-  // по требованию. На сенсорном экране панель видна всегда.
+  // Физическая клавиатура: шорткаты — основной путь. Панель разметки
+  // остаётся только на сенсорном экране.
   const keyboard = useKeyboardMode();
-  // Рейка разметки на десктопе свёрнута по умолчанию: горячие клавиши —
-  // основной путь, панель — по требованию. Развёрнутая добавляет строку,
-  // свёрнутая не занимает ничего: переключатель живёт в шапке.
-  const [railOpen, setRailOpen] = useState(false);
   const [exportItems, setExportItems] = useState<ExportItem[] | null>(null);
   const exportItemsRef = useRef<ExportItem[] | null>(null);
   exportItemsRef.current = exportItems;
@@ -203,6 +199,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [viewScale, setViewScale] = useState(0.75);
   const [viewQuality, setViewQuality] = useState(78);
   const [editingComment, setEditingComment] = useState(false);
+  const editingCommentRef = useRef(false);
+  editingCommentRef.current = editingComment;
+  // Фрагмент, у которого открыт черновик: позиция может измениться
+  // прокруткой/таймлайном, но комментарий обязан остаться у него.
+  const commentStartRef = useRef<number | null>(null);
   const [commentDraft, setCommentDraft] = useState("");
   const [commentSavedFor, setCommentSavedFor] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -230,6 +231,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const [mobileMenuTab, setMobileMenuTab] = useState<MobileMenuTab>("view");
   const openMenuRef = useRef<EditorMenu>(null);
   openMenuRef.current = openMenu;
+
+  // Смена устройства меняет доступный набор меню. Меню, которого на новом
+  // устройстве нет, закрываем: иначе openMenu навсегда выключит глобальные
+  // клавиши, хотя закрывать уже нечего.
+  useEffect(() => {
+    if (openMenu === null || openMenu === "playback") return;
+    const available = keyboard ? openMenu !== "more" : openMenu === "more";
+    if (!available) setOpenMenu(null);
+  }, [keyboard, openMenu]);
 
   // Автоскрытие шапки в ландшафте: состояние выводится из бездействия,
   // а не хранится как «режим». Пока открыт оверлей или фокус в шапке,
@@ -916,7 +926,9 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   // промежуточных кадров; позиция клампится в границы задачи.
   const seekTo = (frame: number) => {
     const p = modelRef.current;
-    if (!p) return;
+    // Пока открыт комментарий, кадр заморожен: иначе черновик при
+    // сохранении уедет к другому фрагменту.
+    if (!p || editingCommentRef.current) return;
     setPlaying(false);
     jumpMode();
     setPosition(Math.min(p.totalFrames - 1, Math.max(0, frame)));
@@ -950,13 +962,14 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   };
 
   const togglePlayback = () => {
+    if (editingCommentRef.current) return;
     cancelPending();
     setPlaying((v) => !v);
   };
 
   const jump = (dir: 1 | -1) => {
     const p = modelRef.current;
-    if (!p) return;
+    if (!p || editingCommentRef.current) return;
     jumpMode(); // прыжок без промежуточных кадров
     const ks = [0, ...p.keyFrames(), p.totalFrames - 1];
     if (dir === 1) {
@@ -1059,7 +1072,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const commitFrameInput = () => {
     if (frameDraft === null) return;
     setFrameDraft(null);
-    if (!pair) return;
+    if (!pair || editingCommentRef.current) return;
     const n = parseInt(frameDraft, 10);
     if (!Number.isFinite(n)) return;
     const target = Math.min(pair.total_frames, Math.max(1, n)) - 1;
@@ -1110,12 +1123,16 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
 
   const startCommentEdit = (trigger?: HTMLElement | null) => {
     const p = modelRef.current;
-    if (!p) return;
+    if (!p || editingCommentRef.current) return;
     const f = p.fragmentAt(position);
     if (!f) {
       flash("Комментарии можно добавлять только к выделенным участкам", "error");
       return;
     }
+    // Пока черновик открыт, кадр не двигается: и сохранение, и удаление
+    // обязаны вернуться ровно к тому фрагменту, у которого нажали «I».
+    commentStartRef.current = f.start;
+    setPlaying(false);
     commentTriggerRef.current =
       trigger ?? commentEditRef.current ?? commentToolRef.current;
     // Новое открытие редактора отменяет прежнее подтверждение: иначе
@@ -1131,18 +1148,26 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     window.setTimeout(() => commentRef.current?.focus(), 0);
   };
 
+  const commentTarget = () => {
+    const p = modelRef.current;
+    const start = commentStartRef.current;
+    if (!p || start === null) return null;
+    return p.fragments.find((f) => f.start === start) ?? null;
+  };
+
   const commitComment = () => {
     const p = modelRef.current;
     if (!p || committedRef.current) return;
     // Пустой черновик — не сохранение: удаление требует отдельной кнопки,
     // иначе стёртый для правки текст пропадал бы по привычному Ctrl+Enter.
     if (!commentDraft.trim()) return;
-    const f = p.fragmentAt(position);
+    const f = commentTarget();
     if (!f) return;
     committedRef.current = true;
     setEditingComment(false);
     restoreCommentFocus();
-    if (p.setComment(position, commentDraft)) {
+    commentStartRef.current = null;
+    if (p.setComment(f.start, commentDraft)) {
       rerender();
       drawStatusbar();
       saveToDb(p.getFragments(), { commentStart: f.start });
@@ -1152,12 +1177,13 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   const deleteComment = () => {
     const p = modelRef.current;
     if (!p || committedRef.current) return;
-    const f = p.fragmentAt(position);
+    const f = commentTarget();
     if (!f || !f.comment) return;
     committedRef.current = true;
     setEditingComment(false);
     restoreCommentFocus();
-    if (p.setComment(position, "")) {
+    commentStartRef.current = null;
+    if (p.setComment(f.start, "")) {
       rerender();
       drawStatusbar();
       // Удаление не оставляет плашку «Сохранено» без текста.
@@ -1171,6 +1197,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
 
   const cancelComment = () => {
     committedRef.current = true;
+    commentStartRef.current = null;
     setEditingComment(false);
     restoreCommentFocus();
   };
@@ -1258,12 +1285,38 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       // редактор не перехватывает их и не мешает прокрутке панели.
       if (helpOpenRef.current || openMenuRef.current) return;
 
-      const isEditing = (e.target as HTMLElement)?.tagName === "INPUT" || (e.target as HTMLElement)?.tagName === "TEXTAREA";
+      const target = e.target as HTMLElement | null;
+      const isEditing =
+        target?.isContentEditable ||
+        ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName ?? "");
       if (isEditing) return;
+
+      // Пока открыт черновик комментария, его кнопки — часть локального
+      // поля: Escape закрывает поле, остальные глобальные клавиши молчат.
+      if (editingCommentRef.current) {
+        if (is("Escape")) {
+          e.preventDefault();
+          cancelComment();
+        }
+        return;
+      }
 
       // Навигация.
       const rightKey = is("ArrowRight") || is("Period");
       const leftKey = is("ArrowLeft") || is("Comma");
+      // Повторяются только кадровая навигация и прыжки по границам.
+      const repeatable =
+        rightKey || leftKey || is("PageUp") || is("PageDown");
+      if (e.repeat && !repeatable) return;
+
+      // Модификаторы: разрешены только Ctrl+Z, Ctrl+Shift+Z, Ctrl+Enter
+      // и Ctrl+←/→ (вместе с алиасами «,»/«.»). Остальные комбинации —
+      // браузеру: Ctrl+D не удаляет фрагмент, Ctrl+F не включает полный экран.
+      if (e.altKey) return;
+      if (ctrl && !(rightKey || leftKey || is("KeyZ") || is("Enter"))) {
+        return;
+      }
+
       if (rightKey) rightHeldRef.current = true;
       if (leftKey) leftHeldRef.current = true;
 
@@ -1318,14 +1371,22 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         }
       } else if (is("KeyJ")) {
         if (!e.repeat) playToBoundary();
+      } else if (is("KeyH") || k === "?") {
+        // «?» — это Shift+7 на русской раскладке: проверяем до цифр,
+        // иначе справка превращается в смену скорости.
+        setHelpOpen(true);
       } else if (/^Digit[0-9]$/.test(code)) {
         setSpeed(Math.pow(2, parseInt(code.slice(5), 10)));
       } else if (is("KeyF")) {
         toggleFullscreen();
       } else if (is("KeyA")) {
         setPreserveAspect((v) => !v);
-      } else if (is("KeyH") || (is("Slash") && e.shiftKey)) {
-        setHelpOpen(true);
+      } else if (is("KeyV")) {
+        setOpenMenu("view");
+      } else if (is("KeyB")) {
+        setOpenMenu("exchange");
+      } else if (is("KeyG")) {
+        setOpenMenu("diagnostics");
       }
 
       // Отметка фрагментов.
@@ -1333,7 +1394,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         markStart();
       } else if (is("ArrowDown") || is("BracketRight")) {
         markEnd();
-      } else if (is("KeyK") || is("Insert") || is("F12")) {
+      } else if (is("KeyK") || is("Insert")) {
         createOrComplete();
       } else if (is("Delete") || is("KeyD")) {
         deleteAtPosition();
@@ -1694,21 +1755,17 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
                 role="group"
                 aria-label="Настройки и сервис"
               >
-              <button
-                type="button"
-                className="workbench-toggle"
-                aria-expanded={railOpen}
-                aria-controls="editor-markup-tools"
-                title={railOpen ? "Свернуть разметку" : "Развернуть разметку"}
-                onClick={() => setRailOpen((open) => !open)}
-              >
-                <span>Разметка</span>
-                <span className="workbench-toggle-caret" aria-hidden="true">
-                  {railOpen ? "▾" : "▸"}
-                </span>
-              </button>
               <Popover
                 label="Вид"
+                trigger={
+                  <>
+                    Вид
+                    {keyboard && <kbd>V</kbd>}
+                    <span className="popover-caret" aria-hidden="true">
+                      ▾
+                    </span>
+                  </>
+                }
                 open={openMenu === "view"}
                 onOpenChange={(v) => setOpenMenu(v ? "view" : null)}
               >
@@ -1728,6 +1785,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               </Popover>
               <Popover
                 label="Данные"
+                trigger={
+                  <>
+                    Данные
+                    {keyboard && <kbd>B</kbd>}
+                    <span className="popover-caret" aria-hidden="true">
+                      ▾
+                    </span>
+                  </>
+                }
                 open={openMenu === "exchange"}
                 onOpenChange={(v) => setOpenMenu(v ? "exchange" : null)}
               >
@@ -1750,6 +1816,15 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
               </Popover>
               <Popover
                 label="Диагностика"
+                trigger={
+                  <>
+                    Диагностика
+                    {keyboard && <kbd>G</kbd>}
+                    <span className="popover-caret" aria-hidden="true">
+                      ▾
+                    </span>
+                  </>
+                }
                 open={openMenu === "diagnostics"}
                 onOpenChange={(v) => setOpenMenu(v ? "diagnostics" : null)}
               >
@@ -1896,16 +1971,13 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
             </div>
           </div>
 
-          <div
-            className={keyboard ? "editor-workbench is-rail" : "editor-workbench"}
-            hidden={keyboard && !railOpen}
-          >
+          <div className="editor-workbench" hidden={keyboard}>
             <div
               id="editor-markup-tools"
               className="fragment-actions"
               role="toolbar"
               aria-label="Разметка фрагментов"
-              hidden={keyboard && !railOpen}
+              hidden={keyboard}
             >
               <button
                 type="button"
@@ -2311,6 +2383,20 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         onKeyDown={(e) => {
           const p = modelRef.current;
           if (!p) return;
+          // Alt — не наш модификатор; Ctrl разрешён только для стрелок.
+          if (e.altKey) return;
+          const ctrl = e.ctrlKey || e.metaKey;
+          if (ctrl && e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+          // Повторяются стрелки и PageUp/PageDown; Home/End — однократно.
+          if (
+            e.repeat &&
+            e.key !== "ArrowLeft" &&
+            e.key !== "ArrowRight" &&
+            e.key !== "PageUp" &&
+            e.key !== "PageDown"
+          ) {
+            return;
+          }
           // PageUp/PageDown — те же «прыжки по границам фрагментов», что
           // и в остальном редакторе (README/справка), а не ±10 кадров.
           if (e.key === "PageUp" || e.key === "PageDown") {
@@ -2320,7 +2406,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
             jump(e.key === "PageDown" ? 1 : -1);
             return;
           }
-          const step = e.shiftKey ? SEEK_STEP : 1;
+          const step = ctrl ? SEEK_STEP : 1;
           let target: number;
           switch (e.key) {
             // ↑/↓ — не навигация слайдера, а глобальные отметки границ
@@ -2388,7 +2474,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
 
-      {!isFullscreen && exportItems && (
+      {exportItems && (
         <div className="export-list">
           <h3>
             Фрагменты экспортированы (оригиналы):

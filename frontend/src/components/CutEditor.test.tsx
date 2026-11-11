@@ -17,6 +17,9 @@ import {
 
 let resolvePair: (p: VideoPairDetail) => void = () => {};
 let pairDetail: VideoPairDetail;
+/** Редакторы, ещё не размонтированные тестом: падение до unmount не должно
+ * оставлять живые window-обработчики и влиять на следующие сценарии. */
+const mountedEditors: Array<() => void> = [];
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
@@ -40,6 +43,7 @@ vi.mock("../api", async (importOriginal) => {
       } as CacheState),
     ),
     setPairSettings: () => Promise.resolve().then(() => undefined),
+    savePosition: vi.fn(() => Promise.resolve({ position: 0 })),
     replaceFragments: vi.fn(() => Promise.resolve()),
     startExport: vi.fn(() =>
       Promise.resolve({
@@ -128,13 +132,14 @@ async function mountEditor(onBack: () => void = () => {}) {
   await act(async () => {
     resolvePair(pairDetail);
   });
-  return {
-    host,
-    unmount: () => {
-      act(() => root.unmount());
-      host.remove();
-    },
-  };
+  function unmount(): void {
+    const i = mountedEditors.indexOf(unmount);
+    if (i >= 0) mountedEditors.splice(i, 1);
+    act(() => root.unmount());
+    host.remove();
+  }
+  mountedEditors.push(unmount);
+  return { host, unmount };
 }
 
 function tap(code: string, repeat = false): void {
@@ -146,6 +151,32 @@ function tap(code: string, repeat = false): void {
 function release(code: string): void {
   act(() => {
     window.dispatchEvent(new KeyboardEvent("keyup", { code }));
+  });
+}
+
+/** Клавиша на документе: так её видят и глобальный обработчик, и оверлеи. */
+function press(init: KeyboardEventInit): void {
+  act(() => {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      }),
+    );
+  });
+}
+
+/** Клавиша на конкретном элементе: проверяет поведение при фокусе на кнопке. */
+function pressOn(target: EventTarget, init: KeyboardEventInit): void {
+  act(() => {
+    target.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      }),
+    );
   });
 }
 
@@ -277,6 +308,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  while (mountedEditors.length > 0) mountedEditors[mountedEditors.length - 1]();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
@@ -603,6 +635,270 @@ describe("клавиатура не отбирает Tab", () => {
   });
 });
 
+describe("клавиатурная модель: глобальные клавиши", () => {
+  it("пробел переключает воспроизведение, даже когда фокус на кнопке", async () => {
+    const { host, unmount } = await mountEditor();
+    const help = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Справка"]',
+    )!;
+    act(() => help.focus());
+    pressOn(help, { key: " ", code: "Space" });
+    expect(playButton(host).getAttribute("aria-pressed")).toBe("true");
+    unmount();
+  });
+
+  it("V открывает «Вид»", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "v", code: "KeyV" });
+    expect(menuPanel("Вид")).toBeTruthy();
+    unmount();
+  });
+
+  it("B открывает «Данные»", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "b", code: "KeyB" });
+    expect(menuPanel("Данные")).toBeTruthy();
+    unmount();
+  });
+
+  it("G открывает «Диагностику»", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "g", code: "KeyG" });
+    await act(async () => {});
+    expect(menuPanel("Диагностика")).toBeTruthy();
+    unmount();
+  });
+
+  it("пока меню открыто, B не переключает его на «Данные»", async () => {
+    const { unmount } = await mountEditor();
+    press({ key: "v", code: "KeyV" });
+    press({ key: "b", code: "KeyB" });
+    expect(menuPanel("Вид")).toBeTruthy();
+    expect(menuPanel("Данные")).toBeNull();
+    unmount();
+  });
+
+  it("на десктопе триггеры меню показывают V, B и G", async () => {
+    const { host, unmount } = await mountEditor();
+    expect(menuTrigger(host, "Вид").querySelector("kbd")?.textContent).toBe("V");
+    expect(menuTrigger(host, "Данные").querySelector("kbd")?.textContent).toBe(
+      "B",
+    );
+    expect(
+      menuTrigger(host, "Диагностика").querySelector("kbd")?.textContent,
+    ).toBe("G");
+    unmount();
+  });
+
+  it("удержание A не переключает пропорции повторно", async () => {
+    const { host, unmount } = await mountEditor();
+    const img = host.querySelector("img")!;
+    tap("KeyA");
+    expect(img.style.objectFit).toBe("fill");
+    tap("KeyA", true);
+    expect(img.style.objectFit).toBe("fill");
+    unmount();
+  });
+
+  it("удержание пробела не переключает воспроизведение повторно", async () => {
+    const { host, unmount } = await mountEditor();
+    tap("Space");
+    expect(playButton(host).getAttribute("aria-pressed")).toBe("true");
+    tap("Space", true);
+    expect(playButton(host).getAttribute("aria-pressed")).toBe("true");
+    unmount();
+  });
+
+  it("удержание K не завершает фрагмент", async () => {
+    const { unmount } = await mountEditor();
+    tap("KeyK");
+    tap("KeyK", true);
+    expect(vi.mocked(replaceFragments)).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("удержание Escape после закрытия справки не уводит из редактора", async () => {
+    const onBack = vi.fn();
+    const { host, unmount } = await mountEditor(onBack);
+    act(() => {
+      host
+        .querySelector<HTMLButtonElement>('button[aria-label="Справка"]')!
+        .click();
+    });
+    expect(host.querySelector(".help-panel")).toBeTruthy();
+    press({ key: "Escape", code: "Escape" });
+    expect(host.querySelector(".help-panel")).toBeNull();
+    press({ key: "Escape", code: "Escape", repeat: true });
+    expect(onBack).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("Ctrl+D не удаляет фрагмент", async () => {
+    pairDetail = {
+      ...oneFrame(50, 0),
+      fragments: [{ start: 0, end: 10, comment: "" }],
+    };
+    const { unmount } = await mountEditor();
+    press({ key: "d", code: "KeyD", ctrlKey: true });
+    await act(async () => {});
+    expect(vi.mocked(replaceFragments)).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("Ctrl+F не включает полноэкранный режим", async () => {
+    const { host, unmount } = await mountEditor();
+    press({ key: "f", code: "KeyF", ctrlKey: true });
+    expect(host.querySelector(".editor")!.classList.contains("fullscreen"))
+      .toBe(false);
+    unmount();
+  });
+
+  it("Alt+A не меняет пропорции кадра", async () => {
+    const { host, unmount } = await mountEditor();
+    const img = host.querySelector("img")!;
+    press({ key: "a", code: "KeyA", altKey: true });
+    expect(img.style.objectFit).toBe("contain");
+    unmount();
+  });
+
+  it("F12 не создаёт фрагмент", async () => {
+    const { host, unmount } = await mountEditor();
+    tap("F12");
+    expect(
+      host.querySelector(".fragment-create")!.getAttribute("aria-pressed"),
+    ).toBe("false");
+    unmount();
+  });
+
+  it("? открывает и закрывает справку на любой раскладке", async () => {
+    const onBack = vi.fn();
+    const { host, unmount } = await mountEditor(onBack);
+    press({ key: "?", code: "Digit7" });
+    expect(host.querySelector(".help-panel")).toBeTruthy();
+    press({ key: "?", code: "Digit7" });
+    expect(host.querySelector(".help-panel")).toBeNull();
+    expect(onBack).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("на гибриде первое нажатие клавиши закрывает «Ещё» и возвращает горячие клавиши", async () => {
+    stubTouchOnly(true);
+    const { host, unmount } = await mountEditor();
+    openMenu(host, "Ещё");
+    press({ key: "a", code: "KeyA" });
+    expect(menuTrigger(host, "Вид")).toBeTruthy();
+    press({ key: "a", code: "KeyA" });
+    expect(host.querySelector("img")!.style.objectFit).toBe("fill");
+    unmount();
+  });
+});
+
+describe("клавиатурная модель: комментарий", () => {
+  const twoComments = (): VideoPairDetail => ({
+    ...oneFrame(50, 0),
+    fragments: [
+      { start: 0, end: 10, comment: "Первый" },
+      { start: 20, end: 30, comment: "Второй" },
+    ],
+  });
+
+  it("Escape на кнопке комментария закрывает поле, а не редактор", async () => {
+    pairDetail = twoComments();
+    const onBack = vi.fn();
+    const { host, unmount } = await mountEditor(onBack);
+    openComment(host);
+    const save =
+      host.querySelector<HTMLButtonElement>(".comment-save")!;
+    act(() => save.focus());
+    pressOn(save, { key: "Escape", code: "Escape" });
+    expect(host.querySelector(".editor-comment textarea")).toBeNull();
+    expect(onBack).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("пока открыт комментарий, D не удаляет фрагмент", async () => {
+    pairDetail = twoComments();
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    const save =
+      host.querySelector<HTMLButtonElement>(".comment-save")!;
+    act(() => save.focus());
+    pressOn(save, { key: "d", code: "KeyD" });
+    await act(async () => {});
+    expect(vi.mocked(replaceFragments)).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("пока открыт комментарий, переход по кадру не двигает позицию", async () => {
+    pairDetail = twoComments();
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    seekToFrame(host, 25);
+    expect(frameInput(host).value).toBe("1");
+    expect(host.querySelector(".comment-context")?.textContent).toBe(
+      "фрагмент 1 из 2 · кадры 1–11",
+    );
+    unmount();
+  });
+
+  it("сохранение комментария остаётся у фрагмента, где его открыли", async () => {
+    pairDetail = twoComments();
+    const { host, unmount } = await mountEditor();
+    openComment(host);
+    seekToFrame(host, 25);
+    const area =
+      host.querySelector<HTMLTextAreaElement>(".editor-comment textarea")!;
+    typeIntoArea(area, "Новый");
+    act(() => {
+      host.querySelector<HTMLButtonElement>(".comment-save")!.click();
+    });
+    await act(async () => {});
+    expect(lastSaved()).toEqual([
+      { start: 0, end: 10, comment: "Новый" },
+      { start: 20, end: 30, comment: "Второй" },
+    ]);
+    unmount();
+  });
+});
+
+describe("клавиатурная модель: таймлайн", () => {
+  it("Ctrl+стрелка двигает на 10 кадров", async () => {
+    const { host, unmount } = await mountEditor();
+    const slider = host.querySelector<HTMLElement>(".statusbar")!;
+    pressOn(slider, {
+      key: "ArrowRight",
+      code: "ArrowRight",
+      ctrlKey: true,
+    });
+    expect(frameInput(host).value).toBe("11");
+    unmount();
+  });
+});
+
+describe("клавиатурная модель: экспорт в полном экране", () => {
+  it("список экспорта виден и закрывается Esc раньше выхода из полного экрана", async () => {
+    pairDetail = {
+      ...oneFrame(50, 0),
+      fragments: [{ start: 0, end: 10, comment: "" }],
+    };
+    const { host, unmount } = await mountEditor();
+    tap("KeyF");
+    expect(host.querySelector(".editor")!.classList.contains("fullscreen"))
+      .toBe(true);
+    tap("KeyE");
+    await act(async () => {});
+    expect(host.querySelector(".export-list")).toBeTruthy();
+    tap("Escape");
+    expect(host.querySelector(".export-list")).toBeNull();
+    expect(host.querySelector(".editor")!.classList.contains("fullscreen"))
+      .toBe(true);
+    tap("Escape");
+    expect(host.querySelector(".editor")!.classList.contains("fullscreen"))
+      .toBe(false);
+    unmount();
+  });
+});
+
 function fragmentButton(host: HTMLElement, name: string): HTMLButtonElement {
   const bar = host.querySelector('[role="toolbar"][aria-label="Разметка фрагментов"]');
   if (!bar) throw new Error("панель разметки не найдена");
@@ -710,49 +1006,25 @@ function lastSaved(): { start: number; end: number; comment: string }[] {
 }
 
 describe("панель разметки: десктоп", () => {
-  it("по умолчанию свёрнута и не занимает строку", async () => {
+  it("переключателя «Разметка» нет, панель скрыта", async () => {
     const { host, unmount } = await mountEditor();
-    const toggle = host.querySelector<HTMLButtonElement>(".workbench-toggle")!;
     const bench = host.querySelector<HTMLElement>(".editor-workbench")!;
     const bar = host.querySelector<HTMLElement>(
       '[role="toolbar"][aria-label="Разметка фрагментов"]',
     )!;
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(toggle.getAttribute("aria-controls")).toBe(bar.id);
+    expect(host.querySelector(".workbench-toggle")).toBeNull();
     expect(bench.hidden).toBe(true);
     expect(bar.hidden).toBe(true);
     unmount();
   });
 
-  it("«Разметка» раскрывает подписанные действия", async () => {
-    const { host, unmount } = await mountEditor();
-    const toggle = host.querySelector<HTMLButtonElement>(".workbench-toggle")!;
-    act(() => toggle.click());
-    const bench = host.querySelector<HTMLElement>(".editor-workbench")!;
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(bench.hidden).toBe(false);
-    for (const name of [
-      "Начало",
-      "Конец",
-      "Создать",
-      "Удалить",
-      "Комментарий",
-      "Отменить",
-      "Повторить",
-    ]) {
-      expect(fragmentButton(host, name).textContent?.trim()).toContain(name);
-    }
-    unmount();
-  });
-
-  it("повторное нажатие снова сворачивает панель", async () => {
-    const { host, unmount } = await mountEditor();
-    const toggle = host.querySelector<HTMLButtonElement>(".workbench-toggle")!;
-    const bench = host.querySelector<HTMLElement>(".editor-workbench")!;
-    act(() => toggle.click());
-    act(() => toggle.click());
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(bench.hidden).toBe(true);
+  it("без панели K создаёт и завершает фрагмент", async () => {
+    const { unmount } = await mountEditor();
+    tap("KeyK");
+    tap("ArrowRight");
+    tap("KeyK");
+    await act(async () => {});
+    expect(lastSaved()).toEqual([{ start: 0, end: 1, comment: "" }]);
     unmount();
   });
 });
