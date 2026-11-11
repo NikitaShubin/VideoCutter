@@ -2191,7 +2191,7 @@ function keyOn(el: HTMLElement, key: string): KeyboardEvent {
 }
 
 describe("таймлайн редактора", () => {
-  it("легенда цветов — второй строкой подсказки, без отдельной строки", async () => {
+  it("легенда цветов — в подсказке, без отдельной строки", async () => {
     const { host, unmount } = await mountEditor();
     expect(host.querySelector(".editor-legend")).toBeNull();
     const [first, ...rest] = (statusbar(host).getAttribute("title") ?? "")
