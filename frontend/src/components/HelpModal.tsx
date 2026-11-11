@@ -394,23 +394,24 @@ export function HelpModal({ open, onClose }: Props) {
 
         <div className="help-section">
           <h3 id="help-timeline">Таймлайн</h3>
-          <div className="help-legend">
+          <h4 className="help-legend-title">Разметка</h4>
+          <ul className="help-legend">
             {TIMELINE_LEGEND.map((item) => (
-              <span key={item.label}>
+              <li key={item.label}>
                 <LegendSwatch color={item.color} />
-                {item.label}
-              </span>
+                <span>{item.label}</span>
+              </li>
             ))}
-          </div>
-          <p className="help-legend-note">Создание задачи</p>
-          <div className="help-legend">
+          </ul>
+          <h4 className="help-legend-title">Создание задачи</h4>
+          <ul className="help-legend">
             {PROGRESS_LEGEND.map((item) => (
-              <span key={item.label}>
+              <li key={item.label}>
                 <LegendSwatch color={item.color} />
-                {item.label}
-              </span>
+                <span>{item.label}</span>
+              </li>
             ))}
-          </div>
+          </ul>
           <p>
             В списке задач таймлайн — тонкая полоса под названием задачи;
             цвета те же, что в редакторе. Значения цветов — в плашке под

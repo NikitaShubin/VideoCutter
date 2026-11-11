@@ -226,4 +226,34 @@ describe("легенда цветов в справке", () => {
     }
     unmount();
   });
+
+  it("разметка и создание задачи — отдельные списки с заголовками", () => {
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const section = el.querySelector("#help-timeline")?.parentElement;
+    expect(section).toBeTruthy();
+    const titles = Array.from(
+      section!.querySelectorAll<HTMLElement>(".help-legend-title"),
+    ).map((title) => title.textContent);
+    expect(titles).toEqual(["Разметка", "Создание задачи"]);
+    const lists = Array.from(section!.querySelectorAll("ul.help-legend"));
+    expect(lists.map((list) => list.querySelectorAll("li").length)).toEqual([
+      7, 3,
+    ]);
+    unmount();
+  });
+
+  it("каждый пункт легенды — один образец и подпись", () => {
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const section = el.querySelector("#help-timeline")?.parentElement;
+    expect(section).toBeTruthy();
+    const items = Array.from(
+      section!.querySelectorAll("ul.help-legend li"),
+    );
+    expect(items).toHaveLength(10);
+    for (const item of items) {
+      expect(item.querySelectorAll(".legend-swatch")).toHaveLength(1);
+      expect((item.textContent ?? "").trim()).not.toBe("");
+    }
+    unmount();
+  });
 });
