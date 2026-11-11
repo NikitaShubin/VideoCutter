@@ -404,22 +404,45 @@ describe("превью таймлайна в списке", () => {
     expect(html).toContain('aria-hidden="true"');
   });
 
-  it("подсказывает значения цветов в подсказке полосы", () => {
-    window.localStorage.setItem("vc-tab", "tasks");
-    const html = renderList([
-      makePair({ broken: false, total_frames: 100, fragments: [{ start: 1, end: 2, comment: "" }] }),
-    ]);
-    expect(html).toContain("зелёный — свободно");
-    expect(html).toContain("красный — фрагмент");
-    expect(html).toContain("фрагмент с комментарием");
-    expect(html).toContain("текущий кадр");
-  });
-
-  it("не занимает строку постоянной легендой", () => {
+  it("легенда — видимой плашкой под списком, а не в подсказке полосы", () => {
     window.localStorage.setItem("vc-tab", "tasks");
     const html = renderList([makePair({ broken: false })]);
-    expect(html).not.toContain("list-legend-row");
-    expect(html).not.toContain("Легенда таймлайна");
+    expect(html).toContain('class="timeline-legend"');
+    for (const meaning of [
+      "зелёный — свободно",
+      "красный — фрагмент",
+      "фрагмент с комментарием",
+      "после текущего кадра",
+      "выделено поверх свободного",
+      "выделено поверх фрагмента",
+      "текущий кадр",
+      "отправка файла",
+      "приём сервером",
+      "индексация",
+    ]) {
+      expect(html).toContain(meaning);
+    }
+    expect(html).not.toContain("Цвета:");
+    const strip = /<canvas[^>]*class="pair-bg"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(strip).not.toContain("title=");
+  });
+
+  it("плашка легенды стоит после списка задач", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const html = renderList([makePair({ broken: false })]);
+    expect(html.indexOf("</ul>")).toBeLessThan(
+      html.indexOf("timeline-legend"),
+    );
+  });
+
+  it("у индексируемой задачи полоса не обещает легенду разметки", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const html = renderList([
+      makePair({ broken: false, indexing: true, indexing_progress: 0.4 }),
+    ]);
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    expect(host.querySelector(".pair-bg")?.hasAttribute("title")).toBe(false);
   });
 });
 

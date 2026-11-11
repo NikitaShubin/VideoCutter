@@ -584,6 +584,39 @@ select option {
   overflow-wrap: anywhere;
 }
 
+/* Плашка легенды под списком: цвета объясняются один раз внизу, а не в
+ * каждой строке и не в подсказке. Вне контекста строки она не мешает
+ * читать задачи. */
+.timeline-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--edge);
+  border-radius: var(--r-s);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 0.82em;
+}
+
+.timeline-legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+}
+
+.timeline-legend-row > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-legend-title {
+  color: var(--faint);
+  font-weight: 600;
+}
+
 .pair-list .pair-open .pair-warn {
   position: relative;
   z-index: 2;
@@ -2365,11 +2398,18 @@ kbd {
   font-size: 0.9em;
 }
 
-.help-swatch {
+/* Образец цвета в легенде: форму задаёт LegendSwatch, здесь — скругление
+ * и тонкая рамка, чтобы тёмные и белые квадраты читались на панели. */
+.legend-swatch {
   display: inline-block;
-  width: 14px;
-  height: 14px;
   border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.help-legend-note {
+  margin: 12px 0 6px;
+  color: var(--muted);
+  font-size: 0.85em;
 }
 
 /* ─── Экран входа (входной фильтр-токен) ─────────────────────────────────── */

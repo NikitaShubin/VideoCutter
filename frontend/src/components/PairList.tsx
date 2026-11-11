@@ -43,7 +43,8 @@ import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
 import { formatPercent } from "../model/format";
 import { pluralCount } from "../model/plural";
 import { StatusbarPreview } from "./StatusbarPreview";
-import { timelineLegendTitle } from "./timelineLegend";
+import { LegendSwatch } from "./LegendSwatch";
+import { PROGRESS_LEGEND, TIMELINE_LEGEND } from "./timelineLegend";
 import { PairRowFrame } from "./PairRowFrame";
 import { Popover } from "./Popover";
 import { RoleField } from "./RoleFields";
@@ -1415,7 +1416,6 @@ export function PairList({
               >
                 <StatusbarPreview
                   className="pair-bg"
-                  title={timelineLegendTitle("Таймлайн задачи")}
                   totalFrames={p.total_frames}
                   fragments={p.fragments}
                   position={p.position}
@@ -1531,6 +1531,32 @@ export function PairList({
           )
         )}
       </ul>
+        {((listed?.length ?? 0) > 0 || uploads.length > 0) && (
+          <div
+            className="timeline-legend"
+            role="note"
+            aria-label="Легенда цветов таймлайна"
+          >
+            <div className="timeline-legend-row">
+              <span className="timeline-legend-title">Разметка:</span>
+              {TIMELINE_LEGEND.map((item) => (
+                <span key={item.label}>
+                  <LegendSwatch color={item.color} />
+                  {item.label}
+                </span>
+              ))}
+            </div>
+            <div className="timeline-legend-row">
+              <span className="timeline-legend-title">Создание задачи:</span>
+              {PROGRESS_LEGEND.map((item) => (
+                <span key={item.label}>
+                  <LegendSwatch color={item.color} />
+                  {item.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
         </div>
       )}
     </div>

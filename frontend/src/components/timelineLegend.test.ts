@@ -1,43 +1,55 @@
-// Легенда таймлайна: смысл цветов объясняется в подсказке к полосе, а не
-// отдельной строкой интерфейса. Запуск: npm test (vitest run).
+// Легенда таймлайна — данные для видимой плашки в списке и раздела
+// «Таймлайн» в справке. Образцы берут цвета из той же палитры, что рисует
+// статусбар: легенда не может разойтись с полосой.
+// Запуск: npm test (vitest run).
 import { describe, expect, it } from "vitest";
-import { TIMELINE_LEGEND, timelineLegendTitle } from "./timelineLegend";
+import {
+  COMMENTED_FILL,
+  CURRENT_FRAME_FILL,
+  DIM_FILL,
+  FRAGMENT_FILL,
+  SCHEME_FILLS,
+  SELECTION_OVER_FRAGMENT_FILL,
+  SELECTION_OVER_FREE_FILL,
+  TIMELINE_FREE_FILL,
+} from "../model/statusbar";
+import { PROGRESS_LEGEND, TIMELINE_LEGEND } from "./timelineLegend";
 
 describe("легенда таймлайна", () => {
-  it("идёт после первой строки подсказки", () => {
-    const title = timelineLegendTitle("Клик — переход по кадрам");
-    expect(title.split("\n")[0]).toBe("Клик — переход по кадрам");
-    expect(title.endsWith(`\n${TIMELINE_LEGEND}`)).toBe(true);
+  it("перечисляет все состояния разметки", () => {
+    expect(TIMELINE_LEGEND.map((item) => item.label)).toEqual([
+      "зелёный — свободно",
+      "красный — фрагмент",
+      "оранжевый — фрагмент с комментарием",
+      "затемнённый — после текущего кадра",
+      "синий — выделено поверх свободного",
+      "пурпурный — выделено поверх фрагмента",
+      "белый — текущий кадр",
+    ]);
   });
 
-  it("называет значения цветов словами", () => {
-    for (const meaning of [
-      "свободно",
-      "фрагмент",
-      "фрагмент с комментарием",
-      "после текущего кадра",
-      "выделено поверх свободного",
-      "выделено поверх фрагмента",
-      "текущий кадр",
-    ]) {
-      expect(TIMELINE_LEGEND).toContain(meaning);
-    }
+  it("берёт образцы из палитры статусбара", () => {
+    expect(TIMELINE_LEGEND.map((item) => item.color)).toEqual([
+      TIMELINE_FREE_FILL,
+      FRAGMENT_FILL,
+      COMMENTED_FILL,
+      DIM_FILL,
+      SELECTION_OVER_FREE_FILL,
+      SELECTION_OVER_FRAGMENT_FILL,
+      CURRENT_FRAME_FILL,
+    ]);
   });
 
-  it("каждый цвет — отдельной строкой с образцом", () => {
-    const lines = TIMELINE_LEGEND.split("\n");
-    expect(lines[0]).toBe("Цвета:");
-    for (const [swatch, meaning] of [
-      ["🟩", "зелёный — свободно"],
-      ["🟥", "красный — фрагмент"],
-      ["🟧", "оранжевый — фрагмент с комментарием"],
-      ["⬛", "затемнённый — после текущего кадра"],
-      ["🟦", "бирюзовый — выделено поверх свободного"],
-      ["🟪", "пурпурный — выделено поверх фрагмента"],
-      ["⬜", "белый — текущий кадр"],
-    ]) {
-      expect(lines).toContain(`${swatch} ${meaning}`);
-    }
-    expect(lines).toHaveLength(8);
+  it("объясняет стадии создания задачи", () => {
+    expect(PROGRESS_LEGEND.map((item) => item.label)).toEqual([
+      "синий — отправка файла",
+      "бирюзовый — приём сервером",
+      "фиолетовый — индексация",
+    ]);
+    expect(PROGRESS_LEGEND.map((item) => item.color)).toEqual([
+      SCHEME_FILLS.upload,
+      SCHEME_FILLS.receipt,
+      SCHEME_FILLS.indexing,
+    ]);
   });
 });

@@ -192,3 +192,38 @@ describe("справка под устройство", () => {
     input.remove();
   });
 });
+
+describe("легенда цветов в справке", () => {
+  it("объясняет разметку и стадии создания задачи", () => {
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const text = el.textContent ?? "";
+    for (const meaning of [
+      "свободно",
+      "фрагмент",
+      "фрагмент с комментарием",
+      "после текущего кадра",
+      "выделено поверх свободного",
+      "выделено поверх фрагмента",
+      "текущий кадр",
+      "отправка файла",
+      "приём сервером",
+      "индексация",
+    ]) {
+      expect(text).toContain(meaning);
+    }
+    unmount();
+  });
+
+  it("все образцы — один и тот же элемент одного размера", () => {
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const swatches = Array.from(el.querySelectorAll<HTMLElement>(".legend-swatch"));
+    expect(swatches).toHaveLength(10);
+    for (const swatch of swatches) {
+      expect(swatch.style.width).toBe("14px");
+      expect(swatch.style.height).toBe("14px");
+      expect(swatch.style.flex).toBe("0 0 14px");
+      expect(swatch.style.background).not.toBe("");
+    }
+    unmount();
+  });
+});

@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 import { FragmentIcon } from "./FragmentIcon";
+import { LegendSwatch } from "./LegendSwatch";
+import { PROGRESS_LEGEND, TIMELINE_LEGEND } from "./timelineLegend";
 import { useKeyboardMode } from "./useKeyboardMode";
 
 interface Props {
@@ -393,22 +395,27 @@ export function HelpModal({ open, onClose }: Props) {
         <div className="help-section">
           <h3 id="help-timeline">Таймлайн</h3>
           <div className="help-legend">
-            <span><i className="help-swatch" style={{ background: "var(--tl-green)" }} /> фон — вся последовательность кадров</span>
-            <span><i className="help-swatch" style={{ background: "#0077ff" }} /> синий фон — отправка файла</span>
-            <span><i className="help-swatch" style={{ background: "#00bebe" }} /> бирюза — приём сервером (ложится поверх синего)</span>
-            <span><i className="help-swatch" style={{ background: "#8b5cf6" }} /> фиолет — проверка/индексация поверх предыдущего (не разметка)</span>
-            <span><i className="help-swatch" style={{ background: "#ff0000" }} /> фрагмент</span>
-            <span><i className="help-swatch" style={{ background: "#ff8c00" }} /> фрагмент с комментарием</span>
-            <span><i className="help-swatch" style={{ background: "rgba(0,0,0,0.5)" }} /> затемнение — кадры после текущего</span>
-            <span><i className="help-swatch" style={{ background: "#ffffff" }} /> маркер текущего кадра</span>
-            <span><i className="help-swatch" style={{ background: "#00ffff" }} /> выбранный диапазон (на зелёном)</span>
-            <span><i className="help-swatch" style={{ background: "#ff00ff" }} /> выбранный диапазон (на фрагменте)</span>
+            {TIMELINE_LEGEND.map((item) => (
+              <span key={item.label}>
+                <LegendSwatch color={item.color} />
+                {item.label}
+              </span>
+            ))}
+          </div>
+          <p className="help-legend-note">Создание задачи</p>
+          <div className="help-legend">
+            {PROGRESS_LEGEND.map((item) => (
+              <span key={item.label}>
+                <LegendSwatch color={item.color} />
+                {item.label}
+              </span>
+            ))}
           </div>
           <p>
             В списке задач таймлайн — тонкая полоса под названием задачи;
-            цвета те же, что в редакторе. На десктопе значения цветов — в
-            подсказке при наведении на полосу; на сенсорном экране — в этой
-            таблице.
+            цвета те же, что в редакторе. Значения цветов — в плашке под
+            списком задач; здесь — полная таблица, включая стадии создания
+            задачи.
           </p>
         </div>
       </div>

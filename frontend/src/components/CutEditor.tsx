@@ -36,7 +36,6 @@ import { FragmentIcon } from "./FragmentIcon";
 import { HelpModal } from "./HelpModal";
 import { PlaybackMenu } from "./PlaybackMenu";
 import { Popover } from "./Popover";
-import { timelineLegendTitle } from "./timelineLegend";
 import { useKeyboardMode } from "./useKeyboardMode";
 import { ViewMenu } from "./ViewMenu";
 import {
@@ -2231,7 +2230,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
 
       {!isFullscreen && rotateGain?.worthRotating && (
         <p className="rotate-hint">
-          <b>Поверните телефон горизонтально</b> — кадр станет крупнее.
+          <b>Поверните устройство горизонтально</b> — кадр станет крупнее.
         </p>
       )}
 
@@ -2378,12 +2377,10 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         aria-valuemax={pair.total_frames}
         aria-valuenow={Math.min(pair.total_frames, position + 1)}
         aria-valuetext={`Кадр ${Math.min(pair.total_frames, position + 1)} из ${pair.total_frames}`}
-        title={timelineLegendTitle(
-          keyTitle(
-            "Клик — переход по кадрам",
-            "←/→ — кадры; Home/End — края",
-            keyboard,
-          ),
+        title={keyTitle(
+          "Клик — переход по кадрам",
+          "←/→ — кадры; Home/End — края",
+          keyboard,
         )}
         onKeyDown={(e) => {
           const p = modelRef.current;

@@ -360,7 +360,7 @@ function stubViewport(w: number, h: number): void {
   vi.stubGlobal("innerHeight", h);
 }
 
-describe("подсказка о повороте телефона", () => {
+describe("подсказка о повороте устройства", () => {
   it("16:9 на узком экране — поворот заметно крупнее, подсказка есть", async () => {
     pairDetail = { ...oneFrame(50, 0), width: 1920, height: 1080 };
     stubTouchOnly(true);
@@ -370,7 +370,7 @@ describe("подсказка о повороте телефона", () => {
       .mockReturnValue(new DOMRect(0, 0, 360, 202.5));
     const { host, unmount } = await mountEditor();
     expect(host.querySelector(".rotate-hint")?.textContent).toContain(
-      "Поверните телефон",
+      "Поверните устройство",
     );
     unmount();
     rect.mockRestore();
@@ -1960,11 +1960,10 @@ describe("подсказки клавиатуры в заголовках", () =
     expect(playButton(host).title).toBe("Воспроизвести");
     expect(playbackSettings(host).title).toBe("Направление и скорость");
     expect(frameInput(host).title).toBe("Номер кадра: введите число");
-    const [first, second] = (
-      host.querySelector(".statusbar")!.getAttribute("title") ?? ""
-    ).split("\n");
-    expect(first).toBe("Клик — переход по кадрам");
-    expect(second).toContain("Цвета:");
+    const title =
+      host.querySelector(".statusbar")!.getAttribute("title") ?? "";
+    expect(title).toBe("Клик — переход по кадрам");
+    expect(title).not.toContain("Цвета:");
     unmount();
   });
 
@@ -2191,14 +2190,13 @@ function keyOn(el: HTMLElement, key: string): KeyboardEvent {
 }
 
 describe("таймлайн редактора", () => {
-  it("легенда цветов — в подсказке, без отдельной строки", async () => {
+  it("легенда цветов — только в справке, подсказка без неё", async () => {
     const { host, unmount } = await mountEditor();
     expect(host.querySelector(".editor-legend")).toBeNull();
-    const [first, ...rest] = (statusbar(host).getAttribute("title") ?? "")
-      .split("\n");
-    expect(first).toContain("Клик — переход по кадрам");
-    expect(rest.join("\n")).toContain("фрагмент с комментарием");
-    expect(rest.join("\n")).toContain("текущий кадр");
+    const title = statusbar(host).getAttribute("title") ?? "";
+    expect(title).toContain("Клик — переход по кадрам");
+    expect(title).not.toContain("Цвета:");
+    expect(title).not.toContain("фрагмент с комментарием");
     unmount();
   });
 

@@ -51,17 +51,32 @@ export interface StatusbarState {
 // должны оставаться единственными насыщенными цветами. Токен совпадает
 // с --tl-green в styles.css и легендой/справкой.
 export const TIMELINE_FREE_FILL = "#2f8f4e";
-const SCHEME_BG: Record<StatusbarScheme, string> = {
+export const FRAGMENT_FILL = "#ff0000";
+export const COMMENTED_FILL = "#ff8c00";
+export const DIM_FILL = "rgba(0,0,0,0.5)";
+export const CURRENT_FRAME_FILL = "#ffffff";
+const SELECTION_ADD_FILL = "#0000ff";
+
+/** Цвет после сложения с синим каналом ("lighter"): так рисуется
+ * выделенный диапазон. Константы ниже показывают ровно тот оттенок,
+ * который получается на полосе. */
+function additiveBlue(hex: string): string {
+  const value = parseInt(hex.slice(1), 16);
+  const r = (value >> 16) & 0xff;
+  const g = (value >> 8) & 0xff;
+  const b = Math.min(255, (value & 0xff) + 255);
+  return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export const SELECTION_OVER_FREE_FILL = additiveBlue(TIMELINE_FREE_FILL);
+export const SELECTION_OVER_FRAGMENT_FILL = additiveBlue(FRAGMENT_FILL);
+
+export const SCHEME_FILLS: Record<StatusbarScheme, string> = {
   timeline: TIMELINE_FREE_FILL,
   upload: "#0077ff",
   receipt: "#00bebe",
   indexing: "#8b5cf6",
 };
-
-// Красный — простая разметка, оранжевый — фрагмент с комментарием
-// (легенда совпадает в справке редактора и README).
-const FRAGMENT_FILL = "#ff0000";
-const COMMENTED_FILL = "#ff8c00";
 
 // Одна операция отрисовки; op "lighter" включает globalCompositeOperation.
 export interface StatusbarOp {
@@ -92,10 +107,10 @@ export function statusbarOps(s: StatusbarState): StatusbarOp[] {
       ops.push({ fill: s.progress.fill, x: 0, y: 0, w: x, h: height });
     }
     if (x < width) {
-      ops.push({ fill: "rgba(0,0,0,0.5)", x, y: 0, w: width - x, h: height });
+      ops.push({ fill: DIM_FILL, x, y: 0, w: width - x, h: height });
     }
     ops.push({
-      fill: "#ffffff",
+      fill: CURRENT_FRAME_FILL,
       x: Math.min(Math.max(x, 0), width - 1),
       y: 0, w: 2, h: height,
     });
@@ -104,7 +119,7 @@ export function statusbarOps(s: StatusbarState): StatusbarOp[] {
 
   // Фон — по палитре (зелёный timeline, стадии создания — свои цвета).
   ops.push({
-    fill: SCHEME_BG[s.scheme ?? "timeline"],
+    fill: SCHEME_FILLS[s.scheme ?? "timeline"],
     x: 0, y: 0, w: width, h: height,
   });
 
@@ -128,14 +143,14 @@ export function statusbarOps(s: StatusbarState): StatusbarOp[] {
   // кадра никогда не затемняется — у конца сегмента последний пиксель
   // остаётся полностью красным (нет «недокраса»).
   const curX = overlayStart(position, width, totalFrames);
-  ops.push({ fill: "rgba(0,0,0,0.5)", x: curX, y: 0, w: width - curX, h: height });
+  ops.push({ fill: DIM_FILL, x: curX, y: 0, w: width - curX, h: height });
 
   // Выбранный диапазон (key pose → position): добавляем синий канал = 255
-  // с "lighter" (зелёный → циан, красный → пурпурный).
+  // с "lighter" (зелёный → синий, красный → пурпурный).
   if (s.keyPose !== null && s.keyPose !== undefined) {
     const [a, b] = [Math.min(s.keyPose, position), Math.max(s.keyPose, position)];
     ops.push({
-      fill: "#0000ff",
+      fill: SELECTION_ADD_FILL,
       x: timelinePix(a, width, totalFrames),
       y: 0,
       w: timelinePix(b, width, totalFrames) - timelinePix(a, width, totalFrames),
@@ -148,7 +163,7 @@ export function statusbarOps(s: StatusbarState): StatusbarOp[] {
   // всех слоёв; тот же timelinePix, что и границы сегментов). На длинном
   // таймлайне 1px терялся среди цветных фрагментов.
   ops.push({
-    fill: "#ffffff",
+    fill: CURRENT_FRAME_FILL,
     x: timelinePix(position, width, totalFrames),
     y: 0,
     w: 2,

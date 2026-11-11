@@ -1,7 +1,12 @@
 // Маркер текущего кадра: на длинном таймлайне он должен читаться поверх
 // цветных фрагментов, а не сливаться с ними.
 import { describe, expect, it } from "vitest";
-import { statusbarOps, type StatusbarState } from "./statusbar";
+import {
+  SELECTION_OVER_FRAGMENT_FILL,
+  SELECTION_OVER_FREE_FILL,
+  statusbarOps,
+  type StatusbarState,
+} from "./statusbar";
 
 function state(overrides: Partial<StatusbarState> = {}): StatusbarState {
   return {
@@ -33,5 +38,12 @@ describe("маркер текущего кадра", () => {
     );
     expect(markers).toHaveLength(1);
     expect(markers[0].w).toBe(2);
+  });
+});
+
+describe("цвет выделенного диапазона", () => {
+  it("на свободном — синий, на фрагменте — пурпурный", () => {
+    expect(SELECTION_OVER_FREE_FILL).toBe("#2f8fff");
+    expect(SELECTION_OVER_FRAGMENT_FILL).toBe("#ff00ff");
   });
 });
