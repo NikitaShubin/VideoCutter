@@ -1027,17 +1027,17 @@ export function PairList({
               <span className="tab-count">{projects !== null ? projects.length : "…"}</span>
             </button>
           </div>
+          <button
+            className="sync-btn"
+            onClick={() => {
+              void syncNow();
+            }}
+            title="Перечитать состояние с диска: задачи, проекты, нарезки"
+            aria-label="Синхронизировать с диском"
+          >
+            <span aria-hidden="true">⟳</span>
+          </button>
           <div className="title-actions">
-            <button
-              className="sync-btn"
-              onClick={() => {
-                void syncNow();
-              }}
-              title="Перечитать состояние с диска: задачи, проекты, нарезки"
-              aria-label="Синхронизировать с диском"
-            >
-              <span aria-hidden="true">⟳</span>
-            </button>
             {tab === "tasks" && (
               <button
                 className="btn primary"

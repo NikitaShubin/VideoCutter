@@ -232,7 +232,6 @@ select option {
   display: flex;
   gap: 2px;
   min-width: 0;
-  margin-right: auto;
   padding: 3px;
   background: var(--inset);
   border: 1px solid var(--edge);
@@ -274,10 +273,13 @@ select option {
   gap: 12px;
 }
 
+/* Кнопки справа прижаты к краю, а синхронизация стоит у вкладок: она
+ * относится к тому, что на экране, а не к добавлению нового. */
 .title-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  margin-left: auto;
 }
 
 /* Синхронизация с диском: иконка без слов — действие объясняют подсказка
@@ -2570,10 +2572,10 @@ kbd {
     flex: 1 1 0;
   }
 
-  /* Вкладки — во всю ширину шапки. */
+  /* Вкладки — во всю ширину шапки; синхронизация жмётся к ним, кнопки
+   * добавления уходят на следующую строку. */
   .tabs {
-    flex: 1 1 100%;
-    margin-right: 0;
+    flex: 1 1 auto;
   }
 
   .tab {

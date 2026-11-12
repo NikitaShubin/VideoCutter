@@ -498,6 +498,14 @@ describe("синхронизация с диском", () => {
     unmount();
   });
 
+  it("кнопка стоит у вкладок, а не рядом с добавлением видео", async () => {
+    const { host, unmount } = mountList([makePair()]);
+    const button = syncButton(host);
+    const previous = button.previousElementSibling;
+    expect(previous?.classList.contains("tabs")).toBe(true);
+    unmount();
+  });
+
   it("перечитка по фокусу вкладки молчит: сообщений нет", async () => {
     const onReload = vi.fn(async () => [makePair()]);
     const { host, unmount } = mountList([makePair()], onReload);
