@@ -2816,8 +2816,60 @@ kbd {
     flex-shrink: 0;
   }
 
+  /* Панель разметки — одна прокручиваемая строка. Сетка 4×2 занимала
+   * 152 px и целиком уходила под сгиб: разметку было не достать без
+   * прокрутки. Теперь все семь действий лежат в одной строке, лишнее
+   * уходит вбок. */
   .editor.is-compact .editor-workbench {
     order: 7;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 6px;
+    scrollbar-width: none;
+  }
+
+  .editor.is-compact .editor-workbench::-webkit-scrollbar {
+    display: none;
+  }
+
+  .editor.is-compact .editor-workbench button {
+    flex: 0 0 58px;
+    width: 58px;
+    height: 46px;
+    /* Значок над подписью: в строке шириной 58 px подпись и значок
+     * в одну линию не помещаются. */
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.62em;
+    line-height: 1.1;
+  }
+
+  /* Подсказки клавиш в строку не влезают — убираем: полный список
+   * остаётся в справке. */
+  .editor.is-compact .editor-workbench kbd {
+    display: none;
+  }
+
+  /* Имя задачи — одна строка: на коротком экране вторая строка названия
+   * дороже, чем кнопка разметки. Полное имя — в подсказке. */
+  .editor.is-compact .pair-name {
+    -webkit-line-clamp: 1;
+  }
+
+  /* Кадр отдаёт лишние пиксели контролам: короткий экран лучше проводит
+   * пару десятков пикселей кадру, чем прячет под сгифом панель разметки. */
+  .editor.is-compact .video-stage {
+    flex: 1 1 auto;
+    min-height: 120px;
+  }
+
+  .editor.is-compact .video-stage .video-area {
+    flex: 1 1 auto;
+    aspect-ratio: auto;
   }
 }
 
