@@ -40,8 +40,10 @@ import {
   type MarkStats,
 } from "../model/markStats";
 import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
+import { failureReason } from "../model/errors";
 import { formatPercent } from "../model/format";
 import { pluralCount } from "../model/plural";
+import { diffSync, type SyncSnapshot } from "../model/syncDiff";
 import { StatusbarPreview } from "./StatusbarPreview";
 import { LegendSwatch } from "./LegendSwatch";
 import { PROGRESS_LEGEND, TIMELINE_LEGEND } from "./timelineLegend";
@@ -57,6 +59,8 @@ interface Props {
   onChanged: () => void;
   /** Тик фона: лёгкий статус (мерж), полный список — по необходимости. */
   onTick: () => void;
+  /** Полное перечитывание списка задач с сервера (кнопка «синхронизация»). */
+  onReload: () => Promise<VideoPair[]>;
   uploads: UploadJob[];
   onStartUpload: (name: string, files: { source?: File; preview?: File }) => void;
   onCancelUpload: (key: string) => void;
@@ -145,6 +149,7 @@ export function PairList({
   onSelect,
   onChanged,
   onTick,
+  onReload,
   uploads,
   onStartUpload,
   onCancelUpload,
@@ -245,17 +250,18 @@ export function PairList({
   // синхронно — без отклика кнопка выглядит мёртвой).
   const [dlKey, setDlKey] = useState<string | null>(null);
 
-  const loadProjects = useCallback(() => {
-    listProjects()
-      .then((items) => {
-        setProjects(items);
-        setProjError("");
-      })
-      .catch((e) => {
-        // Реестр не поднялся — список задач не должен упасть.
-        setProjects((prev) => prev ?? []);
-        setProjError((e as Error).message);
-      });
+  const loadProjects = useCallback(async (): Promise<Project[] | null> => {
+    try {
+      const items = await listProjects();
+      setProjects(items);
+      setProjError("");
+      return items;
+    } catch (e) {
+      // Реестр не поднялся — список задач не должен упасть.
+      setProjects((prev) => prev ?? []);
+      setProjError((e as Error).message);
+      return null;
+    }
   }, []);
 
   useEffect(() => {
@@ -279,8 +285,83 @@ export function PairList({
     }
   }, [pairs, loadProjects]);
 
-  const pickProjectFilter = (v: string) => {
-    setProjFilter(v);
+  // ─── Синхронизация с диском ────────────────────────────────────────────
+  // Сервис пересчитывает состояние из файлов при каждом запросе списка;
+  // рассинхрон живёт только в браузере (снимок в state). Кнопка говорит
+  // сервису: «посмотри на диск ещё раз» — и показывает, что изменилось.
+  const [syncNote, setSyncNote] = useState<string | null>(null);
+  const syncNoteTimerRef = useRef<number | null>(null);
+
+  const showSyncNote = useCallback((text: string) => {
+    setSyncNote(text);
+    if (syncNoteTimerRef.current !== null) {
+      window.clearTimeout(syncNoteTimerRef.current);
+    }
+    syncNoteTimerRef.current = window.setTimeout(() => {
+      setSyncNote(null);
+      syncNoteTimerRef.current = null;
+    }, 8000);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (syncNoteTimerRef.current !== null) {
+        window.clearTimeout(syncNoteTimerRef.current);
+      }
+    },
+    [],
+  );
+
+  const syncNow = useCallback(async () => {
+    const before: SyncSnapshot = {
+      pairs: pairs ?? [],
+      projects: projects ?? [],
+    };
+    try {
+      const nextPairs = await onReload();
+      const nextProjects = await loadProjects();
+      const changes = diffSync(before, {
+        pairs: nextPairs,
+        // Реестр не прочитался — старый список оставляем: иначе сообщили бы
+        // о пропавших проектах, которых никто не трогал.
+        projects: nextProjects ?? before.projects,
+      });
+      showSyncNote(
+        changes.length === 0
+          ? "Расхождений не найдено"
+          : changes.slice(0, 3).join("; ") +
+            (changes.length > 3 ? `; и ещё ${changes.length - 3}` : ""),
+      );
+    } catch (e) {
+      showSyncNote(`Не удалось перечитать состояние: ${failureReason(e)}`);
+    }
+  }, [pairs, projects, onReload, loadProjects, showSyncNote]);
+
+  // Возврат к вкладке — тихая перечитка: пользователь ничего не просил,
+  // значит и сообщать не о чем. Двойной сигнал (focus + visibilitychange)
+  // гасим по времени: за секунду — одна перечитка.
+  const lastSilentRef = useRef(0);
+  const refreshSilently = useCallback(() => {
+    const now = Date.now();
+    if (now - lastSilentRef.current < 1000) return;
+    lastSilentRef.current = now;
+    void onReload();
+    void loadProjects();
+  }, [onReload, loadProjects]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshSilently();
+    };
+    window.addEventListener("focus", refreshSilently);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refreshSilently);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refreshSilently]);
+
+  const pickProjectFilter = (v: string) => {    setProjFilter(v);
     try {
       window.localStorage.setItem(PROJ_KEY, v);
     } catch {
@@ -947,6 +1028,16 @@ export function PairList({
             </button>
           </div>
           <div className="title-actions">
+            <button
+              className="sync-btn"
+              onClick={() => {
+                void syncNow();
+              }}
+              title="Перечитать состояние с диска: задачи, проекты, нарезки"
+              aria-label="Синхронизировать с диском"
+            >
+              <span aria-hidden="true">⟳</span>
+            </button>
             {tab === "tasks" && (
               <button
                 className="btn primary"
@@ -1557,6 +1648,11 @@ export function PairList({
             </div>
           </div>
         )}
+        </div>
+      )}
+      {syncNote && (
+        <div className="sync-toast" role="status">
+          {syncNote}
         </div>
       )}
     </div>

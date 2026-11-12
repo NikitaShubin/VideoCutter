@@ -38,9 +38,19 @@ export function App() {
     authed: false,
   });
 
-  const reload = useCallback(() => {
-    listPairs().then(setPairs).catch(console.error);
+  // Перечитывание списка: отдаём свежие задачи — вызывающий (кнопка
+  // синхронизации) сравнивает их с прежним снимком и рассказывает, что
+  // изменилось на диске.
+  const reload = useCallback(async () => {
+    const items = await listPairs();
+    setPairs(items);
+    return items;
   }, []);
+
+  // Прежние вызовы не ждут результата: обрыв сети не должен ронять экран.
+  const reloadQuiet = useCallback(() => {
+    void reload().catch(console.error);
+  }, [reload]);
 
   // Экран живёт в state, но вход в редактор оставляет запись в history:
   // кнопка «Назад» браузера возвращает к списку, а не выбрасывает из
@@ -70,8 +80,8 @@ export function App() {
   const closeEditor = useCallback(() => {
     setScreen("list");
     setPairId(null);
-    reload();
-  }, [reload]);
+    reloadQuiet();
+  }, [reloadQuiet]);
 
   const openEditor = useCallback((id: string) => {
     // Строку, из которой открыли задачу, вернём фокусом после «Назад»:
@@ -160,12 +170,12 @@ export function App() {
         );
       });
     if (structural || touched) {
-      reload();
+      reloadQuiet();
       return;
     }
     const sm = new Map(st.map((s) => [s.id, s]));
     setPairs(prev.map((p) => ({ ...p, ...sm.get(p.id)! })));
-  }, [reload]);
+  }, [reloadQuiet]);
 
   useEffect(() => {
     authStatus()
@@ -188,8 +198,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (gate.checked && (!gate.enabled || gate.authed)) reload();
-  }, [gate, reload]);
+    if (gate.checked && (!gate.enabled || gate.authed)) reloadQuiet();
+  }, [gate, reloadQuiet]);
 
   const logout = useCallback(() => {
     clearAuthToken();
@@ -210,7 +220,7 @@ export function App() {
     renameUpload,
     updateJob,
     removeJob,
-  } = useUploadManager(reload);
+  } = useUploadManager(reloadQuiet);
 
   let content: ReactElement;
   if (!gate.checked) {
@@ -247,8 +257,9 @@ export function App() {
       <PairList
         pairs={pairs}
         onSelect={openEditor}
-        onChanged={reload}
+        onChanged={reloadQuiet}
         onTick={handleStatusTick}
+        onReload={reload}
         uploads={uploads}
         onStartUpload={startUpload}
         onCancelUpload={cancelUpload}

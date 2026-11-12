@@ -11,10 +11,18 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { listProjects } from "../api";
 import { PairList } from "./PairList";
 import { RoleField } from "./RoleFields";
 import type { VideoPair } from "../types";
+
+// Список сам ходит в сервис за реестром проектов — в тестах он отвечает
+// заглушкой, остальные вызовы API остаются настоящими.
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return { ...actual, listProjects: vi.fn(async () => []) };
+});
 
 function makePair(overrides: Partial<VideoPair> = {}): VideoPair {
   return {
@@ -59,6 +67,7 @@ function renderList(pairs: VideoPair[]): string {
       onSelect={() => {}}
       onChanged={() => {}}
       onTick={() => {}}
+      onReload={async () => pairs}
       uploads={[]}
       onStartUpload={() => {}}
       onCancelUpload={() => {}}
@@ -89,7 +98,7 @@ function typeInto(input: HTMLInputElement, text: string): void {
 }
 
 /** Список в живом DOM (нужны клики: панель задачи открывается по карандашу). */
-function mountList(pairs: VideoPair[]) {
+function mountList(pairs: VideoPair[], onReload?: () => Promise<VideoPair[]>) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -100,6 +109,7 @@ function mountList(pairs: VideoPair[]) {
         onSelect={() => {}}
         onChanged={() => {}}
         onTick={() => {}}
+        onReload={onReload ?? (async () => pairs)}
         uploads={[]}
         onStartUpload={() => {}}
         onCancelUpload={() => {}}
@@ -443,6 +453,61 @@ describe("превью таймлайна в списке", () => {
     const host = document.createElement("div");
     host.innerHTML = html;
     expect(host.querySelector(".pair-bg")?.hasAttribute("title")).toBe(false);
+  });
+});
+
+describe("синхронизация с диском", () => {
+  function syncButton(host: HTMLElement): HTMLButtonElement {
+    const button = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Синхронизировать с диском"]',
+    );
+    if (!button) throw new Error("кнопка синхронизации не найдена");
+    return button;
+  }
+
+  it("кнопка перечитывает задачи и проекты", async () => {
+    const onReload = vi.fn(async () => [makePair()]);
+    const { host, unmount } = mountList([makePair()], onReload);
+    await act(async () => {
+      syncButton(host).click();
+    });
+    expect(onReload).toHaveBeenCalled();
+    expect(vi.mocked(listProjects)).toHaveBeenCalled();
+    unmount();
+  });
+
+  it("сообщает о расхождениях, найденных на диске", async () => {
+    const cuts = { state: "done", index: 1, total: 1, error: "" };
+    const before = [makePair({ export: cuts })];
+    const after = [makePair({ export: null })];
+    const { host, unmount } = mountList(before, async () => after);
+    await act(async () => {
+      syncButton(host).click();
+    });
+    expect(host.textContent).toContain("пропали нарезки");
+    unmount();
+  });
+
+  it("без расхождений сообщает, что всё в порядке", async () => {
+    const pairs = [makePair()];
+    const { host, unmount } = mountList(pairs, async () => pairs);
+    await act(async () => {
+      syncButton(host).click();
+    });
+    expect(host.textContent).toContain("Расхождений не найдено");
+    unmount();
+  });
+
+  it("перечитка по фокусу вкладки молчит: сообщений нет", async () => {
+    const onReload = vi.fn(async () => [makePair()]);
+    const { host, unmount } = mountList([makePair()], onReload);
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(onReload).toHaveBeenCalled();
+    expect(host.textContent).not.toContain("Расхождений не найдено");
+    expect(host.textContent).not.toContain("пропали нарезки");
+    unmount();
   });
 });
 
