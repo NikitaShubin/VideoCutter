@@ -75,6 +75,25 @@ function keyTitle(label: string, keys: string, keyboard: boolean): string {
   return keyboard ? `${label} (${keys})` : label;
 }
 
+/** Шаги навигации: кадр, 10, 100, 1000. Alt не используем — в браузере
+ * Alt+стрелки означают «назад/вперёд». */
+const SEEK_STEP = 10;
+const SEEK_STEP_BIG = 100;
+const SEEK_STEP_HUGE = 1000;
+
+/** Шаг кадра по модификаторам: Ctrl — 10, Shift — 100, Ctrl+Shift — 1000. */
+function seekStep(e: {
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}): number {
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (ctrl && e.shiftKey) return SEEK_STEP_HUGE;
+  if (ctrl) return SEEK_STEP;
+  if (e.shiftKey) return SEEK_STEP_BIG;
+  return 1;
+}
+
 /** Состояние последнего сохранения фрагментов: постоянный индикатор
  * в транспорте, а не одноразовый flash. */
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -477,7 +496,6 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
   //    экран догоняет, дропая кадры, с маркером до догона. Переход на
   //    удержание отменяет незаконченные запросы тапов (bumpEpoch).
   const MAX_CACHE = 60;
-  const SEEK_STEP = 10;
   const CHASE_CAP = 6;
   // Тик pump: свип протухших запросов и повтор попытки загрузки — экран
   // не «залипает», даже если ответ завис (медленный сервер, длинный GOP).
@@ -1319,26 +1337,18 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       if (rightKey) rightHeldRef.current = true;
       if (leftKey) leftHeldRef.current = true;
 
-      if (ctrl && rightKey) {
+      // Шаг задают модификаторы: Ctrl — 10, Shift — 100, Ctrl+Shift — 1000.
+      const step = seekStep(e);
+      if (rightKey) {
         setPlaying(false);
         if (e.repeat) startChase(1);
-        else jumpMode(); // одиночный Ctrl+→ — прыжок на 10, без промежуточных
-        setPosition((pos) => Math.min(p.totalFrames - 1, pos + SEEK_STEP));
-      } else if (ctrl && leftKey) {
-        setPlaying(false);
-        if (e.repeat) startChase(-1);
-        else jumpMode();
-        setPosition((pos) => Math.max(0, pos - SEEK_STEP));
-      } else if (rightKey) {
-        setPlaying(false);
-        if (e.repeat) startChase(1);
-        else jumpMode(); // тап — сразу целевой кадр (без «анимации» промкадров)
-        setPosition((pos) => Math.min(p.totalFrames - 1, pos + 1));
+        else jumpMode(); // одиночный прыжок — сразу целевой кадр
+        setPosition((pos) => Math.min(p.totalFrames - 1, pos + step));
       } else if (leftKey) {
         setPlaying(false);
         if (e.repeat) startChase(-1);
         else jumpMode();
-        setPosition((pos) => Math.max(0, pos - 1));
+        setPosition((pos) => Math.max(0, pos - step));
       } else if (is("PageDown")) {
         e.preventDefault();
         setPlaying(false);
@@ -2379,7 +2389,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
         aria-valuetext={`Кадр ${Math.min(pair.total_frames, position + 1)} из ${pair.total_frames}`}
         title={keyTitle(
           "Клик — переход по кадрам",
-          "←/→ — кадры; Home/End — края",
+          "←/→ — кадры; Ctrl ±10, Shift ±100, Ctrl+Shift ±1000; Home/End — края",
           keyboard,
         )}
         onKeyDown={(e) => {
@@ -2408,7 +2418,7 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
             jump(e.key === "PageDown" ? 1 : -1);
             return;
           }
-          const step = ctrl ? SEEK_STEP : 1;
+          const step = seekStep(e);
           let target: number;
           switch (e.key) {
             // ↑/↓ — не навигация слайдера, а глобальные отметки границ

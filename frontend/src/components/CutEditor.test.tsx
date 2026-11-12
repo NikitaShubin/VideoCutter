@@ -914,6 +914,47 @@ describe("клавиатурная модель: таймлайн", () => {
     expect(frameInput(host).value).toBe("11");
     unmount();
   });
+
+  it("Shift+стрелка двигает на 100 кадров", async () => {
+    pairDetail = oneFrame(5000, 0);
+    const { host, unmount } = await mountEditor();
+    press({ key: "ArrowRight", code: "ArrowRight", shiftKey: true });
+    expect(frameInput(host).value).toBe("101");
+    unmount();
+  });
+
+  it("Ctrl+Shift+стрелка двигает на 1000 кадров", async () => {
+    pairDetail = oneFrame(5000, 0);
+    const { host, unmount } = await mountEditor();
+    press({
+      key: "ArrowRight",
+      code: "ArrowRight",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(frameInput(host).value).toBe("1001");
+    unmount();
+  });
+
+  it("полоса таймлайна знает те же шаги", async () => {
+    pairDetail = oneFrame(5000, 0);
+    const { host, unmount } = await mountEditor();
+    const slider = host.querySelector<HTMLElement>(".statusbar")!;
+    pressOn(slider, {
+      key: "ArrowRight",
+      code: "ArrowRight",
+      shiftKey: true,
+    });
+    expect(frameInput(host).value).toBe("101");
+    pressOn(slider, {
+      key: "ArrowLeft",
+      code: "ArrowLeft",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(frameInput(host).value).toBe("1");
+    unmount();
+  });
 });
 
 describe("клавиатурная модель: экспорт в полном экране", () => {
@@ -2197,6 +2238,16 @@ describe("таймлайн редактора", () => {
     expect(title).toContain("Клик — переход по кадрам");
     expect(title).not.toContain("Цвета:");
     expect(title).not.toContain("фрагмент с комментарием");
+    unmount();
+  });
+
+  it("подсказка таймлайна называет крупные шаги", async () => {
+    stubTouchOnly(false);
+    const { host, unmount } = await mountEditor();
+    const title = statusbar(host).getAttribute("title") ?? "";
+    expect(title).toContain("Ctrl ±10");
+    expect(title).toContain("Shift ±100");
+    expect(title).toContain("Ctrl+Shift ±1000");
     unmount();
   });
 

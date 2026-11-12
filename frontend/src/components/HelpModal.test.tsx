@@ -242,6 +242,15 @@ describe("легенда цветов в справке", () => {
     unmount();
   });
 
+  it("перечисляет крупные шаги навигации", () => {
+    const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
+    const text = el.textContent ?? "";
+    expect(text).toContain("10 кадров");
+    expect(text).toContain("100 кадров");
+    expect(text).toContain("1000 кадров");
+    unmount();
+  });
+
   it("каждый пункт легенды — один образец и подпись", () => {
     const { el, unmount } = mount(<HelpModal open onClose={() => {}} />);
     const section = el.querySelector("#help-timeline")?.parentElement;

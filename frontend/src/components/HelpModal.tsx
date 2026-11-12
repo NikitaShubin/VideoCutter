@@ -135,7 +135,8 @@ export function HelpModal({ open, onClose }: Props) {
                 последнего: промежуточные кадры не показываются.
               </li>
               <li>
-                <b>Удержание</b> стрелки (в т.ч. <span className="kbd">Ctrl</span>+стрелка) —{" "}
+                <b>Удержание</b> стрелки (в т.ч. <span className="kbd">Ctrl</span>+
+                <span className="kbd">Shift</span>+стрелка) —{" "}
                 <b>chase</b>: позиция бежит в реальном времени, экран догоняет
                 её, пропуская кадры. Незаконченные запросы тапов при этом
                 отменяются сразу.
@@ -143,8 +144,9 @@ export function HelpModal({ open, onClose }: Props) {
               <li>
                 <b>Прыжки</b> — <span className="kbd">PageUp</span>/<span className="kbd">PageDown</span>,{" "}
                 <span className="kbd">Home</span>/<span className="kbd">End</span>, одиночный{" "}
-                <span className="kbd">Ctrl</span>+<span className="kbd">→</span>, клик по таймлайну:{" "}
-                сразу целевой кадр, без промежуточных.
+                <span className="kbd">Ctrl</span>+<span className="kbd">→</span> (и{" "}
+                <span className="kbd">Shift</span>+<span className="kbd">→</span>), клик
+                по таймлайну: сразу целевой кадр, без промежуточных.
               </li>
               <li>
                 <b>Воспроизведение</b> (<span className="kbd">Пробел</span>) — покадровое:
@@ -191,6 +193,14 @@ export function HelpModal({ open, onClose }: Props) {
                     <span className="kbd">.</span>)
                   </td>
                   <td>10 кадров (одиночное нажатие — прыжок, удержание — догон)</td>
+                </tr>
+                <tr>
+                  <td>{k("Shift+← / →")}</td>
+                  <td>100 кадров (одиночное нажатие — прыжок, удержание — догон)</td>
+                </tr>
+                <tr>
+                  <td>{k("Ctrl+Shift+← / →")}</td>
+                  <td>1000 кадров (одиночное нажатие — прыжок, удержание — догон)</td>
                 </tr>
                 <tr>
                   <td>{k("PageDown / PageUp")}</td>
