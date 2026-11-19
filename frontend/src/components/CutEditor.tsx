@@ -168,11 +168,36 @@ interface Props {
   onBack: () => void;
   /** Общий с App обработчик системной кнопки «Назад». */
   backGuardRef?: MutableRefObject<BackGuard | null>;
+  /** Кадр из адреса (?frame=, zero-based): сильнее сохранённой позиции. */
+  initialFrame?: number | null;
+  /** Начало фрагмента из адреса (1-based). */
+  initialFragment?: number | null;
+  /** Текущий кадр для адреса (zero-based, как ?frame= в CVAT). */
+  onFrameChange?: (frame: number) => void;
 }
 
-export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
+export function CutEditor({
+  pairId,
+  onBack,
+  backGuardRef,
+  initialFrame = null,
+  initialFragment = null,
+  onFrameChange,
+}: Props) {
   const [pair, setPair] = useState<VideoPairDetail | null>(null);
   const [position, setPosition] = useState(0);
+  // Заметка о несуществующем фрагменте из адреса: адрес не подменяем,
+  // показываем, что именно просили открыть.
+  const [routeNotice, setRouteNotice] = useState<string | null>(null);
+  // Кадр/фрагмент из адреса применяются один раз — при первой загрузке.
+  // Дальше адрес следует за редактором, а не наоборот (иначе каждый
+  // replaceState с ?frame= перезагружал бы позицию).
+  const initialFrameRef = useRef(initialFrame);
+  const initialFragmentRef = useRef(initialFragment);
+  const initialAppliedRef = useRef(false);
+  const onFrameChangeRef = useRef(onFrameChange);
+  onFrameChangeRef.current = onFrameChange;
+  const lastFrameWriteRef = useRef(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [direction, setDirection] = useState<1 | -1>(1);
@@ -610,10 +635,34 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     setViewQuality(p.quality ?? 78);
     // Возвращаемся на кадр, где пользователь завершил редактирование
     // (сохранён в fragments.tsv); при отсутствии/выходе за диапазон — 0.
-    const saved = p.total_frames > 0
-      ? Math.min(p.total_frames - 1, Math.max(0, p.position ?? 0))
+    const clamp = (frame: number) => p.total_frames > 0
+      ? Math.min(p.total_frames - 1, Math.max(0, frame))
       : 0;
-    setPosition(saved);
+    let target = clamp(p.position ?? 0);
+    // Первая загрузка: адрес сильнее сохранённой позиции. ?frame= —
+    // zero-based (совместимо с CVAT), фрагмент — 1-based, как в UI.
+    if (!initialAppliedRef.current) {
+      initialAppliedRef.current = true;
+      const frame = initialFrameRef.current;
+      const fragment = initialFragmentRef.current;
+      if (frame !== null) {
+        target = clamp(frame);
+      } else if (fragment !== null) {
+        const ordered = [...p.fragments].sort(
+          (a, b) => a.start - b.start || a.end - b.end,
+        );
+        const frag = ordered[fragment - 1];
+        if (frag) {
+          target = clamp(frag.start);
+        } else {
+          target = 0;
+          setRouteNotice(
+            `Фрагмент ${fragment} не найден — показан первый кадр.`,
+          );
+        }
+      }
+    }
+    setPosition(target);
     schedRef.current = new FrameScheduler(MAX_CACHE);
     setShownFrame(-1);
     chaseRef.current = false;
@@ -1455,20 +1504,42 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position, keyPose, direction, speed, playing, drawStatusbar]);
 
+  // Адрес следует за текущим кадром: replaceState (не push), чтобы «Назад»
+  // вёл к списку, а не листал кадры. Троттлинг: при воспроизведении кадры
+  // меняются десятки раз в секунду, а браузеру хватает 3–4 обновлений.
+  useEffect(() => {
+    if (!pair) return;
+    const call = () => {
+      lastFrameWriteRef.current = Date.now();
+      onFrameChangeRef.current?.(position);
+    };
+    const elapsed = Date.now() - lastFrameWriteRef.current;
+    if (elapsed >= 250) {
+      call();
+      return;
+    }
+    const id = window.setTimeout(call, 250 - elapsed);
+    return () => window.clearTimeout(id);
+  }, [pair, position]);
+
   // Завершение редактирования: фиксируем текущий кадр и возвращаемся к списку.
+  // До загрузки пары позиция ещё не известна — сохранять 0 нельзя.
   const handleBack = () => {
-    savePosition(pairId, position).catch(() => {});
+    if (pair) savePosition(pairId, position).catch(() => {});
     onBack();
   };
 
   // Закрытие/сворачивание вкладки: keepalive-запрос досылает позицию.
+  // Deep link (?frame=) не должен затереть сохранённую позицию нулём,
+  // если вкладку закрыли до ответа detail.
   useEffect(() => {
+    if (!pair) return;
     const flush = () => {
       savePosition(pairId, position, true).catch(() => {});
     };
     window.addEventListener("pagehide", flush);
     return () => window.removeEventListener("pagehide", flush);
-  }, [pairId, position]);
+  }, [pair, pairId, position]);
 
   const setExportingUi = (on: boolean) => {
     exportingRef.current = on;
@@ -1710,6 +1781,11 @@ export function CutEditor({ pairId, onBack, backGuardRef }: Props) {
       }
     >
       <h1 className="sr-only">Редактор: {pair.name || pairId}</h1>
+      {routeNotice && (
+        <div className="route-notice" role="status">
+          {routeNotice}
+        </div>
+      )}
       {isFullscreen && (
         <button
           ref={fullscreenExitRef}
