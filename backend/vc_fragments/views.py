@@ -7,7 +7,9 @@
 import json
 import os
 import subprocess
+import tempfile
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -145,27 +147,43 @@ def _export_cancelled(ws_id: str, created_now: list[str]) -> None:
     LEDGER.cancel(ws_id, created_now)
 
 
-def _ffprobe_frame_count(path: str):
-    """Число видеокадров файла (decode-подсчёт) или None."""
-    try:
-        proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-count_frames",
-             "-select_streams", "v:0",
-             "-show_entries", "stream=nb_read_frames",
-             "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=300)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        return int(proc.stdout.strip().splitlines()[-1])
-    except (IndexError, ValueError):
-        return None
+_THUMB_W = 64
+_THUMB_H = 36
+_THUMB_BYTES = _THUMB_W * _THUMB_H
+
+
+def _decode_timeout(frames_wanted: int) -> float:
+    """Таймаут декода: запас на кадр + база, но не меньше 1500 с.
+
+    Фиксированные 1500 с валят длинные нарезки (100k кадров декодируются
+    далеко за этот предел), при этом зависший декодер всё равно ограничен.
+    """
+    return max(1500.0, float(frames_wanted) / 5.0 + 300.0)
+
+
+def _thumb_cmd(path: str, frames_wanted: int) -> list:
+    """Единый пайплайн миниатюр: passthrough-кадры, без seek'ов.
+
+    ``-vsync 0`` обязателен: без него ffmpeg дублирует кадры VFR до CFR
+    (90 -> 119 на смене темпа), и ординалы перестают быть ординалами.
+    """
+    return [
+        "ffmpeg", "-v", "error", "-i", path,
+        "-frames:v", str(max(0, frames_wanted)),
+        "-vsync", "0",
+        "-vf", f"scale={_THUMB_W}:{_THUMB_H},format=gray",
+        "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1",
+    ]
+
+
+def _thumb_at(raw: bytes, index: int) -> np.ndarray:
+    start = index * _THUMB_BYTES
+    return np.frombuffer(raw[start:start + _THUMB_BYTES],
+                         dtype=np.uint8).astype(np.float32)
 
 
 def _decode_thumbs(path: str, frames_wanted: int,
-                   timeout: int = 1500) -> Optional[list]:
+                   timeout: Optional[float] = None) -> Optional[list]:
     """Секвентальный декод в gray-миниатюры 64x36 (без seek'ов и счётчиков).
 
     Seek'и недостоверны на части контейнеров (MPEG-PS: seek приземляется
@@ -175,24 +193,21 @@ def _decode_thumbs(path: str, frames_wanted: int,
     пайпа (2.3 КБ/кадр), и чувствительность к зерну пересжатия.
     Возвращает None при обрыве декода.
     """
-    cmd = ["ffmpeg", "-v", "error", "-i", path,
-           "-frames:v", str(max(0, frames_wanted)),
-           "-vf", "scale=64:36,format=gray",
-           "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
+    if timeout is None:
+        timeout = _decode_timeout(frames_wanted)
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+        proc = subprocess.run(_thumb_cmd(path, frames_wanted),
+                              stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None
     raw = proc.stdout
-    n = len(raw) // (64 * 36)
-    if n * 64 * 36 != len(raw):
+    n = len(raw) // _THUMB_BYTES
+    if n * _THUMB_BYTES != len(raw):
         return None
-    return [np.frombuffer(raw[i * 2304:(i + 1) * 2304],
-                          dtype=np.uint8).astype(np.float32)
-            for i in range(n)]
+    return [_thumb_at(raw, i) for i in range(n)]
 
 
 # Окно поиска тихого сдвига (в кадрах по обе стороны): покрывает
@@ -201,41 +216,33 @@ def _decode_thumbs(path: str, frames_wanted: int,
 _VERIFY_SHIFT_WINDOW = 3
 
 
-def _verify_cut(src_path: str, start_index: int, cut_path: str,
-                expected_count: int) -> None:
-    """Полная проверка нарезки: счётчик + КАЖДЫЙ кадр + детект сдвига.
-
-    Эталон — те же ординалы исходника секвентальным декодом (тем же
-    семейством декодеров, что режет экспорт; без seek'ов и cv2). Порог
-    VERIFY_SSD_MAX отделяет совпадения (единицы) от поломок (сотни–тысячи)
-    с запасом: истинное совмещение даёт ssd≈0 даже после CRF-пересжатия,
-    так что превышение — само по себе дефект (не тот диапазон, мусор,
-    битый транскод). Дополнительно ловится тихий сдвиг: если соседний
-    эталон совпал на порядок лучше номинального — границы уехали, хотя
-    счётчик сошёлся (статику ±1 не различить в принципе — там всё
-    одинаково, включая соседей).
-
-    :raises FFmpegError: несовпадение — молчаливого успеха не будет.
-    """
-    actual = _ffprobe_frame_count(cut_path)
-    if actual is None:
-        raise FFmpegError(f"Не удалось посчитать кадры: {cut_path}")
-    if actual != expected_count:
+def _require_cut_count(got_count: Optional[int], expected_count: int,
+                       cut_path: str) -> None:
+    """Ровно expected_count кадров в нарезке (лишний кадр — тоже дефект)."""
+    if got_count is None:
+        raise FFmpegError(f"Нарезка не декодируется целиком ({cut_path})")
+    if got_count < expected_count:
         raise FFmpegError(
-            f"Кадров в нарезке: {actual}, ожидалось: {expected_count} "
+            f"Кадров в нарезке: {got_count}, ожидалось: {expected_count} "
             f"({cut_path})")
-    got = _decode_thumbs(cut_path, expected_count)
-    if got is None or len(got) != expected_count:
+    if got_count > expected_count:
         raise FFmpegError(
-            f"Нарезка не декодируется целиком ({cut_path}): "
-            f"прочитано {len(got) if got is not None else 0} "
-            f"из {expected_count}")
-    exp_all = _decode_thumbs(src_path, start_index + expected_count)
-    if exp_all is None or len(exp_all) < start_index + expected_count:
-        raise FFmpegError(
-            f"Не декодируются эталоны 0..{start_index + expected_count - 1} "
-            f"из {src_path}")
-    exp = exp_all[start_index:start_index + expected_count]
+            f"Кадров в нарезке больше ожидаемого: {got_count} > "
+            f"{expected_count} ({cut_path})")
+
+
+def _compare_cut(exp: list, got: list, cut_path: str) -> None:
+    """КАЖДЫЙ кадр нарезки против точного ординала + детект тихого сдвига.
+
+    Порог VERIFY_SSD_MAX отделяет совпадения (единицы) от поломок
+    (сотни–тысячи) с запасом: истинное совмещение даёт ssd≈0 даже после
+    CRF-пересжатия, так что превышение — само по себе дефект (не тот
+    диапазон, мусор, битый транскод). Дополнительно ловится тихий сдвиг:
+    если соседний эталон совпал на порядок лучше номинального — границы
+    уехали, хотя счётчик сошёлся (статику ±1 не различить в принципе —
+    там всё одинаково, включая соседей).
+    """
+    expected_count = len(got)
     for i in range(expected_count):
         d = exp[i] - got[i]
         nom = float((d * d).mean())
@@ -264,6 +271,187 @@ def _verify_cut(src_path: str, start_index: int, cut_path: str,
             raise FFmpegError(
                 f"Контент {what} кадра не совпал "
                 f"(ssd={nom:.1f} > {VERIFY_SSD_MAX}): {cut_path}")
+
+
+def _verify_cut(src_path: str, start_index: int, cut_path: str,
+                expected_count: int) -> None:
+    """Полная проверка одной нарезки: точный счёт + КАЖДЫЙ кадр + сдвиг.
+
+    Счётчик нарезки берётся из её же декода: просим expected_count+1 кадр.
+    Ровно expected_count — норма; меньше — потерян кадр, больше — лишний
+    (декодер остановлен на expected_count+1, отдельный полный подсчёт не
+    нужен). Эталон — те же ординалы исходника секвентальным декодом.
+
+    :raises FFmpegError: несовпадение — молчаливого успеха не будет.
+    """
+    got = _decode_thumbs(cut_path, expected_count + 1)
+    _require_cut_count(
+        None if got is None else len(got), expected_count, cut_path)
+    exp_all = _decode_thumbs(src_path, start_index + expected_count)
+    if exp_all is None or len(exp_all) < start_index + expected_count:
+        raise FFmpegError(
+            f"Не декодируются эталоны 0..{start_index + expected_count - 1} "
+            f"из {src_path}")
+    exp = exp_all[start_index:start_index + expected_count]
+    _compare_cut(exp, got, cut_path)
+
+
+def _raw_frame_count(raw_path: str) -> int:
+    return os.path.getsize(raw_path) // _THUMB_BYTES
+
+
+def _read_thumb_at(raw_file, index: int, path: str) -> np.ndarray:
+    """Миниатюра № index из raw-файла прохода.
+
+    Читается временный файл (не исходник): seek по нему не влияет на
+    ординалы — они уже зафиксированы секвентальным декодом.
+    """
+    raw_file.seek(index * _THUMB_BYTES)
+    raw = raw_file.read(_THUMB_BYTES)
+    if len(raw) != _THUMB_BYTES:
+        raise FFmpegError(
+            f"Не декодируются кадры до {index} включительно: {path}")
+    return _thumb_at(raw, 0)
+
+
+def _decode_to_raw(path: str, frames_wanted: int, raw_path: str,
+                   cancelled=None, what: str = "эталонов") -> None:
+    """Один секвентальный проход файла в raw-файл миниатюр.
+
+    stdout пишется в файл: poll-цикл не блокируется на пайпе и может
+    проверять отмену и общий таймаут. Короткий хвост (битый исходник) —
+    не глобальная ошибка: сколько кадров декодировалось, столько доступно,
+    а нужность конкретных ординалов решает сверка фрагмента.
+    """
+    timeout = _decode_timeout(frames_wanted)
+    try:
+        with open(raw_path, "wb") as out:
+            proc = subprocess.Popen(
+                _thumb_cmd(path, frames_wanted),
+                stdout=out, stderr=subprocess.DEVNULL)
+            try:
+                if cancelled is not None and cancelled():
+                    raise ExportCancelled(
+                        f"Экспорт отменён при сверке {what}: {path}")
+                deadline = time.monotonic() + timeout
+                while proc.poll() is None:
+                    if cancelled is not None and cancelled():
+                        raise ExportCancelled(
+                            f"Экспорт отменён при сверке {what}: {path}")
+                    if time.monotonic() > deadline:
+                        raise FFmpegError(
+                            f"Таймаут декода {what} ({timeout:.0f} с): "
+                            f"{path}")
+                    time.sleep(0.1)
+                proc.wait()
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()
+    except OSError as exc:
+        raise FFmpegError(
+            f"Не удалось декодировать {what} из {path}: {exc}")
+
+
+def _compare_cut_raws(src_raw, start_index: int, src_available: int,
+                      cut_raw, expected_count: int,
+                      src_path: str, cut_path: str) -> None:
+    """Сверка нарезки с эталонами из raw-файлов, без списков в памяти.
+
+    Память — O(1) на кадр (плюс окно ±3 для детекта сдвига): 100k-кадровая
+    нарезка не превращается в ~1 ГБ float32.
+    """
+    if start_index + expected_count > src_available:
+        raise FFmpegError(
+            f"Не декодируются эталоны {start_index}.."
+            f"{start_index + expected_count - 1} из {src_path} "
+            f"(декодировано кадров: {src_available})")
+    for i in range(expected_count):
+        got_i = _read_thumb_at(cut_raw, i, cut_path)
+        exp_i = _read_thumb_at(src_raw, start_index + i, src_path)
+        d = exp_i - got_i
+        nom = float((d * d).mean())
+        if i == 0:
+            what = "первого"
+        elif i == expected_count - 1:
+            what = "последнего"
+        else:
+            what = f"кадра {i + 1}/{expected_count}"
+        if nom > 1.0:
+            # Тихий сдвиг проверяем ДО порога: соседний эталон совпал
+            # на порядок лучше — вырезано не то, хотя счётчик сошёлся.
+            # У одиночного кадра соседей в нарезке нет: сдвиг ловить нечем,
+            # остаётся порог контента (регресс min() на пустом диапазоне).
+            lo = max(0, i - _VERIFY_SHIFT_WINDOW)
+            hi = min(expected_count, i + _VERIFY_SHIFT_WINDOW + 1)
+            neighbours = [j for j in range(lo, hi) if j != i]
+            best = min(
+                float(((_read_thumb_at(
+                    src_raw, start_index + j, src_path) - got_i) ** 2).mean())
+                for j in neighbours) if neighbours else None
+            if best is not None and best <= nom / 10:
+                raise FFmpegError(
+                    f"Похоже на сдвиг границ: {what} кадр нарезки совпал "
+                    f"с соседним эталоном (ssd={best:.1f}), а не со своим "
+                    f"(ssd={nom:.1f}): {cut_path}")
+        if nom > VERIFY_SSD_MAX:
+            raise FFmpegError(
+                f"Контент {what} кадра не совпал "
+                f"(ssd={nom:.1f} > {VERIFY_SSD_MAX}): {cut_path}")
+
+
+def _verify_export_cuts(src_path: str, items, cancelled=None) -> None:
+    """Сверка всех нарезок прогона: один проход исходника от кадра 0.
+
+    ``items`` — (start, end, cut_path). Фрагменты не пересекаются и
+    проверяются по возрастанию start: исходник декодируется секвентально
+    до максимального end без seek'ов, поэтому ординалы точны. И исходник,
+    и каждая нарезка декодируются в raw-файлы на диске и сверяются
+    потоково — память не зависит от длины фрагмента. Пересечение
+    (аномалия) — независимая сверка каждого: общий проход для
+    пересекающихся диапазонов не определён.
+    """
+    if not items:
+        return
+    ordered = sorted(items, key=lambda item: item[0])
+    if any(ordered[i][0] <= ordered[i - 1][1]
+           for i in range(1, len(ordered))):
+        for start, end, cut_path in ordered:
+            _verify_cut(src_path, start, cut_path, end - start + 1)
+        return
+
+    frames_wanted = max(end for _, end, _ in ordered) + 1
+    fd, raw_path = tempfile.mkstemp(prefix="vc-verify-", suffix=".raw")
+    os.close(fd)
+    fd, cut_raw_path = tempfile.mkstemp(
+        prefix="vc-verify-cut-", suffix=".raw")
+    os.close(fd)
+    try:
+        _decode_to_raw(
+            src_path, frames_wanted, raw_path, cancelled=cancelled)
+        available = _raw_frame_count(raw_path)
+        with open(raw_path, "rb") as raw_file:
+            for start, end, cut_path in ordered:
+                expected_count = end - start + 1
+                _decode_to_raw(
+                    cut_path, expected_count + 1, cut_raw_path,
+                    cancelled=cancelled, what="нарезки")
+                cut_count = _raw_frame_count(cut_raw_path)
+                _require_cut_count(cut_count, expected_count, cut_path)
+                # Читатель открывается заново на каждую нарезку: файл
+                # перезаписан, и буфер прежнего дескриптора мог бы отдать
+                # миниатюры предыдущего фрагмента.
+                with open(cut_raw_path, "rb") as cut_raw:
+                    _compare_cut_raws(
+                        raw_file, start, available, cut_raw,
+                        expected_count, src_path, cut_path)
+    finally:
+        for path in (raw_path, cut_raw_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
 
 
 def _remove_created_since(out_dir: str, before: set) -> None:
@@ -336,10 +524,10 @@ def _run_export(ws_id: str) -> None:
         created = exporter.extract_fragments(
             fragments, progress=progress, cancelled=cancelled,
             frame_ts_ranges=frame_ts_ranges)
-        published = []
-        for (start, end), path in zip(fragments, created):
-            _verify_cut(ws.original, start, path, end - start + 1)
-            published.append(exporter.publish(path))
+        items = [(start, end, path)
+                 for (start, end), path in zip(fragments, created)]
+        _verify_export_cuts(ws.original, items, cancelled=cancelled)
+        published = [exporter.publish(path) for _, _, path in items]
         vid = _video_identity(ws.original)
         task_hash = _task_hash(frags, vid["size"], vid["mtime_ns"]) \
             if vid is not None else None

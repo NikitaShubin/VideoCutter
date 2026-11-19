@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from django.test import SimpleTestCase
 
@@ -79,6 +80,20 @@ class ExporterRangeTest(SimpleTestCase):
         vf = cmd[cmd.index("-vf") + 1]
         self.assertEqual(
             vf, "select=between(n\\,0\\,3)")
+
+    def test_video_command_caps_output_frames(self):
+        """Видео: -frames:v = ожидаемому числу кадров (не +1)."""
+        from videocutter.core.exporter import Exporter
+
+        cmd = Exporter("a.mp4", "/tmp").build_command(10, 19, "/tmp/x.mp4")
+        self.assertEqual(cmd[cmd.index("-frames:v") + 1], "10")
+
+    def test_png_command_keeps_single_frame_cap(self):
+        """PNG по-прежнему ровно один кадр."""
+        from videocutter.core.exporter import Exporter
+
+        cmd = Exporter("a.mp4", "/tmp").build_command(10, 10, "/tmp/x.png")
+        self.assertEqual(cmd[cmd.index("-frames:v") + 1], "1")
 
     def test_frame_ts_range(self):
         """frame_ts_range: отбор по секундам, без счётчика n."""
@@ -311,6 +326,25 @@ class ExporterVfrTest(SimpleTestCase):
         finally:
             shutil.rmtree(out, ignore_errors=True)
 
+    def test_vfr_cut_passes_full_verification(self):
+        """Срез через смену темпа проходит сверку без дублей кадров."""
+        import vc_fragments.views as export_views
+        from vc_fragments.views import _frame_ts_bounds
+        from vc_pairs import frame_provider as fp
+
+        vpts = fp.get_visible_pts(self.path)
+        cross = next(i for i, t in enumerate(vpts) if t >= 2_000_000)
+        a = max(0, cross - 5)
+        b = min(len(vpts) - 1, cross + 15)
+        out = tempfile.mkdtemp()
+        try:
+            created = Exporter(self.path, out).extract_fragments(
+                [(a, b)], frame_ts_ranges=[_frame_ts_bounds(vpts, a, b)])
+            self.assertEqual(len(created), 1)
+            export_views._verify_cut(self.path, a, created[0], b - a + 1)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
 
 class StartOffsetTest(SimpleTestCase):
     """Ненулевой start_time: шкала индекса нормализована, экспорт точен.
@@ -466,3 +500,282 @@ class FullVerifyTest(SimpleTestCase):
         """Несколько кадров — по-прежнему видео, не PNG."""
         cut = self._export(10, 11)
         self.assertEqual(os.path.splitext(cut)[1], ".mp4")
+
+
+class SinglePassVerifyTest(SimpleTestCase):
+    """Сверка набора фрагментов: один секвентальный проход по исходнику."""
+
+    N = 200
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            raise unittest.SkipTest("ffmpeg/ffprobe не найдены")
+        super().setUpClass()
+        cls.tmpdir = tempfile.TemporaryDirectory(prefix="vcsp_")
+        cls.path = os.path.join(cls.tmpdir.name, "sp.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", f"testsrc2=size=96x96:rate=25:duration=8",
+             "-c:v", "libx264", "-preset", "ultrafast", "-bf", "2",
+             "-g", "10", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+             cls.path],
+            check=True, capture_output=True)
+        assert _ffprobe_count(cls.path) == cls.N
+
+    @classmethod
+    def tearDownClass(cls):
+        from vc_pairs import frame_provider as fp
+        fp.close_source(cls.path)
+        cls.tmpdir.cleanup()
+        super().tearDownClass()
+
+    def tearDown(self):
+        from vc_pairs import frame_provider as fp
+        fp.close_source(self.path)
+
+    def _export(self, a, b, src=None):
+        from vc_fragments.views import _frame_ts_bounds
+        from vc_pairs import frame_provider as fp
+
+        src = src or self.path
+        vpts = fp.get_visible_pts(src)
+        out = tempfile.mkdtemp(dir=self.tmpdir.name)
+        created = Exporter(src, out).extract_fragments(
+            [(a, b)], frame_ts_ranges=[_frame_ts_bounds(vpts, a, b)])
+        self.assertEqual(len(created), 1)
+        return created[0]
+
+    def test_batch_accepts_multiple_exact_fragments(self):
+        """Два не пересекающихся точных фрагмента — сверка проходит."""
+        import vc_fragments.views as export_views
+
+        cut1 = self._export(10, 19)
+        cut2 = self._export(100, 109)
+        export_views._verify_export_cuts(
+            self.path, [(10, 19, cut1), (100, 109, cut2)])
+
+    def test_batch_catches_shift_in_later_fragment(self):
+        """Сдвиг во втором фрагменте ловится, путь нарезки — в ошибке."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        cut1 = self._export(10, 19)
+        cut2 = self._export(101, 110)
+        with self.assertRaises(FFmpegError) as ctx:
+            export_views._verify_export_cuts(
+                self.path, [(10, 19, cut1), (100, 109, cut2)])
+        self.assertIn("сдвиг", str(ctx.exception))
+        self.assertIn(cut2, str(ctx.exception))
+
+    def test_batch_matches_per_fragment_verification(self):
+        """Вердикт batch совпадает с независимой проверкой того же среза."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        cut = self._export(101, 110)
+        with self.assertRaises(FFmpegError):
+            export_views._verify_cut(self.path, 100, cut, 10)
+        with self.assertRaises(FFmpegError):
+            export_views._verify_export_cuts(
+                self.path, [(100, 109, cut)])
+
+    def test_source_decoded_once_for_all_fragments(self):
+        """Исходник декодируется одним процессом, без seek (-ss)."""
+        import vc_fragments.views as export_views
+
+        cut1 = self._export(10, 19)
+        cut2 = self._export(100, 109)
+        real_popen = subprocess.Popen
+        calls = []
+
+        def counting_popen(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            return real_popen(cmd, *args, **kwargs)
+
+        with mock.patch.object(
+                export_views.subprocess, "Popen", side_effect=counting_popen):
+            export_views._verify_export_cuts(
+                self.path, [(10, 19, cut1), (100, 109, cut2)])
+
+        source_calls = [
+            cmd for cmd in calls
+            if self.path in cmd and "rawvideo" in cmd]
+        self.assertEqual(len(source_calls), 1)
+        self.assertNotIn("-ss", source_calls[0])
+
+    def test_overlapping_fragments_verify_independently(self):
+        """Пересечение (аномалия) — независимая сверка, а не общий проход."""
+        import vc_fragments.views as export_views
+
+        cut1 = self._export(10, 19)
+        cut2 = self._export(15, 24)
+        real_verify = export_views._verify_cut
+        calls = []
+
+        def counting_verify(src, start, cut, expected):
+            calls.append((start, expected))
+            return real_verify(src, start, cut, expected)
+
+        with mock.patch.object(
+                export_views, "_verify_cut", side_effect=counting_verify):
+            export_views._verify_export_cuts(
+                self.path, [(10, 19, cut1), (15, 24, cut2)])
+        self.assertEqual(calls, [(10, 10), (15, 10)])
+
+    def test_truncated_source_verifies_earlier_and_fails_later(self):
+        """Обрыв хвоста исходника не отменяет сверку ранних фрагментов."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        src = os.path.join(self.tmpdir.name, "trunc.mp4")
+        shutil.copy2(self.path, src)
+        cut_before = self._export(0, 9, src=src)
+        cut_after = self._export(180, 189, src=src)
+        size = os.path.getsize(src)
+        with open(src, "r+b") as f:
+            f.truncate(size // 2)
+
+        export_views._verify_export_cuts(src, [(0, 9, cut_before)])
+        with self.assertRaises(FFmpegError) as ctx:
+            export_views._verify_export_cuts(
+                src, [(180, 189, cut_after)])
+        self.assertIn("эталон", str(ctx.exception))
+
+    def test_cancel_during_source_pass_stops_promptly(self):
+        """Отмена в проходе по исходнику: быстро, без мусорного temp-файла."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import ExportCancelled
+
+        cut = self._export(10, 19)
+        calls = []
+        temp_paths = []
+        real_mkstemp = tempfile.mkstemp
+
+        def mkstemp(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            temp_paths.append(path)
+            return fd, path
+
+        def cancelled():
+            calls.append(1)
+            return len(calls) >= 2
+
+        with mock.patch.object(
+                export_views.tempfile, "mkstemp", side_effect=mkstemp):
+            t0 = time.time()
+            with self.assertRaises(ExportCancelled):
+                export_views._verify_export_cuts(
+                    self.path, [(10, 19, cut)], cancelled=cancelled)
+            self.assertLess(time.time() - t0, 5)
+        self.assertFalse(os.path.exists(temp_paths[0]))
+
+    def test_batch_rejects_foreign_content(self):
+        """Чужой диапазон при верном счётчике — ошибка контента."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        cut = self._export(120, 129)
+        with self.assertRaises(FFmpegError) as ctx:
+            export_views._verify_export_cuts(
+                self.path, [(100, 109, cut)])
+        self.assertIn("Контент", str(ctx.exception))
+
+    def test_batch_does_not_materialize_cut_thumbs(self):
+        """Потоковая сверка: нарезка не собирается в список float32.
+
+        100k-кадровый фрагмент в списке — ~1 ГБ; batch обязан читать
+        миниатюры нарезки из raw-файла по одной.
+        """
+        import vc_fragments.views as export_views
+
+        cut1 = self._export(10, 19)
+        cut2 = self._export(100, 109)
+        with mock.patch.object(
+                export_views, "_decode_thumbs",
+                side_effect=AssertionError("cut thumbs materialized")):
+            export_views._verify_export_cuts(
+                self.path, [(10, 19, cut1), (100, 109, cut2)])
+
+    def test_cancel_during_cut_decode_cleans_partials(self):
+        """Отмена на декоде нарезки: ExportCancelled и нет temp-файлов."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import ExportCancelled
+
+        cut = self._export(10, 19)
+        temp_paths = []
+        real_mkstemp = tempfile.mkstemp
+        real_decode = export_views._decode_to_raw
+        calls = []
+
+        def mkstemp(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            temp_paths.append(path)
+            return fd, path
+
+        def decode(path, frames, raw, cancelled=None, what="эталонов"):
+            calls.append(what)
+            if what == "нарезки":
+                raise ExportCancelled("cut decode cancelled")
+            return real_decode(path, frames, raw, cancelled=None)
+
+        with mock.patch.object(
+                export_views.tempfile, "mkstemp", side_effect=mkstemp), \
+                mock.patch.object(
+                    export_views, "_decode_to_raw", side_effect=decode):
+            with self.assertRaises(ExportCancelled):
+                export_views._verify_export_cuts(
+                    self.path, [(10, 19, cut)], cancelled=lambda: True)
+
+        self.assertEqual(calls, ["эталонов", "нарезки"])
+        self.assertTrue(temp_paths)
+        self.assertFalse(any(os.path.exists(path) for path in temp_paths))
+
+    def test_source_pass_timeout_is_reported(self):
+        """Зависший декодер ограничен таймаутом (не ждёт вечно)."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        cut = self._export(10, 19)
+
+        class HangingProc:
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        with mock.patch.object(export_views, "_decode_timeout", return_value=0), \
+                mock.patch.object(
+                    export_views.subprocess, "Popen",
+                    return_value=HangingProc()):
+            with self.assertRaises(FFmpegError) as ctx:
+                export_views._verify_export_cuts(
+                    self.path, [(10, 19, cut)])
+        self.assertIn("Таймаут", str(ctx.exception))
+
+    def test_source_pass_spawn_failure_is_reported(self):
+        """ffmpeg не запускается — FFmpegError с путём исходника."""
+        import vc_fragments.views as export_views
+        from videocutter.core.exporter import FFmpegError
+
+        cut = self._export(10, 19)
+        with mock.patch.object(
+                export_views.subprocess, "Popen",
+                side_effect=OSError("no ffmpeg")):
+            with self.assertRaises(FFmpegError) as ctx:
+                export_views._verify_export_cuts(
+                    self.path, [(10, 19, cut)])
+        self.assertIn(self.path, str(ctx.exception))
+
+    def test_empty_batch_is_noop(self):
+        """Пустой набор (экспортёр ничего не вернул) — не ошибка."""
+        import vc_fragments.views as export_views
+
+        export_views._verify_export_cuts(self.path, [])
+

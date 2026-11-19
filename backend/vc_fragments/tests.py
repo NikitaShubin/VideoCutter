@@ -11,9 +11,11 @@
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
+import unittest
 from unittest import mock
 
 from django.conf import settings
@@ -1226,26 +1228,6 @@ class VideoIdentityAndStateTests(WorkspaceApiTestBase):
 
 
 class ProbeDecodeBranchTests(WorkspaceApiTestBase):
-    def test_ffprobe_oserror(self):
-        import vc_fragments.views as v
-        with mock.patch.object(v.subprocess, "run", side_effect=OSError("no bin")):
-            self.assertIsNone(v._ffprobe_frame_count(self.video))
-
-    def test_ffprobe_nonzero(self):
-        import vc_fragments.views as v
-        m = mock.Mock(returncode=1, stdout="", stderr="")
-        with mock.patch.object(v.subprocess, "run", return_value=m):
-            self.assertIsNone(v._ffprobe_frame_count(self.video))
-
-    def test_ffprobe_bad_stdout(self):
-        import vc_fragments.views as v
-        m = mock.Mock(returncode=0, stdout="oops\n", stderr="")
-        with mock.patch.object(v.subprocess, "run", return_value=m):
-            self.assertIsNone(v._ffprobe_frame_count(self.video))
-        m2 = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(v.subprocess, "run", return_value=m2):
-            self.assertIsNone(v._ffprobe_frame_count(self.video))
-
     def test_decode_thumbs_oserror(self):
         import vc_fragments.views as v
         with mock.patch.object(v.subprocess, "run", side_effect=OSError("no bin")):
@@ -1263,13 +1245,20 @@ class ProbeDecodeBranchTests(WorkspaceApiTestBase):
         with mock.patch.object(v.subprocess, "run", return_value=m):
             self.assertIsNone(v._decode_thumbs(self.video, 3))
 
+    def test_decode_thumbs_timeout(self):
+        """Зависший декодер — None (безопасный отказ), не вечное ожидание."""
+        import vc_fragments.views as v
+        with mock.patch.object(
+                v.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired("ffmpeg", 1)):
+            self.assertIsNone(v._decode_thumbs(self.video, 3, timeout=1))
+
 
 class VerifyCutExtraTests(WorkspaceApiTestBase):
     def test_verify_cut_decode_fail(self):
         import vc_fragments.views as v
         from videocutter.core.exporter import FFmpegError
-        with mock.patch.object(v, "_ffprobe_frame_count", return_value=2), \
-                mock.patch.object(v, "_decode_thumbs", return_value=None):
+        with mock.patch.object(v, "_decode_thumbs", return_value=None):
             with self.assertRaises(FFmpegError):
                 v._verify_cut(self.video, 0, self.video, 2)
 
@@ -1278,12 +1267,12 @@ class VerifyCutExtraTests(WorkspaceApiTestBase):
         import vc_fragments.views as v
         from videocutter.core.exporter import FFmpegError
         got = [np.zeros(2304, dtype=np.float32) for _ in range(2)]
-        with mock.patch.object(v, "_ffprobe_frame_count", return_value=2), \
-                mock.patch.object(v, "_decode_thumbs", side_effect=[got, None]):
+        with mock.patch.object(v, "_decode_thumbs", side_effect=[got, None]):
             with self.assertRaises(FFmpegError):
                 v._verify_cut(self.video, 0, self.video, 2)
-        with mock.patch.object(v, "_ffprobe_frame_count", return_value=2), \
-                mock.patch.object(v, "_decode_thumbs", side_effect=[got, [np.zeros(2304, dtype=np.float32)]]):
+        with mock.patch.object(
+                v, "_decode_thumbs",
+                side_effect=[got, [np.zeros(2304, dtype=np.float32)]]):
             with self.assertRaises(FFmpegError):
                 v._verify_cut(self.video, 0, self.video, 2)
 
@@ -1298,11 +1287,234 @@ class VerifyCutExtraTests(WorkspaceApiTestBase):
                np.zeros(2304, dtype=np.float32),
                np.zeros(2304, dtype=np.float32)]
         exp_all = [exp0, exp1, exp2]
-        with mock.patch.object(v, "_ffprobe_frame_count", return_value=3), \
-                mock.patch.object(v, "_decode_thumbs", side_effect=[got, exp_all]):
+        with mock.patch.object(v, "_decode_thumbs", side_effect=[got, exp_all]):
             with self.assertRaises(FFmpegError) as ctx:
                 v._verify_cut(self.video, 0, self.video, 3)
         self.assertIn("сдвиг", str(ctx.exception))
+
+
+class DecodeTimeoutTests(SimpleTestCase):
+    def test_timeout_has_floor_for_short_clips(self):
+        import vc_fragments.views as v
+        self.assertEqual(v._decode_timeout(10), 1500.0)
+
+    def test_timeout_grows_with_long_clips(self):
+        """100k кадров: фиксированные 1500 с малы, запас ~20k с."""
+        import vc_fragments.views as v
+        self.assertEqual(v._decode_timeout(100_000), 20_300.0)
+
+
+def _ffprobe_decoded_count(path: str):
+    """Число декодированных кадров по версии ffprobe (None — не читается)."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-count_frames",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=nb_read_frames",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    tokens = [t for t in proc.stdout.replace(",", "\n").split() if t]
+    try:
+        return int(tokens[-1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _raw_thumb_count(path: str, vsync: bool) -> int:
+    """Сколько кадров даёт raw-пайп миниатюр (для фиксации VFR-регресса)."""
+    cmd = ["ffmpeg", "-v", "error", "-i", path]
+    if vsync:
+        cmd += ["-vsync", "0"]
+    cmd += ["-frames:v", "1000000000",
+            "-vf", "scale=64:36,format=gray",
+            "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
+    proc = subprocess.run(cmd, capture_output=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-500:]
+    return len(proc.stdout) // (64 * 36)
+
+
+class DecodeThumbsParityTests(SimpleTestCase):
+    """Число кадров raw-пайпа = числу декодированных кадров (ffprobe)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            raise unittest.SkipTest("ffmpeg/ffprobe не найдены")
+        super().setUpClass()
+        cls.tmpdir = tempfile.TemporaryDirectory(prefix="vcparity_")
+        cls.cfr = os.path.join(cls.tmpdir.name, "cfr.mp4")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+             "-i", "testsrc2=size=96x96:rate=25:duration=8",
+             "-c:v", "libx264", "-preset", "ultrafast", "-bf", "2",
+             "-g", "10", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+             cls.cfr],
+            check=True, capture_output=True)
+        cls.vfr = os.path.join(cls.tmpdir.name, "vfr.mp4")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+             "-i", "testsrc2=size=96x96:rate=30:duration=4",
+             "-vf", "select='lt(t,2)+gte(t,2)*not(mod(n,2))'",
+             "-vsync", "vfr", "-c:v", "libx264", "-preset", "ultrafast",
+             "-pix_fmt", "yuv420p", cls.vfr],
+            check=True, capture_output=True)
+        cls.offset = os.path.join(cls.tmpdir.name, "offset.mpg")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", cls.cfr,
+             "-output_ts_offset", "0.55", "-c:v", "mpeg2video",
+             "-q:v", "2", "-pix_fmt", "yuv420p", cls.offset],
+            check=True, capture_output=True)
+        cls.truncated = os.path.join(cls.tmpdir.name, "truncated.mp4")
+        shutil.copy2(cls.cfr, cls.truncated)
+        size = os.path.getsize(cls.truncated)
+        with open(cls.truncated, "r+b") as f:
+            f.truncate(size // 2)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+        super().tearDownClass()
+
+    def _assert_parity(self, path):
+        import vc_fragments.views as v
+
+        expected = _ffprobe_decoded_count(path)
+        got = v._decode_thumbs(path, 1_000_000_000, timeout=120)
+        if got is None:
+            self.assertIsNone(
+                expected, "декод вернул None, но ffprobe кадры посчитал")
+            return
+        self.assertIsNotNone(expected, "ffprobe не смог прочитать файл")
+        self.assertEqual(len(got), expected)
+
+    def test_cfr_bframes_count_matches_ffprobe(self):
+        self._assert_parity(self.cfr)
+
+    def test_vfr_count_matches_ffprobe(self):
+        """VFR: passthrough, а не дубли до CFR (90 кадров, не 119)."""
+        import vc_fragments.views as v
+
+        expected = _ffprobe_decoded_count(self.vfr)
+        self.assertEqual(expected, 90)
+        got = v._decode_thumbs(self.vfr, 1_000_000_000, timeout=120)
+        self.assertIsNotNone(got)
+        self.assertEqual(len(got), 90)
+        # Без -vsync 0 тот же пайп дублирует кадры до CFR (локально
+        # измерено 119 вместо 90) — старый верификатор сравнивал не те
+        # ординалы (регресс H1). Точное число зависит от сборки ffmpeg,
+        # поэтому проверяем сам факт раздувания, а не конкретные 119.
+        self.assertGreater(_raw_thumb_count(self.vfr, vsync=False), 90)
+
+    def test_offset_mpegps_count_matches_ffprobe(self):
+        self._assert_parity(self.offset)
+
+    def test_truncated_count_matches_ffprobe(self):
+        self._assert_parity(self.truncated)
+
+
+class VerifyCutNoFfprobeCountTests(WorkspaceApiTestBase):
+    """Регресс production-бага: сверка не делает полный -count_frames."""
+
+    def _record_processes(self):
+        import vc_fragments.views as v
+        real_run = v.subprocess.run
+        real_popen = v.subprocess.Popen
+        seen = []
+
+        def run(cmd, *args, **kwargs):
+            seen.append(list(cmd))
+            return real_run(cmd, *args, **kwargs)
+
+        def popen(cmd, *args, **kwargs):
+            seen.append(list(cmd))
+            return real_popen(cmd, *args, **kwargs)
+
+        return v, seen, mock.patch.object(
+            v.subprocess, "run", side_effect=run), mock.patch.object(
+            v.subprocess, "Popen", side_effect=popen)
+
+    def test_verify_cut_never_uses_count_frames(self):
+        v, seen, run_patch, popen_patch = self._record_processes()
+        with run_patch, popen_patch:
+            v._verify_cut(self.video, 0, self.video, 10)
+        self.assertFalse(any("-count_frames" in cmd for cmd in seen))
+
+    def test_batch_verify_never_uses_count_frames(self):
+        v, seen, run_patch, popen_patch = self._record_processes()
+        with run_patch, popen_patch:
+            v._verify_export_cuts(self.video, [(0, 9, self.video)])
+        self.assertFalse(any("-count_frames" in cmd for cmd in seen))
+
+
+class VerifyCutCountTests(WorkspaceApiTestBase):
+    """Точный счётчик нарезки берётся из её же декода."""
+
+    def _cut_from_frames(self, frames, name):
+        import cv2
+
+        path = os.path.join(self.ws_dir, name)
+        h, w = frames[0].shape[:2]
+        vw = cv2.VideoWriter(
+            path, cv2.VideoWriter_fourcc(*"mp4v"), 10, (w, h))
+        for frame in frames:
+            vw.write(frame)
+        vw.release()
+        return path
+
+    def _source_frames(self):
+        import cv2
+
+        cap = cv2.VideoCapture(self.video)
+        frames = []
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frames.append(frame)
+        cap.release()
+        return frames
+
+    def test_verify_cut_rejects_missing_frame(self):
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+
+        frames = self._source_frames()
+        cut = self._cut_from_frames(frames[:-1], "missing.mp4")
+        with self.assertRaises(FFmpegError) as ctx:
+            v._verify_cut(self.video, 0, cut, len(frames))
+        self.assertIn("ожидалось", str(ctx.exception))
+
+    def test_verify_cut_rejects_extra_frame(self):
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+
+        frames = self._source_frames()
+        cut = self._cut_from_frames(frames + [frames[-1]], "extra.mp4")
+        with self.assertRaises(FFmpegError) as ctx:
+            v._verify_cut(self.video, 0, cut, len(frames))
+        self.assertIn("больше ожидаемого", str(ctx.exception))
+
+    def test_verify_cut_rejects_truncated_cut(self):
+        import vc_fragments.views as v
+        from videocutter.core.exporter import FFmpegError
+
+        cut = os.path.join(self.ws_dir, "truncated_cut.mp4")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", self.video,
+             "-vf", "select=between(n\\,0\\,9)", "-vsync", "0",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart", cut],
+            check=True, capture_output=True)
+        size = os.path.getsize(cut)
+        with open(cut, "r+b") as f:
+            f.truncate(size // 2)
+        with self.assertRaises(FFmpegError):
+            v._verify_cut(self.video, 0, cut, 10)
+
 
 
 class RunExportErrorTests(WorkspaceApiTestBase):
@@ -1544,6 +1756,66 @@ class RunExportErrorTests(WorkspaceApiTestBase):
             st = EXPORTS.get(self.ws_id)
         self.assertEqual(st["state"], "error")
         self.assertIn("boom-early", st["error"])
+
+
+class RunExportSinglePassTests(WorkspaceApiTestBase):
+    """Экспорт сверяет все фрагменты одним проходом по исходнику."""
+
+    def test_run_export_does_not_verify_fragment_by_fragment(self):
+        """Успешный прогон не зовёт _verify_cut (иначе — N декодов исходника)."""
+        import vc_fragments.views as v
+        from videocutter.core.exporter import Exporter as RealExporter
+
+        class FakeExporter:
+            def __init__(self, src, out_dir, **kwargs):
+                self.real = RealExporter(src, out_dir)
+
+            def extract_fragments(self, fragments, progress=None,
+                                  cancelled=None, frame_ts_ranges=None):
+                return self.real.extract_fragments(
+                    fragments, progress=progress, cancelled=cancelled,
+                    frame_ts_ranges=frame_ts_ranges)
+
+            def publish(self, path):
+                return self.real.publish(path)
+
+        with mock.patch.object(v, "Exporter", FakeExporter), \
+                mock.patch.object(
+                    v, "_verify_cut",
+                    side_effect=AssertionError("per-fragment verify")):
+            v._run_export(self.ws_id)
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "done")
+
+    def test_cancel_during_source_pass_cleans_partials(self):
+        """Отмена в проходе по исходнику: статус cancelled, файлов нет."""
+        import vc_fragments.views as v
+
+        ws_id = self.ws_id
+
+        class CancelOnVerifyExporter:
+            def __init__(self, src, out_dir, **kwargs):
+                self.out_dir = out_dir
+
+            def extract_fragments(self, fragments, progress=None,
+                                  cancelled=None, frame_ts_ranges=None):
+                path = os.path.join(self.out_dir, ".video_fragment_1.mp4")
+                with open(path, "wb") as f:
+                    f.write(b"partial")
+                v.EXPORT_CANCEL.add(ws_id)
+                return [path]
+
+        with mock.patch.object(v, "Exporter", CancelOnVerifyExporter):
+            t0 = time.time()
+            v._run_export(self.ws_id)
+            self.assertLess(time.time() - t0, 5)
+
+        with EXPORTS_LOCK:
+            st = EXPORTS.get(self.ws_id)
+        self.assertEqual(st["state"], "cancelled")
+        self.assertEqual(
+            os.listdir(os.path.join(self.ws_dir, "exports")), [])
 
 
 class FragmentsValidationExtraTests(WorkspaceApiTestBase):
