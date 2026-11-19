@@ -1205,6 +1205,18 @@ select option {
   white-space: nowrap;
 }
 
+/* Заметка из адреса: неизвестная задача/проект/фрагмент. Не модалка —
+ * навигация уже показала ближайший рабочий экран. */
+.route-notice {
+  margin: 0 16px 8px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 207, 122, 0.35);
+  border-radius: var(--r-s);
+  background: rgba(255, 207, 122, 0.08);
+  color: var(--warn);
+  font-size: 0.85em;
+}
+
 .editor-utilities,
 .editor-global-actions {
   display: flex;

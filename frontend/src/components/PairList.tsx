@@ -70,6 +70,15 @@ interface Props {
   onRemoveJob: (key: string) => void;
   /** Входной фильтр включён: показать «Выйти», иначе null. */
   onLogout: (() => void) | null;
+  /** Адрес задаёт вкладку; undefined — вкладка из localStorage (адрес `/`). */
+  tab?: Tab;
+  /** Адрес задаёт фильтр проекта; undefined — фильтр из localStorage. */
+  projectFilter?: string;
+  /** Заметка из адреса (например, о несуществующей задаче). */
+  notice?: string | null;
+  onTabChange?: (tab: Tab) => void;
+  onProjectOpen?: (id: string) => void;
+  onProjectFilterChange?: (filter: string) => void;
 }
 
 function fileStem(filename: string): string {
@@ -158,6 +167,12 @@ export function PairList({
   onUpdateJob,
   onRemoveJob,
   onLogout,
+  tab: tabProp,
+  projectFilter: projectFilterProp,
+  notice = null,
+  onTabChange,
+  onProjectOpen,
+  onProjectFilterChange,
 }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -204,9 +219,14 @@ export function PairList({
   };
 
   // ─── Вкладки (как в CVAT): задачи и проекты — отдельные экраны ────────
-  const [tab, setTab] = useState<Tab>(readTab);
+  const [tab, setTab] = useState<Tab>(() => tabProp ?? readTab());
   const tasksTabRef = useRef<HTMLButtonElement>(null);
   const projectsTabRef = useRef<HTMLButtonElement>(null);
+
+  // Адрес — источник правды, когда он задан (deep link, «Назад»).
+  useEffect(() => {
+    if (tabProp !== undefined) setTab(tabProp);
+  }, [tabProp]);
 
   const pickTab = (t: Tab) => {
     setTab(t);
@@ -215,6 +235,7 @@ export function PairList({
     } catch {
       /* ignore */
     }
+    onTabChange?.(t);
   };
 
   // Клавиатурный паттерн табов: одна вкладка в Tab-порядке, стрелки/Home/End
@@ -239,8 +260,14 @@ export function PairList({
   };
 
   // ─── Проекты: реестр, фильтр списка, CRUD ────────────────────────────────
-  const [projFilter, setProjFilter] = useState<string>(readProjectFilter);
+  const [projFilter, setProjFilter] = useState<string>(
+    () => projectFilterProp ?? readProjectFilter(),
+  );
   const [projects, setProjects] = useState<Project[] | null>(null);
+
+  useEffect(() => {
+    if (projectFilterProp !== undefined) setProjFilter(projectFilterProp);
+  }, [projectFilterProp]);
   const [newProjectName, setNewProjectName] = useState("");
   const [projError, setProjError] = useState("");
   // Восстановление из бэкапа: XHR-заливка с прогрессом (default rename —
@@ -361,16 +388,23 @@ export function PairList({
     };
   }, [refreshSilently]);
 
-  const pickProjectFilter = (v: string) => {    setProjFilter(v);
+  const pickProjectFilter = (v: string) => {
+    setProjFilter(v);
     try {
       window.localStorage.setItem(PROJ_KEY, v);
     } catch {
       /* ignore */
     }
+    onProjectFilterChange?.(v);
   };
 
   // Открыть проект: вкладка задач, отфильтрованная по нему (drill-down).
+  // Когда адресом управляет App, он же и делает переход (/projects/<id>).
   const openProject = (id: string) => {
+    if (onProjectOpen) {
+      onProjectOpen(id);
+      return;
+    }
     pickProjectFilter(id);
     pickTab("tasks");
   };
@@ -405,16 +439,31 @@ export function PairList({
   // живут в одном меню «⋯»; на десктопе остаются отдельными кнопками.
   const [rowMenu, setRowMenu] = useState<string | null>(null);
 
+  // Фильтр по несуществующему проекту не должен давать пустой экран:
+  // показываем все задачи и говорим, что именно не нашли. Адрес при этом
+  // не подменяем — пользователь видит, куда шёл.
+  const projectMissing =
+    projFilter !== PROJ_ALL &&
+    projFilter !== PROJ_NONE &&
+    projects !== null &&
+    !projects.some((p) => p.id === projFilter);
+  const effectiveProjFilter = projectMissing ? PROJ_ALL : projFilter;
+  const routeNotice =
+    notice ??
+    (projectMissing
+      ? `Проект «${projFilter}» не найден — показаны все задачи.`
+      : null);
+
   const listed =
     visible === null
       ? null
       : visible.filter((p) => {
           const byProject =
-            projFilter === PROJ_ALL
+            effectiveProjFilter === PROJ_ALL
               ? true
-              : projFilter === PROJ_NONE
+              : effectiveProjFilter === PROJ_NONE
                 ? p.project_id == null
-                : p.project_id === projFilter;
+                : p.project_id === effectiveProjFilter;
           if (!byProject) return false;
           const q = query.trim().toLowerCase();
           if (!q) return true;
@@ -1057,6 +1106,11 @@ export function PairList({
             )}
           </div>
         </div>
+        {routeNotice && (
+          <div className="route-notice" role="status">
+            {routeNotice}
+          </div>
+        )}
         {tab === "tasks" && (
           <div className="toolbar-row">
             <input

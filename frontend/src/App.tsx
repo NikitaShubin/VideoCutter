@@ -17,9 +17,18 @@ import { PairList } from "./components/PairList";
 import { CutEditor, type BackGuard } from "./components/CutEditor";
 import { LoginScreen } from "./Login";
 import { useUploadManager } from "./model/uploads";
+import {
+  listPath,
+  parseRoute,
+  projectFilterPath,
+  projectPath,
+  taskPath,
+  withFrame,
+  PROJECT_ALL,
+  type RouteState,
+  type Tab,
+} from "./model/routes";
 import type { VideoPair } from "./types";
-
-type Screen = "list" | "editor";
 
 interface Gate {
   checked: boolean;
@@ -27,10 +36,18 @@ interface Gate {
   authed: boolean;
 }
 
+/** Адрес из окна, разобранный в состояние экрана. */
+function currentRoute(): RouteState {
+  return parseRoute(window.location.pathname, window.location.search);
+}
+
 export function App() {
-  const [screen, setScreen] = useState<Screen>("list");
+  // Адрес — источник правды: вкладка, фильтр, задача и кадр выводятся из
+  // pathname + search. history.state остаётся вспомогательным (vc/pairId):
+  // он нужен только заставке «Назад» и совместимости со старыми записями.
+  const [route, setRoute] = useState<RouteState>(currentRoute);
   const [pairs, setPairs] = useState<VideoPair[]>([]);
-  const [pairId, setPairId] = useState<string | null>(null);
+  const [pairsChecked, setPairsChecked] = useState(false);
   // Входная дверь: закрыта — экран токена вместо списка.
   const [gate, setGate] = useState<Gate>({
     checked: false,
@@ -42,9 +59,15 @@ export function App() {
   // синхронизации) сравнивает их с прежним снимком и рассказывает, что
   // изменилось на диске.
   const reload = useCallback(async () => {
-    const items = await listPairs();
-    setPairs(items);
-    return items;
+    try {
+      const items = await listPairs();
+      setPairs(items);
+      return items;
+    } finally {
+      // Даже сбой списка снимает «ещё не проверено»: deep link на задачу
+      // не должен навсегда застрять в ожидании проверки реестра.
+      setPairsChecked(true);
+    }
   }, []);
 
   // Прежние вызовы не ждут результата: обрыв сети не должен ронять экран.
@@ -52,34 +75,47 @@ export function App() {
     void reload().catch(console.error);
   }, [reload]);
 
-  // Экран живёт в state, но вход в редактор оставляет запись в history:
-  // кнопка «Назад» браузера возвращает к списку, а не выбрасывает из
-  // приложения. popstate — единственный источник правды для перехода назад.
-  // Свежие screen/pairId нужны обработчику popstate без пересоздания
+  // Свежие route/pairId нужны обработчику popstate без пересоздания
   // подписки на каждое изменение.
-  const screenRef = useRef<Screen>("list");
-  screenRef.current = screen;
-  const pairIdRef = useRef<string | null>(null);
-  pairIdRef.current = pairId;
+  const routeRef = useRef<RouteState>(route);
+  routeRef.current = route;
   // Верхний оверлей редактора (справка, меню, экспорт, комментарий).
   const backGuardRef = useRef<BackGuard | null>(null);
   // Задача, из строки которой открыли редактор: после возврата к списку
   // фокус должен вернуться туда же.
   const returnFocusPairIdRef = useRef<string | null>(null);
 
-  // Перезагрузка в редакторе оставляет в history «редактор», хотя экран
-  // начинает со списка. Нормализуем запись, иначе первый «Назад» из
-  // списка выглядит как переход в редактор.
+  // Начальная запись истории приводится в соответствие адресу.
+  // Deep link на задачу получает запись списка позади себя: «Назад» из
+  // редактора возвращает к задачам, а не выбрасывает на чужой сайт.
   useEffect(() => {
-    const st = window.history.state as { vc?: string } | null;
-    if (st?.vc !== "list") {
+    const r = currentRoute();
+    // Адрес снимаем ДО replaceState: иначе ?frame= и путь редактора
+    // потерялись бы вместе с первой записью.
+    const url = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    const st = window.history.state as { vc?: string; pairId?: string } | null;
+    if (r.screen === "editor" && r.pairId !== null) {
+      if (st?.vc !== "editor" || st.pairId !== r.pairId) {
+        window.history.replaceState({ vc: "list" }, "", "/tasks");
+        window.history.pushState(
+          { vc: "editor", pairId: r.pairId },
+          "",
+          url,
+        );
+      }
+    } else if (st?.vc !== "list") {
+      // Перезагрузка старой вкладки могла оставить state «редактор», хотя
+      // адрес уже список: нормализуем запись, иначе первый «Назад» из
+      // списка выглядит как переход в редактор.
       window.history.replaceState({ vc: "list" }, "");
     }
   }, []);
 
-  const closeEditor = useCallback(() => {
-    setScreen("list");
-    setPairId(null);
+  const leaveEditor = useCallback(() => {
+    // Прямой вход без записи списка позади: заменяем адрес редактора на
+    // список, чтобы в истории не осталось «мёртвой» задачи.
+    window.history.replaceState({ vc: "list" }, "", "/tasks");
+    setRoute(currentRoute());
     reloadQuiet();
   }, [reloadQuiet]);
 
@@ -87,49 +123,97 @@ export function App() {
     // Строку, из которой открыли задачу, вернём фокусом после «Назад»:
     // иначе клавиатурный пользователь теряет место в списке.
     returnFocusPairIdRef.current = id;
-    setPairId(id);
-    setScreen("editor");
-    const st = window.history.state as { vc?: string } | null;
-    if (st?.vc === "editor") {
+    const path = taskPath(id);
+    if (routeRef.current.screen === "editor") {
       // Уже в редакторе: не плодим записи, иначе «Назад» будет
       // перебирать задачи вместо выхода к списку.
-      window.history.replaceState({ vc: "editor", pairId: id }, "");
+      window.history.replaceState({ vc: "editor", pairId: id }, "", path);
     } else {
-      window.history.pushState({ vc: "editor", pairId: id }, "");
+      window.history.pushState({ vc: "editor", pairId: id }, "", path);
     }
+    setRoute(currentRoute());
+  }, []);
+
+  // Переходы по списку (вкладки, проекты) — push: каждая осмысленная
+  // навигация оставляет шаг назад. Повтор текущего адреса не дублируем.
+  const goToList = useCallback((path: string) => {
+    const current = `${window.location.pathname}${window.location.search}`;
+    if (current === path) {
+      setRoute(currentRoute());
+      return;
+    }
+    window.history.pushState({ vc: "list" }, "", path);
+    setRoute(currentRoute());
+  }, []);
+
+  const pickTab = useCallback(
+    (tab: Tab) => {
+      goToList(listPath(tab));
+    },
+    [goToList],
+  );
+
+  const openProject = useCallback(
+    (id: string) => {
+      goToList(projectPath(id));
+    },
+    [goToList],
+  );
+
+  const pickProjectFilter = useCallback(
+    (filter: string) => {
+      goToList(projectFilterPath(filter));
+    },
+    [goToList],
+  );
+
+  // Кадр в адресе обновляется заменой записи: «Назад» должен вести к
+  // списку, а не листать кадры. Zero-based — как ?frame= в CVAT.
+  const updateFrameInUrl = useCallback((frame: number) => {
+    if (currentRoute().screen !== "editor") return;
+    const path = withFrame(
+      window.location.pathname,
+      window.location.search,
+      frame,
+    );
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${path}${window.location.hash}`,
+    );
   }, []);
 
   useEffect(() => {
-    const onPop = (e: PopStateEvent) => {
-      const st = e.state as { vc?: string; pairId?: string } | null;
+    const onPop = () => {
+      const next = currentRoute();
+      const current = routeRef.current;
       // Уходим из редактора, но открыт оверлей — закрываем его и
       // возвращаем запись редактора, чтобы следующий «Назад» уже вышел
       // к списку.
-      if (screenRef.current === "editor" && st?.vc !== "editor") {
+      if (current.screen === "editor" && next.screen !== "editor") {
         if (backGuardRef.current?.()) {
-          window.history.pushState(
-            { vc: "editor", pairId: pairIdRef.current },
-            "",
-          );
+          if (current.pairId !== null) {
+            window.history.pushState(
+              { vc: "editor", pairId: current.pairId },
+              "",
+              taskPath(current.pairId),
+            );
+          }
           return;
         }
       }
-      if (st?.vc === "editor" && st.pairId) {
-        setPairId(st.pairId);
-        setScreen("editor");
-      } else {
-        closeEditor();
-      }
+      setRoute(next);
+      if (next.screen === "list") reloadQuiet();
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [closeEditor]);
+  }, [reloadQuiet]);
 
   // Возврат к списку: фокус — на строку, из которой открыли редактор.
   // Строка пересоздаётся при смене экрана, поэтому ищем её по id задачи,
   // а не держим ссылку на размонтированный узел.
   useEffect(() => {
-    if (screen !== "list") return;
+    if (route.screen !== "list") return;
     const id = returnFocusPairIdRef.current;
     if (id === null) return;
     returnFocusPairIdRef.current = null;
@@ -137,7 +221,7 @@ export function App() {
       (button) => button.dataset.pairId === id,
     );
     row?.focus();
-  }, [screen]);
+  }, [route.screen]);
 
   // Зеркало списка для тика: слияние лёгкого статуса без лишних рендеров.
   const pairsRef = useRef<VideoPair[]>([]);
@@ -204,10 +288,10 @@ export function App() {
   const logout = useCallback(() => {
     clearAuthToken();
     setGate((g) => ({ ...g, authed: false }));
-    setScreen("list");
     // Выход — это не «назад»: запись редактора больше не должна открываться
     // кнопкой браузера после повторного входа.
-    window.history.replaceState({ vc: "list" }, "");
+    window.history.replaceState({ vc: "list" }, "", "/");
+    setRoute(currentRoute());
   }, []);
 
   // Заливки переживают смену экранов: форма только стартует, строки
@@ -222,6 +306,28 @@ export function App() {
     removeJob,
   } = useUploadManager(reloadQuiet);
 
+  // Deep link на несуществующую задачу: показываем заметку и список, но
+  // адрес не переписываем — пользователь видит, что именно открывал.
+  // Проверка ждёт первый ответ реестра, иначе на медленной сети любая
+  // задача успела бы выглядеть «неизвестной».
+  const editorId = route.screen === "editor" ? route.pairId : null;
+  const missingPairId =
+    editorId !== null &&
+    pairsChecked &&
+    !pairs.some((pair) => pair.id === editorId)
+      ? editorId
+      : null;
+
+  useEffect(() => {
+    if (missingPairId === null) return;
+    // Запись редактора больше не действительна: следующий клик по задаче
+    // должен push-ить, а не replace-ить несуществующий редактор.
+    const st = window.history.state as { vc?: string } | null;
+    if (st?.vc === "editor") {
+      window.history.replaceState({ vc: "list" }, "");
+    }
+  }, [missingPairId]);
+
   let content: ReactElement;
   if (!gate.checked) {
     content = (
@@ -235,10 +341,14 @@ export function App() {
         onOk={() => setGate((g) => ({ ...g, authed: true }))}
       />
     );
-  } else if (screen === "editor" && pairId !== null) {
+  } else if (editorId !== null && missingPairId === null) {
     content = (
       <CutEditor
-        pairId={pairId}
+        key={editorId}
+        pairId={editorId}
+        initialFrame={route.frame}
+        initialFragment={route.fragment}
+        onFrameChange={updateFrameInUrl}
         backGuardRef={backGuardRef}
         onBack={() => {
           // Возврат к списку идёт через history, чтобы не оставлять в ней
@@ -247,7 +357,7 @@ export function App() {
           if (window.history.state?.vc === "editor") {
             window.history.back();
           } else {
-            closeEditor();
+            leaveEditor();
           }
         }}
       />
@@ -268,6 +378,22 @@ export function App() {
         onUpdateJob={updateJob}
         onRemoveJob={removeJob}
         onLogout={gate.enabled ? logout : null}
+        tab={missingPairId !== null ? "tasks" : (route.tab ?? undefined)}
+        projectFilter={
+          missingPairId !== null
+            ? PROJECT_ALL
+            : route.tab === null
+              ? undefined
+              : (route.project ?? PROJECT_ALL)
+        }
+        onTabChange={pickTab}
+        onProjectOpen={openProject}
+        onProjectFilterChange={pickProjectFilter}
+        notice={
+          missingPairId !== null
+            ? `Задача «${missingPairId}» не найдена — показан список задач.`
+            : null
+        }
       />
     );
   }
