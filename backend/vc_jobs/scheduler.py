@@ -29,6 +29,7 @@ from .model import (
     RUNNING,
     Job,
     now_iso,
+    parse_iso,
 )
 from .registry import JobRegistry, JobType
 from .store import JobStore
@@ -165,6 +166,9 @@ class Scheduler:
                 self._jobs[job.id] = job
                 self._order += 1
                 self._order_by_id[job.id] = self._order
+            # Восстановление — после загрузки всех записей: провал
+            # предпосылки обязан увидеть зависимые операции.
+            for job in list(self._jobs.values()):
                 self._recover_locked(job)
             self._pump_locked()
             return self
@@ -180,13 +184,46 @@ class Scheduler:
                 }
                 job.finished_at = now_iso()
                 self._save_locked(job)
+                self._fail_dependents_locked(
+                    job.id, code="prerequisite_failed",
+                    message=f"Тип операции не зарегистрирован: {job.type}")
+            return
+        if job.status == INTERRUPTED:
+            # Штатная остановка сервиса пишет ``interrupted`` сама, не
+            # оставляя ``running`` на диске. Возобновляемый тип обязан
+            # встать обратно в очередь, иначе рестарт теряет работу.
+            if job.cancel_requested:
+                # Отмену запросили до остановки — возобновлять нельзя.
+                job.status = CANCELLED
+                job.finished_at = now_iso()
+                self._save_locked(job)
+                self._fail_dependents_locked(
+                    job.id, code="prerequisite_cancelled",
+                    message="Предпосылка отменена")
+            elif job_type.resumable:
+                job.status = QUEUED
+                job.attempt += 1
+                job.started_at = None
+                job.finished_at = None
+                job.heartbeat_at = None
+                job.error = None
+                self._save_locked(job)
+            else:
+                self._fail_dependents_locked(
+                    job.id, code="prerequisite_failed",
+                    message="Предпосылка прервана; запустите заново")
             return
         if job.status != RUNNING:
             return
         if job.cancel_requested:
             job.status = CANCELLED
             job.finished_at = now_iso()
-        elif job_type.resumable:
+            self._save_locked(job)
+            self._fail_dependents_locked(
+                job.id, code="prerequisite_cancelled",
+                message="Предпосылка отменена")
+            return
+        if job_type.resumable:
             job.status = QUEUED
             job.attempt += 1
             job.started_at = None
@@ -201,6 +238,10 @@ class Scheduler:
             }
             job.finished_at = now_iso()
         self._save_locked(job)
+        if job.status == INTERRUPTED:
+            self._fail_dependents_locked(
+                job.id, code="prerequisite_failed",
+                message="Предпосылка прервана перезапуском; запустите заново")
 
     def stop(self) -> None:
         """Останавливает приём работы; текущие операции — ``interrupted``."""
@@ -426,8 +467,12 @@ class Scheduler:
             if status == DONE and result is not None \
                     and result.download_path and job_type is not None \
                     and job_type.retention_days is not None:
-                expires = datetime.now(timezone.utc) + timedelta(
-                    days=float(job_type.retention_days))
+                # Исполнитель может знать точный срок (кэш уже жил до
+                # операции); иначе TTL отсчитывается от завершения.
+                expires = parse_iso(result.extra.get("expires_at"))
+                if expires is None:
+                    expires = datetime.now(timezone.utc) + timedelta(
+                        days=float(job_type.retention_days))
                 job.retention = {"expires_at": expires.isoformat(),
                                  "keep": False}
             self._save_locked(job)
@@ -435,6 +480,18 @@ class Scheduler:
             if status == ERROR and error:
                 summary = error.get("message", "")
             self._record(f"job.{status}", job, summary)
+            current_type = job_type or self.registry.get(job.type)
+            terminal_for_dependents = status in (CANCELLED, ERROR) or (
+                status == INTERRUPTED and current_type is not None
+                and not current_type.resumable)
+            if terminal_for_dependents:
+                code = ("prerequisite_cancelled" if status == CANCELLED
+                        else "prerequisite_failed")
+                message = ("Предпосылка отменена" if status == CANCELLED
+                           else "Предпосылка завершилась ошибкой"
+                           + (f": {summary}" if summary else ""))
+                self._fail_dependents_locked(
+                    job.id, code=code, message=message)
 
     # ─── прогресс ────────────────────────────────────────────────────────
 
@@ -478,19 +535,20 @@ class Scheduler:
             self._pump_locked()
             return job
 
-    def _fail_dependents_locked(self, failed_id: str) -> None:
+    def _fail_dependents_locked(self, failed_id: str, *,
+                                code: str = "prerequisite_cancelled",
+                                message: str = "Предпосылка отменена") -> None:
         for job in list(self._jobs.values()):
             if not job.active or failed_id not in job.depends_on:
                 continue
             job.status = ERROR
-            job.error = {
-                "code": "prerequisite_cancelled",
-                "message": "Предпосылка отменена",
-            }
+            job.error = {"code": code, "message": message}
             job.finished_at = now_iso()
             self._save_locked(job)
             self._record("job.error", job, job.error["message"])
-            self._fail_dependents_locked(job.id)
+            self._fail_dependents_locked(
+                job.id, code="prerequisite_failed",
+                message="Предпосылка завершилась ошибкой")
 
     def retry(self, job_id: str) -> Job:
         with self._lock:
@@ -508,6 +566,16 @@ class Scheduler:
                 attempt=job.attempt + 1,
             ))
             return retried
+
+    def set_retention(self, job_id: str, expires_at: str) -> Job:
+        """Продлевает срок результата (скачивание архива)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            job.retention = {"expires_at": expires_at, "keep": False}
+            self._save_locked(job)
+            return job
 
     # ─── чтение ──────────────────────────────────────────────────────────
 

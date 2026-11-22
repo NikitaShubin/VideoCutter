@@ -118,6 +118,12 @@ class ActivityLogTests(SimpleTestCase):
         with mock.patch("builtins.open", side_effect=OSError("denied")):
             self.assertEqual(self.log.read(), [])
 
+    def test_read_ignores_non_jsonl_files(self):
+        with open(os.path.join(self.root, "notes.txt"), "w") as f:
+            f.write("x")
+
+        self.assertEqual(self.log.read(), [])
+
     def test_prune_removes_only_files_older_than_retention(self):
         old = os.path.join(self.root, "2025-01-01.jsonl")
         fresh = os.path.join(self.root, "2025-04-01.jsonl")

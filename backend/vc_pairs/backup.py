@@ -187,17 +187,22 @@ def _write_manifest(zf: zipfile.ZipFile, manifest: Dict[str, object]) -> None:
 
 
 def _write_task_members(zf: zipfile.ZipFile, ws_path: str,
-                        prefix: str = "") -> None:
+                        prefix: str = "", checkpoint=None) -> None:
     """Кладёт в архив task.json (без экземплярных полей), fragments.tsv и видео.
 
     Паспорт пишем сами: с диска он несёт локальные адреса и даты этого
     экземпляра (project_id, created_at, last_opened_at), а имя пустое — заменяем
     именем папки. Так слепок задачи и слепок её копии содержат одни данные, и
     дата рождения копии проставляется заново валидацией (как в CVAT).
+
+    ``checkpoint`` — необязательная проверка отмены между членами архива:
+    сборка большого бэкапа не должна доводить до конца после отмены.
     """
     for name in (task_meta.TASK_FILE, ws_module.FRAGMENTS_FILE):
         if not os.path.isfile(os.path.join(ws_path, name)):
             continue
+        if checkpoint is not None:
+            checkpoint()
         if name == task_meta.TASK_FILE:
             meta = task_meta.load(ws_path)
             for key in _TASK_PORTABLE_STRIP:
@@ -211,8 +216,61 @@ def _write_task_members(zf: zipfile.ZipFile, ws_path: str,
             zf.write(os.path.join(ws_path, name), prefix + name,
                      compress_type=zipfile.ZIP_DEFLATED)
     for name in video_members(ws_path):
+        if checkpoint is not None:
+            checkpoint()
         zf.write(os.path.join(ws_path, name), prefix + name,
                  compress_type=zipfile.ZIP_STORED)
+
+
+def write_task_archive(zf: zipfile.ZipFile, ws, *, checkpoint=None) -> None:
+    """Пишет полный слепок задачи в открытый zip (без временных файлов)."""
+    # Канонический слепок содержимого: id задачи/проекта не пишем
+    # (назначаются при восстановлении, как в CVAT) — только имена.
+    manifest = fmt.make_manifest(
+        fmt.KIND_BACKUP, resource=fmt.RESOURCE_TASK,
+        name=_task_display(ws.path, os.path.basename(ws.path)),
+        project=_project_display(ws.path),
+        media=media_fingerprint(ws))
+    _write_manifest(zf, manifest)
+    _write_task_members(zf, ws.path, checkpoint=checkpoint)
+
+
+def write_project_archive(zf: zipfile.ZipFile, project_id: str,
+                          *, checkpoint=None) -> None:
+    """Пишет полный слепок проекта в открытый zip.
+
+    Задача, исчезнувшая между снапшотом и сборкой, в манифест не попадает:
+    архив перечисляет только реально записанные папки.
+    """
+    if not project_meta.exists(project_id):
+        raise LookupError(f"Проект '{project_id}' не найден")
+
+    members = sorted(name for name, pid
+                     in project_meta.task_project_ids().items()
+                     if pid == project_id)
+    entries = []
+    for name in members:
+        ws_path = os.path.join(ws_module.WORKSPACE_ROOT, name)
+        if not os.path.isdir(ws_path):
+            continue  # удалили между снапшотом и сборкой
+        if checkpoint is not None:
+            checkpoint()
+        dirname = f"task_{len(entries)}"
+        _write_task_members(zf, ws_path, prefix=f"{dirname}/",
+                            checkpoint=checkpoint)
+        entries.append({"dir": dirname, "name": _task_display(
+            ws_path, name)})
+    pmeta = project_meta.load(project_id) or project_meta.defaults()
+    manifest = fmt.make_manifest(
+        fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
+        name=pmeta.get("name") or project_id, tasks=entries)
+    _write_manifest(zf, manifest)
+    # Паспорт проекта — тоже канонический: без его id и дат.
+    exported = dict(pmeta)
+    for key in ("id", "created_at"):
+        exported.pop(key, None)
+    zf.writestr(project_meta.PROJECT_FILE,
+                json.dumps(exported, ensure_ascii=False, indent=2))
 
 
 # ─── GET: бэкап задачи и проекта ────────────────────────────────────────────
@@ -227,15 +285,7 @@ def workspace_backup(request, workspace_id: str):
     path = make_temp_zip_path()
     try:
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            # Канонический слепок содержимого: id задачи/проекта не пишем
-            # (назначаются при восстановлении, как в CVAT) — только имена.
-            manifest = fmt.make_manifest(
-                fmt.KIND_BACKUP, resource=fmt.RESOURCE_TASK,
-                name=_task_display(ws.path, workspace_id),
-                project=_project_display(ws.path),
-                media=media_fingerprint(ws))
-            _write_manifest(zf, manifest)
-            _write_task_members(zf, ws.path)
+            write_task_archive(zf, ws)
     except OSError as e:
         unlink_quiet(path)
         return _storage_error(e)
@@ -252,36 +302,10 @@ def project_backup(request, project_id: str):
         return JsonResponse(
             {"error": f"Проект '{project_id}' не найден"}, status=404)
 
-    members = sorted(name for name, pid
-                     in project_meta.task_project_ids().items()
-                     if pid == project_id)
-
     path = make_temp_zip_path()
     try:
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            # Слепоки задач — первыми: манифест перечисляет реально
-            # попавшие в архив папки (задача могла уйти между снапшотом
-            # и сборкой).
-            entries = []
-            for name in members:
-                ws_path = os.path.join(ws_module.WORKSPACE_ROOT, name)
-                if not os.path.isdir(ws_path):
-                    continue  # удалили между снапшотом и сборкой
-                dirname = f"task_{len(entries)}"
-                _write_task_members(zf, ws_path, prefix=f"{dirname}/")
-                entries.append({"dir": dirname, "name": _task_display(
-                    ws_path, name)})
-            pmeta = project_meta.load(project_id) or project_meta.defaults()
-            manifest = fmt.make_manifest(
-                fmt.KIND_BACKUP, resource=fmt.RESOURCE_PROJECT,
-                name=pmeta.get("name") or project_id, tasks=entries)
-            _write_manifest(zf, manifest)
-            # Паспорт проекта — тоже канонический: без его id и дат.
-            exported = dict(pmeta)
-            for key in ("id", "created_at"):
-                exported.pop(key, None)
-            zf.writestr(project_meta.PROJECT_FILE,
-                        json.dumps(exported, ensure_ascii=False, indent=2))
+            write_project_archive(zf, project_id)
     except OSError as e:
         unlink_quiet(path)
         return _storage_error(e)
@@ -558,7 +582,10 @@ def _launch_validation(target: str) -> None:
 
 def _import_task(zf: zipfile.ZipFile, names: List[str],
                  manifest: Dict[str, object], on_conflict: str,
-                 project_override: Optional[str]) -> JsonResponse:
+                 project_override: Optional[str],
+                 checkpoint=None) -> Dict[str, object]:
+    if checkpoint is not None:
+        checkpoint()
     target, staging, pid = _stage_task(
         zf, names, manifest, prefix="", on_conflict=on_conflict,
         project_override=project_override)
@@ -569,9 +596,7 @@ def _import_task(zf: zipfile.ZipFile, names: List[str],
         raise
     scan_workspaces()
     _launch_validation(target)
-    return JsonResponse(
-        {"kind": manifest.get("kind"), "id": target, "project_id": pid},
-        status=202)
+    return {"kind": manifest.get("kind"), "id": target, "project_id": pid}
 
 
 def _project_entries(manifest: Dict[str, object],
@@ -631,9 +656,12 @@ def _write_project_json(zf: zipfile.ZipFile, names: List[str], pid: str,
 
 def _import_project(zf: zipfile.ZipFile, names: List[str],
                     manifest: Dict[str, object],
-                    on_conflict: str) -> JsonResponse:
+                    on_conflict: str,
+                    checkpoint=None) -> Dict[str, object]:
     """Восстанавливает проект: контейнер, затем задачи task_i/ (все — в стейджинг
     до создания проекта, чтобы отказ не оставил полуконтейнер)."""
+    if checkpoint is not None:
+        checkpoint()
     flat_videos = [n for n in names
                    if not n.endswith("/") and "/" not in n
                    and os.path.splitext(n)[1].lower() in ws_fs.VIDEO_EXTS]
@@ -653,6 +681,8 @@ def _import_project(zf: zipfile.ZipFile, names: List[str],
     plan: List[Tuple[Dict[str, str], str, str, str, List[str],
                      Optional[str], Optional[str]]] = []
     for entry in _project_entries(manifest, names):
+        if checkpoint is not None:
+            checkpoint()
         base_name = _import_base_name(entry, {})
         raw_name = base_name
         if base_name.startswith("."):
@@ -673,6 +703,8 @@ def _import_project(zf: zipfile.ZipFile, names: List[str],
     staged: List[Tuple[str, str]] = []  # (target, staging)
     try:
         for entry, target, base_name, prefix, videos, passport, tsv in plan:
+            if checkpoint is not None:
+                checkpoint()
             meta = _archived_task_meta(zf, passport)
             meta["project_id"] = pid
             staging = _staging_dir()
@@ -700,10 +732,42 @@ def _import_project(zf: zipfile.ZipFile, names: List[str],
     scan_workspaces()
     for target, _ in staged:
         _launch_validation(target)
-    return JsonResponse(
-        {"kind": manifest.get("kind"), "id": pid,
-         "tasks": [target for target, _ in staged]},
-        status=202)
+    return {"kind": manifest.get("kind"), "id": pid,
+            "tasks": [target for target, _ in staged]}
+
+
+def import_archive(upload, *, on_conflict: str = "rename",
+                   project_override: Optional[str] = None,
+                   checkpoint=None) -> Dict[str, object]:
+    """Применяет архив к установке; общий путь HTTP и фоновой операции.
+
+    ``upload`` — файловый объект (Django UploadedFile или открытый файл).
+    Ошибки — ``_Problem`` с HTTP-статусом: обвязка переводит их в ответ
+    или в текст ошибки операции.
+    """
+    if on_conflict not in ("error", "rename", "overwrite"):
+        raise _Problem(400, "on_conflict: ожидается error | rename | overwrite")
+    if project_override is not None and not project_meta.exists(project_override):
+        raise _Problem(400, f"Проект '{project_override}' не найден")
+    try:
+        zf, names, manifest = fmt.open_archive(upload)
+    except fmt.ArchiveError as e:
+        raise _Problem(400, str(e))
+    try:
+        if manifest.get("kind") == fmt.KIND_BACKUP and (
+                manifest.get("resource") == fmt.RESOURCE_PROJECT
+                or "project.json" in names):
+            if project_override is not None:
+                raise _Problem(
+                    400, "?project не применяется к бэкапу проекта: "
+                         "членство берётся из архива")
+            return _import_project(
+                zf, names, manifest, on_conflict, checkpoint=checkpoint)
+        return _import_task(
+            zf, names, manifest, on_conflict, project_override,
+            checkpoint=checkpoint)
+    finally:
+        zf.close()
 
 
 @require_http_methods(["POST"])
@@ -720,35 +784,13 @@ def backup_import(request):
         return JsonResponse(
             {"error": "Не передан файл архива (поле 'file')"}, status=400)
     on_conflict = request.GET.get("on_conflict", "rename")
-    if on_conflict not in ("error", "rename", "overwrite"):
-        return JsonResponse(
-            {"error": "on_conflict: ожидается error | rename | overwrite"},
-            status=400)
     project_override = request.GET.get("project")
-    if project_override is not None and not project_meta.exists(project_override):
-        return JsonResponse(
-            {"error": f"Проект '{project_override}' не найден"}, status=400)
 
     try:
-        zf, names, manifest = fmt.open_archive(upload)
-    except fmt.ArchiveError as e:
-        return JsonResponse({"error": str(e)}, status=400)
-
-    try:
-        if manifest.get("kind") == fmt.KIND_BACKUP and (
-                manifest.get("resource") == fmt.RESOURCE_PROJECT
-                or "project.json" in names):
-            if project_override is not None:
-                return JsonResponse(
-                    {"error": "?project не применяется к бэкапу проекта: "
-                              "членство берётся из архива"},
-                    status=400)
-            return _import_project(zf, names, manifest, on_conflict)
-        return _import_task(zf, names, manifest, on_conflict,
-                            project_override)
+        result = import_archive(
+            upload, on_conflict=on_conflict, project_override=project_override)
     except _Problem as e:
         return JsonResponse({"error": e.message}, status=e.status)
     except OSError as e:
         return _storage_error(e)
-    finally:
-        zf.close()
+    return JsonResponse(result, status=202)

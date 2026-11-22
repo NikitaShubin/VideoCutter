@@ -12,11 +12,13 @@ import shutil
 import stat
 import threading
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 import vc_jobs
 import vc_fragments.views as export_views
 from vc_jobs.builtin import register_builtin
+from vc_jobs.builtin_export import _JobExportHooks, execute as execute_export
 from vc_jobs.registry import JobRegistry
 from vc_jobs.scheduler import JobSpec, Scheduler
 from vc_jobs.store import JobStore
@@ -122,9 +124,12 @@ class ExportJobTestBase(WorkspaceApiTestBase):
         return self.scheduler.get(job_id)
 
     def run_export(self, exporter=FakeExporter):
-        with mock.patch.object(export_views, "Exporter", exporter):
+        if exporter is None:
             job = self.export()
-            return self.wait_status(job.id, "done")
+        else:
+            with mock.patch.object(export_views, "Exporter", exporter):
+                job = self.export()
+        return self.wait_status(job.id, "done")
 
 
 class ExportJobRegistrationTests(ExportJobTestBase):
@@ -262,3 +267,38 @@ class ExportJobRunTests(ExportJobTestBase):
 
         self.assertEqual(saved.status, "done")
         self.assertEqual(saved.result["files"], job.result["files"])
+
+    def test_repeated_export_reuses_finished_result(self):
+        first = self.run_export()
+
+        with mock.patch.object(export_views, "Exporter",
+                               side_effect=AssertionError("не должен звать")):
+            second = self.run_export(exporter=None)
+
+        self.assertNotEqual(second.id, first.id)
+        self.assertEqual(second.result["files"], first.result["files"])
+        self.assertEqual(second.result["urls"], first.result["urls"])
+
+    def test_job_export_updates_legacy_status(self):
+        job = self.run_export()
+
+        status = self.client.get(self.export_status_url).json()
+
+        self.assertEqual(status["state"], "done")
+        self.assertEqual([item["filename"] for item in status["files"]],
+                         job.result["files"])
+
+    def test_export_requires_task_id(self):
+        job = SimpleNamespace(target={}, params={})
+
+        with self.assertRaises(RuntimeError) as caught:
+            execute_export(job, None)
+
+        self.assertIn("не указан id", str(caught.exception))
+
+    def test_cancelled_final_tolerates_missing_files(self):
+        hooks = _JobExportHooks(None)
+
+        hooks.cancelled_final("ws", ["/no/such/file.mp4"])
+
+        self.assertTrue(hooks.was_cancelled)

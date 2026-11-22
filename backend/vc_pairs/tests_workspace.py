@@ -947,6 +947,25 @@ class ValidateCoverageTests(WorkspaceApiTestBase):
         self.assertIsNotNone(err)
         self.assertIn("места", err)
 
+    def test_validate_storage_error_on_lookup_marks_broken(self):
+        import workspace as ws_module
+        import vc_pairs.views as views
+        real = views.get_workspace
+        calls = []
+
+        def lookup(name):
+            calls.append(name)
+            if len(calls) == 1:
+                raise OSError(errno.ENOSPC, "No space")
+            return real(name)
+
+        with mock.patch.object(views, "get_workspace", side_effect=lookup):
+            views._validate_workspace_async(self.ws_id)
+
+        err = ws_module.workspace_error(self.ws_id)
+        self.assertIsNotNone(err)
+        self.assertIn("места", err)
+
     def test_validate_generic_error_marks_broken(self):
         import workspace as ws_module
         import vc_pairs.views as views

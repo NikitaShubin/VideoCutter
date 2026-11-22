@@ -191,6 +191,31 @@ class CreateTests(JobsApiTestBase):
 
         self.assertEqual(response.status_code, 400)
 
+    def test_missing_type_is_400(self):
+        response = self.post(payload={"target": {"kind": "task", "id": "t"}})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("type", response.json()["error"])
+
+    def test_non_object_target_is_400(self):
+        response = self.post(payload={"type": "test.echo", "target": "task"})
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_bad_depends_on_is_400(self):
+        response = self.post(payload={
+            "type": "test.echo", "target": {"kind": "task", "id": "t"},
+            "depends_on": [1]})
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_non_string_idempotency_key_is_400(self):
+        response = self.post(payload={
+            "type": "test.echo", "target": {"kind": "task", "id": "t"},
+            "idempotency_key": 42})
+
+        self.assertEqual(response.status_code, 400)
+
     def test_body_owner_is_ignored(self):
         job = self.create(owner="root")
 
@@ -267,6 +292,16 @@ class CancelRetryTests(JobsApiTestBase):
         self.assertEqual(
             self.client.post(f"{JOBS}/nope/cancel").status_code, 404)
 
+    def test_cancel_race_after_visibility_is_404(self):
+        job = self.create()
+        self.wait_done(job["id"])
+
+        with mock.patch.object(self.scheduler, "cancel",
+                               side_effect=KeyError(job["id"])):
+            response = self.client.post(f"{JOBS}/{job['id']}/cancel")
+
+        self.assertEqual(response.status_code, 404)
+
     def test_retry_failed_job(self):
         job = self.create()
         self.wait_done(job["id"])
@@ -280,6 +315,16 @@ class CancelRetryTests(JobsApiTestBase):
     def test_retry_unknown_is_404(self):
         self.assertEqual(
             self.client.post(f"{JOBS}/nope/retry").status_code, 404)
+
+    def test_retry_race_after_visibility_is_404(self):
+        job = self.create()
+        self.wait_done(job["id"])
+
+        with mock.patch.object(self.scheduler, "retry",
+                               side_effect=KeyError(job["id"])):
+            response = self.client.post(f"{JOBS}/{job['id']}/retry")
+
+        self.assertEqual(response.status_code, 404)
 
     def test_retry_active_is_409(self):
         job = self.create(type="test.slow",
@@ -347,6 +392,17 @@ class DownloadTests(JobsApiTestBase):
 
         self.assertEqual(self.download(job["id"]).status_code, 410)
 
+    def test_download_stale_cache_entry_is_410(self):
+        job = self.create(type="test.archive",
+                          target={"kind": "task", "id": "t"})
+        self.wait_done(job["id"])
+        self.scheduler.get(job["id"]).result["cache"] = {
+            "namespace": "backup.task", "key": "gone"}
+
+        response = self.download(job["id"])
+
+        self.assertEqual(response.status_code, 410)
+
     def test_download_unknown_is_404(self):
         self.assertEqual(self.download("nope").status_code, 404)
 
@@ -369,6 +425,15 @@ class OwnerTests(JobsApiTestBase):
         self.assertEqual(alice["owner"], "alice")
         self.assertEqual(bob_list["jobs"], [])
         self.assertEqual(bob_detail.status_code, 404)
+
+    def test_proxy_without_user_falls_back_to_local(self):
+        os.environ["VC_TRUST_PROXY"] = "1"
+        self.create(headers={"HTTP_X_VC_USER": "alice"})
+
+        response = self.client.get(JOBS, HTTP_X_VC_ROLES="viewer")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["jobs"]), 1)
 
     def test_admin_sees_all_and_can_filter_owner(self):
         os.environ["VC_TRUST_PROXY"] = "1"

@@ -1450,6 +1450,24 @@ class VerifyCutNoFfprobeCountTests(WorkspaceApiTestBase):
         self.assertFalse(any("-count_frames" in cmd for cmd in seen))
 
 
+class VerifyRawEdgeTests(WorkspaceApiTestBase):
+    def test_truncated_raw_thumb_raises(self):
+        import vc_fragments.views as v
+        path = os.path.join(self.ws_dir, "tiny.raw")
+        with open(path, "wb") as f:
+            f.write(b"x")
+
+        with open(path, "rb") as f:
+            with self.assertRaises(v.FFmpegError):
+                v._read_thumb_at(f, 0, path)
+
+    def test_batch_verify_tolerates_unlink_failure(self):
+        import vc_fragments.views as v
+
+        with mock.patch.object(v.os, "unlink", side_effect=OSError("busy")):
+            v._verify_export_cuts(self.video, [(0, 9, self.video)])
+
+
 class VerifyCutCountTests(WorkspaceApiTestBase):
     """Точный счётчик нарезки берётся из её же декода."""
 

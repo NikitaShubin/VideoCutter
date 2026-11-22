@@ -115,6 +115,13 @@ def workspace_detail(request, workspace_id: str):
         # Прогрев первой GOP к открытию редактора (фон, без ожидания).
         ws = get_workspace(workspace_id)
         if ws is not None:
+            try:
+                from vc_jobs.builtin_system import ensure_task_ready
+
+                ensure_task_ready(workspace_id)
+            except Exception:  # noqa: BLE001 — очередь не блокирует открытие
+                logger.exception(
+                    "Не удалось поставить проверку задачи %s", workspace_id)
             warm_path = ws.visualization or ws.original
             if warm_path:
                 frame_provider.warm_gop(warm_path)

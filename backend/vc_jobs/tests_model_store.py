@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from django.test import SimpleTestCase
 
-from vc_jobs.model import Job, JobValidationError
+from vc_jobs.model import Job, JobValidationError, parse_iso
 from vc_jobs.store import JobStore
 
 
@@ -137,6 +137,12 @@ class JobModelTests(SimpleTestCase):
 
         self.assertTrue(job.heartbeat_at)
 
+    def test_naive_timestamp_is_treated_as_utc(self):
+        parsed = parse_iso("2026-01-01T12:00:00")
+
+        self.assertEqual(parsed.tzinfo, timezone.utc)
+        self.assertEqual(parsed.hour, 12)
+
 
 class JobStoreTests(SimpleTestCase):
     def setUp(self):
@@ -254,6 +260,22 @@ class JobStoreTests(SimpleTestCase):
 
         self.assertEqual(
             [n for n in os.listdir(self.root) if n.endswith(".tmp")], [])
+
+    def test_save_oserror_with_unremovable_tmp_still_raises(self):
+        from unittest import mock
+        job = make_job()
+
+        with mock.patch("vc_jobs.store.os.replace", side_effect=OSError("ro")), \
+                mock.patch("vc_jobs.store.os.unlink", side_effect=OSError("ro")):
+            with self.assertRaises(OSError):
+                self.store.save(job)
+
+    def test_save_rejects_invalid_id(self):
+        with self.assertRaises(ValueError):
+            self.store.save(make_job(id="../escape"))
+
+    def test_delete_invalid_id_is_noop(self):
+        self.store.delete("../escape")
 
     def test_all_ignores_non_json_and_directories(self):
         os.makedirs(os.path.join(self.root, "subdir"))

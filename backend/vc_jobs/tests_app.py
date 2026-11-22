@@ -4,10 +4,12 @@
 Прогон: cd backend && python manage.py test vc_jobs.tests_app
 """
 
+import os
 from unittest import mock
 
 from django.test import SimpleTestCase
 
+import vc_jobs
 from vc_jobs.apps import VcJobsConfig, should_autostart
 
 
@@ -88,3 +90,22 @@ class ReadyTests(SimpleTestCase):
                            return_value=True):
             with self.assertLogs("vc_jobs.apps", level="ERROR"):
                 VcJobsConfig("vc_jobs", __import__("vc_jobs")).ready()
+
+
+class SchedulerSingletonTests(SimpleTestCase):
+    def setUp(self):
+        self.old = vc_jobs.peek_scheduler()
+        vc_jobs.set_scheduler(None)
+        self.addCleanup(vc_jobs.set_scheduler, self.old)
+
+    def test_get_scheduler_builds_lazily_from_state_root(self):
+        sentinel = object()
+        with mock.patch("vc_jobs.scheduler.build_scheduler",
+                        return_value=sentinel) as build, \
+                mock.patch.dict(os.environ,
+                                {"VC_STATE_ROOT": "/tmp/vc-state"}):
+            scheduler = vc_jobs.get_scheduler()
+
+        self.assertIs(scheduler, sentinel)
+        build.assert_called_once_with("/tmp/vc-state")
+        self.assertIs(vc_jobs.peek_scheduler(), sentinel)

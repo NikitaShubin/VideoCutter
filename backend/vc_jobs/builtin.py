@@ -12,6 +12,11 @@ from .registry import JobRegistry
 
 def register_builtin(registry: JobRegistry) -> None:
     """Точка расширения: здесь регистрируются типы VideoCutter."""
-    from . import builtin_export
+    from . import (builtin_archive, builtin_export, builtin_import,
+                   builtin_system)
 
-    builtin_export.register(registry)
+    builtin_export.register(
+        registry, prerequisites=builtin_system.validation_prerequisites)
+    builtin_archive.register(registry)
+    builtin_import.register(registry)
+    builtin_system.register(registry)

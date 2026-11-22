@@ -46,6 +46,14 @@ class EnsureAccessTests(ExportAccessTestBase):
         self.assertEqual(self._mode(self.out), 0o755)
         self.assertEqual(self._mode(self.ws) & stat.S_IROTH, 0)
 
+    def test_regular_file_ancestor_is_skipped(self):
+        plain = self._write(os.path.join(self.root, "plain.txt"))
+
+        problems = export_access.ensure_ancestors(
+            os.path.join(plain, "task"), root=self.root)
+
+        self.assertEqual(problems, [])
+
     def test_keeps_existing_world_read_bits(self):
         """Права других не сужаются: 0755 остаётся 0755, 0750 → 0751."""
         os.chmod(self.root, 0o755)
@@ -121,6 +129,16 @@ class RepairExportsTests(ExportAccessTestBase):
 
         export_access.repair_exports(self.root)
 
+        self.assertEqual(self._mode(partial), 0o600)
+
+    def test_ensure_file_never_publishes_partial_file(self):
+        partial = self._write(
+            os.path.join(self.out, ".video_fragment_1.mp4"))
+        os.chmod(partial, 0o600)
+
+        problems = export_access.ensure_file(partial)
+
+        self.assertEqual(problems, [])
         self.assertEqual(self._mode(partial), 0o600)
 
     def test_preserves_foreign_files(self):

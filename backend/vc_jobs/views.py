@@ -93,12 +93,7 @@ def jobs_collection(request):
             )
         except ValueError as exc:
             return _error(str(exc))
-        owner, _roles, restricted = identity
         visible = [j for j in jobs if _visible(j, identity)]
-        if restricted:
-            # Чужой фильтр по владельцу не должен раскрывать чужое.
-            if owner and any(j.owner != owner for j in visible):
-                visible = [j for j in visible if j.owner == owner]
         return JsonResponse({
             "jobs": [_serialize(j) for j in visible],
             "next": cursor,
@@ -203,12 +198,44 @@ def job_download(request, job_id: str):
     expires = parse_iso((job.retention or {}).get("expires_at"))
     if expires is not None and expires < datetime.now(timezone.utc):
         return _error("результат истёк, запустите операцию заново", 410)
+    cache_info = result.get("cache")
+    if isinstance(cache_info, dict):
+        job_type = scheduler.registry.get(job.type)
+        ttl_days = job_type.retention_days if job_type else None
+        if ttl_days is not None:
+            from .archive_cache import ArchiveCache
+
+            cache = ArchiveCache(os.path.join(
+                vc_jobs.state_root(), "archives"))
+            entry = cache.touch(
+                str(cache_info.get("namespace")),
+                str(cache_info.get("key")), float(ttl_days))
+            if entry is None:
+                return _error("результат истёк, запустите операцию заново",
+                              410)
+            scheduler.set_retention(job.id, entry.expires_at)
+            path = entry.archive_path
     if not _allowed_download(path):
         return _error("путь результата вне разрешённых каталогов", 403)
     if not os.path.isfile(path):
         return _error("файл результата не найден", 404)
     name = os.path.basename(result.get("download_name") or path)
     return FileResponse(open(path, "rb"), as_attachment=True, filename=name)
+
+
+@require_http_methods(["POST"])
+def jobs_upload(request):
+    """Принимает архив для фонового импорта; возвращает upload_id."""
+    from . import uploads
+
+    upload = request.FILES.get("file")
+    if upload is None:
+        return _error("Не передан файл архива (поле 'file')")
+    try:
+        body = uploads.save(upload)
+    except ValueError as exc:
+        return _error(str(exc))
+    return JsonResponse(body, status=201)
 
 
 @require_http_methods(["GET"])

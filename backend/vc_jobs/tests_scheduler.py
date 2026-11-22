@@ -4,11 +4,14 @@
 Прогон: cd backend && python manage.py test vc_jobs.tests_scheduler
 """
 
+import base64
+import os
 import shutil
 import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from django.test import SimpleTestCase
 
@@ -19,9 +22,13 @@ from vc_jobs.scheduler import (
     JobConflict,
     JobCycleError,
     JobInterrupted,
+    JobResult,
     JobSpec,
     LaneCapacity,
     Scheduler,
+    _env_int,
+    build_scheduler,
+    default_lane_capacities,
 )
 from vc_jobs.store import JobStore
 
@@ -83,6 +90,14 @@ class RegistryTests(SimpleTestCase):
     def test_executor_must_be_callable(self):
         with self.assertRaises(ValueError):
             self._type(executor=None)
+
+    def test_empty_key_rejected(self):
+        with self.assertRaises(ValueError):
+            self._type(key="")
+
+    def test_prerequisites_must_be_callable(self):
+        with self.assertRaises(ValueError):
+            self._type(prerequisites="not-callable")
 
     def test_manifest_is_json_ready_and_has_no_executor(self):
         reg = JobRegistry()
@@ -203,6 +218,25 @@ class SubmitTests(SchedulerTestBase):
         with self.assertRaises(ValueError):
             self.submit(s, target={"kind": "task"})
 
+    def test_start_is_idempotent(self):
+        self.make()
+        s = self.scheduler()
+
+        self.assertIs(s.start(), s)
+        self.assertEqual(s.summary()["queued"] + s.summary()["done"], 0)
+
+    def test_get_starts_scheduler_lazily(self):
+        self.make()
+        s = Scheduler(self.store, self.reg,
+                      lane_capacities={"export": 1, "archive": 1,
+                                       "import": 1, "system": 1},
+                      max_workers=1, progress_interval=0.0)
+        self.schedulers.append(s)
+
+        self.assertIsNone(s.get("missing"))
+        job, _ = self.submit(s)
+        self.assertTrue(wait_until(lambda: s.get(job.id).status == "done"))
+
 
 class ExecutionTests(SchedulerTestBase):
     def test_progress_is_visible_and_persisted(self):
@@ -242,6 +276,56 @@ class ExecutionTests(SchedulerTestBase):
         self.assertTrue(wait_until(lambda: s.get(job.id).status == "error"))
         self.assertEqual(s.get(job.id).error["message"], "диск кончился")
         self.assertEqual(s.get(job.id).error["code"], "executor_error")
+
+    def test_unregistered_type_at_execution_becomes_error(self):
+        self.make()
+        s = self.scheduler()
+        real_get = self.reg.get
+        calls = []
+
+        def get(key):
+            calls.append(key)
+            return real_get(key) if len(calls) == 1 else None
+
+        with mock.patch.object(self.reg, "get", side_effect=get):
+            job, _ = self.submit(s)
+            self.assertTrue(wait_until(
+                lambda: s.get(job.id).status == "error"))
+
+        self.assertIn("тип не зарегистрирован",
+                      s.get(job.id).error["message"])
+
+    def test_scalar_result_is_normalized_to_summary(self):
+        self.make(executor=lambda job, ctx: 42)
+        s = self.scheduler()
+
+        job, _ = self.submit(s)
+
+        self.assertTrue(wait_until(lambda: s.get(job.id).status == "done"))
+        self.assertEqual(s.get(job.id).result["summary"], "42")
+
+    def test_progress_for_unknown_job_is_ignored(self):
+        self.make()
+        s = self.scheduler()
+        job = Job(id="gone", type="test.echo", lane="export",
+                  status="queued", dedupe_key="k", owner="local",
+                  target={"kind": "task", "id": "t1"})
+
+        s.progress(job, 1, 2)
+
+        self.assertIsNone(s.get("gone"))
+
+    def test_interrupted_status_is_sticky(self):
+        self.make()
+        s = self.scheduler()
+        job, _ = self.submit(s)
+        self.assertTrue(wait_until(lambda: s.get(job.id).status == "done"))
+        job.status = "interrupted"
+
+        s._finish(job, "done", result=JobResult(summary="поздно"),
+                  job_type=self.reg.get("test.echo"))
+
+        self.assertEqual(job.status, "interrupted")
 
     def test_start_sets_timestamps(self):
         gate = Gate()
@@ -415,6 +499,18 @@ class ResumeTests(SchedulerTestBase):
         data.update(kw)
         return Job(**data)
 
+    def _dependent(self, prereq_id, **kw):
+        data = dict(
+            id="b" * 36, type="test.echo", lane="export", status="queued",
+            dedupe_key="dep", owner="local",
+            target={"kind": "task", "id": "t2"},
+            depends_on=[prereq_id],
+            created_at=(datetime.now(timezone.utc)
+                        - timedelta(minutes=4)).isoformat(),
+        )
+        data.update(kw)
+        return Job(**data)
+
     def test_running_resumable_becomes_queued_with_new_attempt(self):
         done = threading.Event()
         self.make(executor=lambda job, ctx: done.set())
@@ -453,6 +549,110 @@ class ResumeTests(SchedulerTestBase):
         self.assertTrue(done.wait(3))
         self.assertEqual(s.get("a" * 36).status, "done")
 
+    def test_unknown_type_from_disk_becomes_error(self):
+        self.store.save(self._stored(type="ghost.type", status="queued"))
+
+        s = self.scheduler()
+
+        job = s.get("a" * 36)
+        self.assertEqual(job.status, "error")
+        self.assertEqual(job.error["code"], "unknown_type")
+        self.assertEqual(self.store.get("a" * 36).status, "error")
+
+    def test_restart_of_unknown_prerequisite_fails_dependent(self):
+        self.store.save(self._stored(type="ghost.type", status="queued"))
+        self.store.save(self._dependent("a" * 36))
+
+        s = self.scheduler()
+
+        dependent = s.get("b" * 36)
+        self.assertEqual(dependent.status, "error")
+        self.assertEqual(dependent.error["code"], "prerequisite_failed")
+
+    def test_restart_of_cancelled_prerequisite_fails_dependent(self):
+        self.make()
+        self.store.save(self._stored(cancel_requested=True))
+        self.store.save(self._dependent("a" * 36))
+
+        s = self.scheduler()
+
+        dependent = s.get("b" * 36)
+        self.assertEqual(dependent.status, "error")
+        self.assertEqual(dependent.error["code"],
+                         "prerequisite_cancelled")
+
+    def test_restart_of_interrupted_non_resumable_fails_dependent(self):
+        self.make(resumable=False)
+        self.store.save(self._stored())
+        self.store.save(self._dependent("a" * 36))
+
+        s = self.scheduler()
+
+        dependent = s.get("b" * 36)
+        self.assertEqual(dependent.status, "error")
+        self.assertEqual(dependent.error["code"], "prerequisite_failed")
+
+    def test_restart_of_stopped_resumable_requeues(self):
+        done = threading.Event()
+        self.make(executor=lambda job, ctx: done.set())
+        self.store.save(self._stored(status="interrupted", attempt=2))
+
+        s = self.scheduler()
+
+        self.assertTrue(done.wait(3))
+        job = s.get("a" * 36)
+        self.assertEqual(job.status, "done")
+        self.assertEqual(job.attempt, 3)
+
+    def test_restart_does_not_resume_job_cancelled_before_stop(self):
+        calls = []
+        self.make(executor=lambda job, ctx: calls.append(job.id))
+        self.store.save(self._stored(
+            status="interrupted", cancel_requested=True))
+
+        s = self.scheduler()
+
+        self.assertEqual(s.get("a" * 36).status, "cancelled")
+        self.assertEqual(calls, [])
+
+    def test_restart_of_cancelled_interrupted_fails_dependent(self):
+        self.make()
+        self.store.save(self._stored(
+            status="interrupted", cancel_requested=True))
+        self.store.save(self._dependent("a" * 36))
+
+        s = self.scheduler()
+
+        dependent = s.get("b" * 36)
+        self.assertEqual(dependent.status, "error")
+        self.assertEqual(dependent.error["code"],
+                         "prerequisite_cancelled")
+
+    def test_restart_of_stopped_non_resumable_fails_dependent(self):
+        self.make(resumable=False)
+        self.store.save(self._stored(status="interrupted"))
+        self.store.save(self._dependent("a" * 36))
+
+        s = self.scheduler()
+
+        dependent = s.get("b" * 36)
+        self.assertEqual(dependent.status, "error")
+        self.assertEqual(dependent.error["code"], "prerequisite_failed")
+
+    def test_restart_of_resumable_keeps_dependent_queued(self):
+        gate = Gate()
+        self.make(executor=gate)
+        self.store.save(self._stored())
+        self.store.save(self._dependent("a" * 36))
+
+        s = self.scheduler()
+        self.assertTrue(gate.started.wait(2))
+
+        self.assertEqual(s.get("b" * 36).status, "queued")
+        gate.release.set()
+        self.assertTrue(wait_until(
+            lambda: s.get("b" * 36).status == "done"))
+
 
 class DependencyTests(SchedulerTestBase):
     def test_job_waits_for_local_dependency(self):
@@ -481,6 +681,25 @@ class DependencyTests(SchedulerTestBase):
         time.sleep(0.1)
 
         self.assertEqual(s.get(job.id).status, "queued")
+
+    def test_failed_prerequisite_fails_dependent(self):
+        def boom(job, ctx):
+            raise RuntimeError("сломалось")
+        self.make(key="parent", lane="system", executor=boom)
+        self.make(key="child", lane="export",
+                  executor=lambda j, c: None)
+        s = self.scheduler()
+        parent, _ = self.submit(s, type="parent",
+                                target={"kind": "task", "id": "t1"})
+        child, _ = self.submit(s, type="child",
+                               target={"kind": "task", "id": "t1"},
+                               depends_on=[parent.id])
+
+        self.assertTrue(wait_until(lambda: s.get(child.id).status == "error"))
+
+        self.assertEqual(s.get(child.id).error["code"],
+                         "prerequisite_failed")
+        self.assertIn("сломалось", s.get(child.id).error["message"])
 
     def test_prerequisite_is_materialized_and_ordered(self):
         gate = Gate()
@@ -521,6 +740,37 @@ class DependencyTests(SchedulerTestBase):
         with self.assertRaises(JobCycleError):
             self.submit(s, type="a")
 
+    def test_too_deep_prerequisite_chain_rejected(self):
+        def next_type(key):
+            return lambda spec: [JobSpec(type=key, target=spec.target,
+                                         owner=spec.owner)]
+        self.make(key="a", prerequisites=next_type("b"))
+        self.make(key="b", prerequisites=next_type("c"))
+        self.make(key="c", prerequisites=next_type("d"))
+        self.make(key="d", prerequisites=next_type("e"))
+        self.make(key="e")
+        s = self.scheduler()
+
+        with self.assertRaises(JobCycleError) as caught:
+            self.submit(s, type="a")
+
+        self.assertIn("глубокая", str(caught.exception))
+
+    def test_prerequisite_must_return_job_spec(self):
+        self.make(key="child", prerequisites=lambda spec: ["not-a-spec"])
+        s = self.scheduler()
+
+        with self.assertRaises(ValueError):
+            self.submit(s, type="child")
+
+    def test_unknown_prerequisite_type_rejected(self):
+        self.make(key="child", prerequisites=lambda spec: [
+            JobSpec(type="ghost", target=spec.target, owner=spec.owner)])
+        s = self.scheduler()
+
+        with self.assertRaises(KeyError):
+            self.submit(s, type="child")
+
 
 class StopTests(SchedulerTestBase):
     def test_stop_marks_running_interrupted(self):
@@ -553,6 +803,22 @@ class StopTests(SchedulerTestBase):
         self.assertTrue(started.wait(2))
         self.assertTrue(wait_until(
             lambda: s.get(job.id).status == "interrupted"))
+
+    def test_interrupt_of_non_resumable_fails_dependent(self):
+        self.make(key="parent", resumable=False,
+                  executor=lambda job, ctx: (_ for _ in ()).throw(
+                      JobInterrupted()))
+        self.make(key="child")
+        s = self.scheduler()
+        parent, _ = self.submit(
+            s, type="parent", target={"kind": "task", "id": "t1"})
+        child, _ = self.submit(
+            s, type="child", target={"kind": "task", "id": "t2"},
+            depends_on=[parent.id])
+
+        self.assertTrue(wait_until(lambda: s.get(child.id).status == "error"))
+        self.assertEqual(s.get(child.id).error["code"],
+                         "prerequisite_failed")
 
 
 class ListSummaryTests(SchedulerTestBase):
@@ -620,3 +886,103 @@ class ListSummaryTests(SchedulerTestBase):
         with self.assertRaises(JobConflict):
             s.retry(job.id)
         gate.release.set()
+
+    def test_retry_unknown_is_not_found(self):
+        self.make()
+        s = self.scheduler()
+
+        with self.assertRaises(KeyError):
+            s.retry("missing")
+
+    def test_set_retention_unknown_is_not_found(self):
+        self.make()
+        s = self.scheduler()
+
+        with self.assertRaises(KeyError):
+            s.set_retention("missing", "2030-01-01T00:00:00+00:00")
+
+    def test_bad_cursor_rejected(self):
+        self.make()
+        s = self.scheduler()
+
+        with self.assertRaises(ValueError) as caught:
+            s.list(cursor="%%%")
+
+        self.assertIn("курсор", str(caught.exception))
+
+    def test_non_utf8_cursor_rejected(self):
+        self.make()
+        s = self.scheduler()
+        cursor = base64.urlsafe_b64encode(b"\xff").decode("ascii")
+
+        with self.assertRaises(ValueError) as caught:
+            s.list(cursor=cursor)
+
+        self.assertIn("курсор", str(caught.exception))
+
+    def test_list_filters_by_type_status_and_project(self):
+        gate = Gate()
+        self.make(executor=gate)
+        s = self.scheduler()
+        running, _ = self.submit(
+            s, target={"kind": "task", "id": "t1", "project_id": "p1"})
+        self.assertTrue(gate.started.wait(2))
+        queued, _ = self.submit(
+            s, target={"kind": "task", "id": "t2", "project_id": "p2"})
+
+        s.cancel(running.id)
+        cancelling, _ = s.list(status="cancelling")
+        by_type, _ = s.list(type="test.echo")
+        by_project, _ = s.list(project_id="p2")
+        gate.release.set()
+
+        self.assertEqual([job.id for job in cancelling], [running.id])
+        self.assertEqual({job.id for job in by_type},
+                         {running.id, queued.id})
+        self.assertEqual([job.id for job in by_project], [queued.id])
+
+    def test_activity_failure_does_not_break_job(self):
+        activity = mock.Mock()
+        activity.append.side_effect = OSError("журнал недоступен")
+        self.make()
+        s = self.scheduler(activity=activity)
+
+        job, _ = self.submit(s)
+
+        self.assertTrue(wait_until(lambda: s.get(job.id).status == "done"))
+
+
+class ConfigTests(SimpleTestCase):
+    def test_env_int_parses_and_falls_back(self):
+        with mock.patch.dict(os.environ, {"VC_TEST_INT": "5"}):
+            self.assertEqual(_env_int("VC_TEST_INT", 1), 5)
+        with mock.patch.dict(os.environ, {"VC_TEST_INT": ""}):
+            self.assertEqual(_env_int("VC_TEST_INT", 1), 1)
+        with mock.patch.dict(os.environ, {"VC_TEST_INT": "abc"}):
+            self.assertEqual(_env_int("VC_TEST_INT", 1), 1)
+        with mock.patch.dict(os.environ, {"VC_TEST_INT": "0"}):
+            self.assertEqual(_env_int("VC_TEST_INT", 1), 1)
+
+    def test_default_lane_capacities_read_env(self):
+        with mock.patch("vc_jobs.scheduler.os.cpu_count", return_value=8), \
+                mock.patch.dict(os.environ, {
+                    "VC_EXPORT_WORKERS": "3",
+                    "VC_ARCHIVE_WORKERS": "2",
+                    "VC_IMPORT_WORKERS": "5",
+                    "VC_INDEX_BG_THREADS": "4",
+                }):
+            caps = default_lane_capacities()
+
+        self.assertEqual(caps, {"export": 3, "archive": 2,
+                                "import": 5, "system": 4})
+
+    def test_build_scheduler_registers_builtin_types(self):
+        root = tempfile.mkdtemp(prefix="vcbuild_")
+        self.addCleanup(shutil.rmtree, root, True)
+
+        scheduler = build_scheduler(root)
+        self.addCleanup(scheduler.stop)
+
+        self.assertIsNotNone(scheduler.registry.get("export.fragments"))
+        self.assertIsNotNone(scheduler.registry.get("backup.task"))
+        self.assertIsNotNone(scheduler.activity)

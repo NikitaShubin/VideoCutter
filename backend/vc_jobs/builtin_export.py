@@ -35,24 +35,32 @@ class _JobExportHooks:
         return self.ctx.cancelled()
 
     def finished(self, ws_id: str, files, task_hash) -> None:
+        # Sidecar и состояние LEDGER — общий контракт с прежним экспортом:
+        # следующий запрос увидит готовый результат и не будет резать заново.
+        from vc_fragments import views as export_views
+
         self.files = list(files)
         self.task_hash = task_hash
+        export_views._export_finished_ok(ws_id, self.files, task_hash)
 
     def failed(self, ws_id: str, message: str) -> None:
+        from vc_fragments import views as export_views
+
         self.error = message
+        export_views._export_failed(ws_id, message)
 
     def cancelled_final(self, ws_id: str, created) -> None:
         # Пользователь просил отмену — частичные файлы этого запуска
         # удаляем, опубликованные не трогаем.
+        from vc_fragments import views as export_views
+
         self.was_cancelled = True
-        for path in created:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        export_views._export_cancelled(ws_id, created)
 
     def clear(self, ws_id: str) -> None:
-        return None
+        from vc_fragments import views as export_views
+
+        export_views.LEDGER.clear_cancel(ws_id)
 
 
 def _already_done(ws_id: str):
@@ -124,7 +132,7 @@ def execute(job, ctx) -> JobResult:
     )
 
 
-def register(registry: JobRegistry) -> None:
+def register(registry: JobRegistry, *, prerequisites=None) -> None:
     registry.register(JobType(
         key=EXPORT_TYPE,
         lane="export",
@@ -134,6 +142,7 @@ def register(registry: JobRegistry) -> None:
         cancellable=True,
         resumable=True,
         retention_days=None,
+        prerequisites=prerequisites,
         params_schema={
             "force": {
                 "type": "boolean",
