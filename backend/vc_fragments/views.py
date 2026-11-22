@@ -17,6 +17,7 @@ from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods
 
 import export_access
+from export_guard import START_LOCK
 from export_ledger import LEDGER
 from videocutter.core.exporter import (
     Exporter,
@@ -469,23 +470,57 @@ def _remove_created_since(out_dir: str, before: set) -> None:
             pass
 
 
-def _run_export(ws_id: str) -> None:
-    """Выполняет нарезку фрагментов в фоне."""
+class _LedgerHooks:
+    """Прежнее поведение: состояние экспорта живёт в ExportLedger."""
+
+    def progress(self, ws_id: str, index: int, total: int) -> bool:
+        return LEDGER.progress(ws_id, index, total)
+
+    def cancelled(self, ws_id: str) -> bool:
+        return LEDGER.cancelled(ws_id)
+
+    def finished(self, ws_id: str, files: list[str], task_hash) -> None:
+        _export_finished_ok(ws_id, files, task_hash)
+
+    def failed(self, ws_id: str, message: str) -> None:
+        _export_failed(ws_id, message)
+
+    def cancelled_final(self, ws_id: str, created: list[str]) -> None:
+        _export_cancelled(ws_id, created)
+
+    def clear(self, ws_id: str) -> None:
+        LEDGER.clear_cancel(ws_id)
+
+
+_LEDGER_HOOKS = _LedgerHooks()
+
+
+def _run_export(ws_id: str, hooks=None) -> None:
+    """Выполняет нарезку фрагментов в фоне.
+
+    ``hooks`` — точка подмены: планировщик фоновых операций передаёт свои
+    прогресс/отмену/результат, а не пишет в ExportLedger. По умолчанию
+    поведение прежнее: состояние ведёт ExportLedger.
+    """
+    hooks = hooks or _LEDGER_HOOKS
     out_dir = ""
     before = set()
     try:
         ws = get_workspace(ws_id)
         if ws is None:
-            _export_failed(ws_id, f"Workspace '{ws_id}' не найден")
+            hooks.failed(ws_id, f"Workspace '{ws_id}' не найден")
             return
 
         frags = ws.load_fragments()
         if not frags:
-            _export_failed(ws_id, "Нет фрагментов для экспорта")
+            hooks.failed(ws_id, "Нет фрагментов для экспорта")
             return
 
         out_dir = os.path.join(ws.path, "exports")
-        export_access.ensure_access(ws.path, root=workspace.WORKSPACE_ROOT)
+        export_access.ensure_access(
+            ws.path,
+            root=os.environ.get("VC_ACCESS_ANCHOR")
+            or workspace.WORKSPACE_ROOT)
         before = set(os.listdir(out_dir))
 
         exporter = Exporter(ws.original, out_dir, nice=EXPORT_NICE)
@@ -515,11 +550,11 @@ def _run_export(ws_id: str) -> None:
                         f"[0, {len(vpts)})")
             frame_ts_ranges = None
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
-            if not LEDGER.progress(ws_id, fragment_ind, total):
+            if not hooks.progress(ws_id, fragment_ind, total):
                 raise _ExportCancelled()
 
         def cancelled() -> bool:
-            return LEDGER.cancelled(ws_id)
+            return hooks.cancelled(ws_id)
 
         created = exporter.extract_fragments(
             fragments, progress=progress, cancelled=cancelled,
@@ -531,7 +566,7 @@ def _run_export(ws_id: str) -> None:
         vid = _video_identity(ws.original)
         task_hash = _task_hash(frags, vid["size"], vid["mtime_ns"]) \
             if vid is not None else None
-        _export_finished_ok(ws_id, published, task_hash)
+        hooks.finished(ws_id, published, task_hash)
     except (_ExportCancelled, ExportCancelled):
         # Файлы, появившиеся за этот запуск (готовые фрагменты валидны,
         # но пользователь просил зачистку) — удаляем по снапшоту каталога.
@@ -540,18 +575,18 @@ def _run_export(ws_id: str) -> None:
         except OSError:
             after = set()
         created_now = [os.path.join(out_dir, name) for name in after - before]
-        _export_cancelled(ws_id, created_now)
+        hooks.cancelled_final(ws_id, created_now)
     except FFmpegError as e:
         # Проваленный прогон не оставляет мусора: чистим созданное сейчас
         # (как при отмене), чтобы следующий запуск начинался с чистого поля.
         _remove_created_since(out_dir, before)
-        _export_failed(ws_id, str(e))
+        hooks.failed(ws_id, str(e))
     except Exception as e:
         # Любой сбой (не только FFmpegError) обязан зачистить частичные файлы.
         _remove_created_since(out_dir, before)
-        _export_failed(ws_id, str(e))
+        hooks.failed(ws_id, str(e))
     finally:
-        LEDGER.clear_cancel(ws_id)
+        hooks.clear(ws_id)
 
 
 @require_http_methods(["GET", "PUT"])
@@ -712,6 +747,19 @@ def pair_settings(request, pair_id: str):
     return JsonResponse({"quality": quality, "scale": scale})
 
 
+def _active_export_job(pair_id: str):
+    """Активная фоновая операция экспорта этой задачи (None — нет).
+
+    Импорт ленивый: ``vc_jobs`` — обвязка, и старый путь экспорта не должен
+    зависеть от её инициализации при импорте модуля.
+    """
+    import vc_jobs
+    from vc_jobs.builtin_export import EXPORT_TYPE
+
+    jobs = vc_jobs.active_jobs(type=EXPORT_TYPE, target=f"task:{pair_id}")
+    return jobs[0] if jobs else None
+
+
 @require_http_methods(["POST", "DELETE"])
 def fragment_export(request, pair_id: str):
     """POST — запуск нарезки; DELETE — корзина: удалить все наши нарезки.
@@ -732,15 +780,23 @@ def fragment_export(request, pair_id: str):
         return JsonResponse({"error": f"Workspace '{pair_id}' не найден"}, status=404)
 
     if request.method == "DELETE":
-        current = LEDGER.snapshot(pair_id)
-        if current and current["state"] in ("running", "queued"):
-            return JsonResponse(
-                {"error": "Экспорт уже выполняется/ожидает для этого workspace "
-                          "(state: %s)" % current["state"]},
-                status=409,
-            )
-        LEDGER.purge_outputs(ws, remove=os.remove)
-        LEDGER.forget(pair_id)
+        with START_LOCK:
+            active = _active_export_job(pair_id)
+            if active is not None:
+                return JsonResponse(
+                    {"error": "Экспорт уже выполняется фоновой операцией "
+                              f"{active.id} (state: {active.status})"},
+                    status=409,
+                )
+            current = LEDGER.snapshot(pair_id)
+            if current and current["state"] in ("running", "queued"):
+                return JsonResponse(
+                    {"error": "Экспорт уже выполняется/ожидает для этого workspace "
+                              "(state: %s)" % current["state"]},
+                    status=409,
+                )
+            LEDGER.purge_outputs(ws, remove=os.remove)
+            LEDGER.forget(pair_id)
         return JsonResponse({"state": "idle"})
 
     frags = ws.load_fragments()
@@ -748,34 +804,42 @@ def fragment_export(request, pair_id: str):
         return JsonResponse({"error": "Нет фрагментов для экспорта"}, status=400)
 
     force = request.GET.get("force") == "1"
-    current = LEDGER.snapshot(pair_id)
-    if current and current["state"] in ("running", "queued"):
-        if not force:
+    with START_LOCK:
+        active = _active_export_job(pair_id)
+        if active is not None:
             return JsonResponse(
-                {"error": "Экспорт уже выполняется/ожидает для этого "
-                          "workspace (state: %s)" % current["state"]},
+                {"error": "Экспорт уже выполняется фоновой операцией "
+                          f"{active.id} (state: {active.status})"},
                 status=409,
             )
-        # Force поверх активной заявки: бегущей — cancel, queued —
-        # из очереди; ниже встанет свежая (сериализация на workspace:
-        # два потока один ws никогда не режут параллельно).
-        if current["state"] == "running":
-            LEDGER.request_cancel(pair_id)
-        else:
-            LEDGER.forget(pair_id)
+        current = LEDGER.snapshot(pair_id)
+        if current and current["state"] in ("running", "queued"):
+            if not force:
+                return JsonResponse(
+                    {"error": "Экспорт уже выполняется/ожидает для этого "
+                              "workspace (state: %s)" % current["state"]},
+                    status=409,
+                )
+            # Force поверх активной заявки: бегущей — cancel, queued —
+            # из очереди; ниже встанет свежая (сериализация на workspace:
+            # два потока один ws никогда не режут параллельно).
+            if current["state"] == "running":
+                LEDGER.request_cancel(pair_id)
+            else:
+                LEDGER.forget(pair_id)
 
-    if not force:
-        done = _current_done(pair_id)
-        if done is not None:
-            return JsonResponse(done)
+        if not force:
+            done = _current_done(pair_id)
+            if done is not None:
+                return JsonResponse(done)
 
-    # Несоответствие — сносим прежние наши нарезки и запускаем новое.
-    _drop_previous_outputs(ws)
+        # Несоответствие — сносим прежние наши нарезки и запускаем новое.
+        _drop_previous_outputs(ws)
 
-    body = LEDGER.submit(pair_id, len(frags), _export_capacity())
-    if body["state"] == "running":
-        _spawn_export(pair_id)
-    return JsonResponse(body)
+        body = LEDGER.submit(pair_id, len(frags), _export_capacity())
+        if body["state"] == "running":
+            _spawn_export(pair_id)
+        return JsonResponse(body)
 
 
 @require_http_methods(["POST"])
@@ -872,4 +936,11 @@ def fragment_export_download(request, pair_id: str, path: str):
     full = os.path.abspath(os.path.join(base, path))
     if not full.startswith(os.path.abspath(base)) or not os.path.isfile(full):
         return JsonResponse({"error": "Файл не найден"}, status=404)
+    # Старые нарезки могли появиться до исправления прав: чиним при выдаче,
+    # а не только в момент экспорта. Диагностика — в GET /api/v1/cache.
+    export_access.ensure_access(
+        ws.path,
+        root=os.environ.get("VC_ACCESS_ANCHOR")
+        or workspace.WORKSPACE_ROOT)
+    export_access.ensure_file(full)
     return FileResponse(open(full, "rb"), as_attachment=True, filename=os.path.basename(full))

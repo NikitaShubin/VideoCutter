@@ -7,6 +7,7 @@ import vc_auth
 urlpatterns = [
     path("api/v1/", include("vc_pairs.urls")),
     path("api/v1/", include("vc_fragments.urls")),
+    path("api/v1/", include("vc_jobs.urls")),
     path("api/v1/auth/status", vc_auth.auth_status, name="auth-status"),
 ]
 

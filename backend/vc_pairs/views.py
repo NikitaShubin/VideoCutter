@@ -18,6 +18,7 @@ import time
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
+import export_access
 import project_meta
 import priority
 import task_meta
@@ -478,6 +479,11 @@ def cache_config(request):
             # Приоритет сервиса: тяжёлое понижено (nice), система получает
             # процессор первой, ядра не резервируются.
             "nice": priority.current_nice(),
+            # Диагностика прав exports: видно, дотянется ли чужой пользователь
+            # до файлов. Предки хоста выше mount-точки задаются VC_ACCESS_ANCHOR.
+            "export_access": export_access.report_for_root(
+                ws_module.WORKSPACE_ROOT,
+                anchor=os.environ.get("VC_ACCESS_ANCHOR") or None),
         })
     try:
         body = json.loads(request.body or "{}")

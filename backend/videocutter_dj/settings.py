@@ -15,6 +15,8 @@ ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
 INSTALLED_APPS = [
     "corsheaders",
+    # Фоновые операции: файловая очередь и API (без моделей/БД).
+    "vc_jobs.apps.VcJobsConfig",
 ]
 
 MIDDLEWARE = [

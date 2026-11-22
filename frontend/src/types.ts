@@ -73,6 +73,89 @@ export interface ExportStatus {
   total?: number;
   files?: ExportItem[];
   error?: string;
+  /** id фоновой операции, если статус пришёл из общего планировщика. */
+  jobId?: string;
+}
+
+// ─── Фоновые операции (общий API /api/v1/jobs) ──────────────────────────
+
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "done"
+  | "error"
+  | "cancelled"
+  | "interrupted";
+
+export interface JobTarget {
+  kind: string;
+  id: string;
+  project_id?: string | null;
+}
+
+export interface JobProgress {
+  current: number;
+  total: number;
+  unit: string;
+  message: string;
+}
+
+export interface JobError {
+  code: string;
+  message: string;
+}
+
+export interface JobResult {
+  summary?: string;
+  files?: string[];
+  urls?: string[];
+  task_id?: string;
+  [key: string]: unknown;
+}
+
+export interface Job {
+  id: string;
+  type: string;
+  lane: string;
+  status: JobStatus;
+  /** Вычисляемый статус: running + cancel_requested → cancelling. */
+  display_status: string;
+  owner: string;
+  target: JobTarget;
+  params: Record<string, unknown>;
+  priority: number;
+  depends_on: string[];
+  attempt: number;
+  progress: JobProgress;
+  result: JobResult | null;
+  error: JobError | null;
+  cancel_requested: boolean;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  retention: { expires_at: string | null; keep: boolean };
+}
+
+export interface JobTypeManifest {
+  key: string;
+  lane: string;
+  label: string;
+  result_kind: string;
+  cancellable: boolean;
+  resumable: boolean;
+  retention_days: number | null;
+  params_schema: Record<string, unknown>;
+  has_prerequisites: boolean;
+}
+
+export interface JobsSummary {
+  queued: number;
+  running: number;
+  done: number;
+  error: number;
+  cancelled: number;
+  interrupted: number;
+  active: number;
 }
 
 // Атрибут accept для выбора файлов: общий список поддерживаемых расширений.

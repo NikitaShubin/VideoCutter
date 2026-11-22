@@ -102,6 +102,18 @@ vi.mock("./api", async (importOriginal) => {
         },
       ]),
     getWorkspacesStatus: () => Promise.resolve([]),
+    getJobsSummary: () =>
+      Promise.resolve({
+        queued: 0,
+        running: 0,
+        done: 0,
+        error: 0,
+        cancelled: 0,
+        interrupted: 0,
+        active: 0,
+      }),
+    listJobs: () => Promise.resolve({ jobs: [], next: null }),
+    getJobTypes: () => Promise.resolve({ types: [] }),
     getPair: () => (apiHooks.getPair ? apiHooks.getPair() : Promise.resolve(detail)),
     savePosition: vi.fn(() => Promise.resolve({ position: 0 })),
     setUnauthorizedHandler: () => {},
@@ -330,6 +342,17 @@ describe("адреса экранов (deep links)", () => {
     );
     expect(projectSelect?.value).toBe("proj-1");
     expect(host.querySelector("button.pair-open")).not.toBeNull();
+    unmount();
+  });
+
+  it("/operations открывает вкладку фоновых операций", async () => {
+    const { host, unmount } = await mountApp("/operations");
+    await flush();
+    expect(
+      host.querySelector("#tab-operations")?.getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(host.querySelector(".operations-panel")).not.toBeNull();
+    expect(host.textContent).toContain("Фоновых операций нет");
     unmount();
   });
 

@@ -175,6 +175,138 @@ class RepairExportsTests(ExportAccessTestBase):
         self.assertEqual(self._mode(good), 0o644)
 
 
+class AccessAnchorTests(ExportAccessTestBase):
+    def _chain(self):
+        """root/outer/ws/exports — предок выше корня workspace."""
+        outer = os.path.join(self.root, "outer")
+        ws = os.path.join(outer, "ws")
+        out = os.path.join(ws, "exports")
+        os.makedirs(out)
+        return outer, ws, out
+
+    def test_anchor_opens_ancestors_above_workspace_root(self):
+        outer, ws, _out = self._chain()
+        os.chmod(outer, 0o700)
+
+        export_access.ensure_access(ws, root=self.root)
+
+        self.assertEqual(self._mode(outer), 0o711)
+
+    def test_ignored_chmod_is_reported_with_mount_hint(self):
+        outer, ws, out = self._chain()
+        os.chmod(out, 0o700)
+
+        def noop(path, mode):
+            return None
+
+        with mock.patch.object(export_access.os, "chmod",
+                               side_effect=noop):
+            with self.assertLogs("export_access", level="WARNING"):
+                problems = export_access.ensure_access(ws, root=self.root)
+
+        self.assertTrue(problems)
+        self.assertIn("fmask", problems[0])
+
+    def test_report_flags_closed_ancestor_then_ok_after_fix(self):
+        outer, ws, _out = self._chain()
+        os.chmod(outer, 0o700)
+
+        before = export_access.report_for_root(ws, anchor=self.root)
+        export_access.ensure_access(ws, root=self.root)
+        after = export_access.report_for_root(ws, anchor=self.root)
+
+        self.assertFalse(before["ok"])
+        self.assertTrue(before["problems"])
+        self.assertTrue(before["hint"])
+        self.assertTrue(after["ok"])
+        self.assertEqual(len(after["chain"]), 3)
+        self.assertEqual(after["chain"][0]["path"], ws)
+
+    def test_report_without_anchor_notes_mount_boundary(self):
+        _outer, ws, _out = self._chain()
+
+        report = export_access.report_for_root(ws)
+
+        self.assertEqual(report["anchor"], ws)
+        self.assertIn("VC_ACCESS_ANCHOR", report["note"])
+        self.assertEqual([item["path"] for item in report["chain"]], [ws])
+        self.assertTrue(report["chain"][0]["mode"].startswith("0o"))
+
+    def test_repair_uses_anchor(self):
+        outer, _ws, _out = self._chain()
+        os.chmod(outer, 0o700)
+
+        found = export_access.repair_exports(self.root, anchor=self.root)
+
+        # exports/ есть и у базовой фикстуры, и у цепочки outer/ws.
+        self.assertEqual(found, 2)
+        self.assertEqual(self._mode(outer), 0o711)
+
+    def test_repair_logs_unfixable_file_mode(self):
+        old = self._write(os.path.join(self.out, "video_fragment_1.mp4"))
+        os.chmod(old, 0o600)
+
+        def noop(path, mode):
+            return None
+
+        with mock.patch.object(export_access.os, "chmod",
+                               side_effect=noop):
+            with self.assertLogs("export_access", level="WARNING"):
+                export_access.repair_exports(self.root)
+
+    def test_cli_honours_anchor(self):
+        outer, _ws, _out = self._chain()
+        os.chmod(outer, 0o700)
+
+        code = export_access.main(
+            ["--fix", "--root", self.root, "--anchor", self.root])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self._mode(outer), 0o711)
+
+
+class DownloadAccessTests(WorkspaceApiTestBase):
+    """Скачивание чинит права старого экспорта, а не только новых."""
+
+    def _seed(self, mode=0o600):
+        out = os.path.join(self.ws_dir, "exports")
+        os.makedirs(out, exist_ok=True)
+        path = os.path.join(out, "video_fragment_1.mp4")
+        with open(path, "wb") as f:
+            f.write(b"fragment")
+        os.chmod(path, mode)
+        os.chmod(self.ws_dir, 0o700)
+        os.chmod(self._tmpdir, 0o700)
+        return path, out
+
+    def _download(self):
+        return self.client.get(
+            f"/api/v1/pairs/{self.ws_id}/export/video_fragment_1.mp4")
+
+    def test_download_opens_file_ancestors_and_exports_dir(self):
+        path, out = self._seed()
+
+        resp = self._download()
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(self.ws_dir).st_mode), 0o711)
+
+    def test_download_still_serves_when_chmod_is_ignored(self):
+        path, _out = self._seed()
+
+        with mock.patch.object(export_access.os, "chmod",
+                               side_effect=lambda *a, **k: None):
+            with self.assertLogs("export_access", level="WARNING"):
+                resp = self._download()
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(b"".join(resp.streaming_content), b"fragment")
+        resp.close()
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+
 class RepairCliTests(ExportAccessTestBase):
     def test_cli_fix_returns_success(self):
         old = self._write(os.path.join(self.out, "video_fragment_1.mp4"))

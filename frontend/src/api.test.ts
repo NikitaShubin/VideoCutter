@@ -10,6 +10,7 @@ import {
   downloadFile,
   frameUrl,
   getAuthToken,
+  getExportStatus,
   importBackup,
   listPairs,
   projectBackupUrl,
@@ -231,11 +232,61 @@ describe("fetch-слой", () => {
     expect(seen[1].headers.Authorization).toBe("Bearer s3cret");
   });
 
-  it("startExport: force даёт ?force=1", async () => {
-    queued.push({ status: 200, json: { state: "done" } });
-    await startExport("w", true);
-    expect(seen[0].url).toBe("/api/v1/pairs/w/export?force=1");
+  it("startExport создаёт фоновую операцию с force", async () => {
+    queued.push({
+      status: 202,
+      json: {
+        deduplicated: false,
+        job: {
+          id: "j1",
+          type: "export.fragments",
+          status: "running",
+          display_status: "running",
+          progress: { current: 1, total: 2, unit: "фрагмент", message: "" },
+          result: null,
+          error: null,
+        },
+      },
+    });
+    const st = await startExport("w", true);
+    expect(seen[0].url).toBe("/api/v1/jobs");
     expect(seen[0].method).toBe("POST");
+    expect(JSON.parse(seen[0].body!)).toEqual({
+      type: "export.fragments",
+      target: { kind: "task", id: "w" },
+      params: { force: true },
+    });
+    expect(st).toMatchObject({ state: "running", jobId: "j1", index: 1, total: 2 });
+  });
+
+  it("getExportStatus находит последнюю операцию задачи", async () => {
+    queued.push({
+      status: 200,
+      json: {
+        jobs: [{
+          id: "j1",
+          type: "export.fragments",
+          status: "done",
+          display_status: "done",
+          progress: { current: 2, total: 2, unit: "фрагмент", message: "" },
+          result: {
+            files: ["a_fragment_1.mp4", "a_fragment_2.mp4"],
+            urls: ["/api/v1/pairs/a/export/a_fragment_1.mp4",
+              "/api/v1/pairs/a/export/a_fragment_2.mp4"],
+          },
+          error: null,
+        }],
+        next: null,
+      },
+    });
+    const st = await getExportStatus("a");
+    expect(seen[0].url).toContain("/api/v1/jobs?");
+    expect(seen[0].url).toContain("target=task%3Aa");
+    expect(st.state).toBe("done");
+    expect(st.files?.map((f) => f.filename)).toEqual([
+      "a_fragment_1.mp4",
+      "a_fragment_2.mp4",
+    ]);
   });
 
   it("deleteProject строит query with_tasks/to", async () => {

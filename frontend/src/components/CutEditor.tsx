@@ -13,6 +13,7 @@ import {
   deleteExport,
   downloadFile,
   frameUrl,
+  getExportJobStatus,
   getExportStatus,
   getPair,
   importAnnotations,
@@ -428,6 +429,8 @@ export function CutEditor({
   // (exporting нет в deps эффекта), а повторный запуск/отмена идут через E.
   const exportingRef = useRef(false);
   const pollTimerRef = useRef<number | null>(null);
+  // id фоновой операции: опрос идёт по нему, а не по всей истории задачи.
+  const exportJobIdRef = useRef<string | null>(null);
 
   const modelRef = useRef<FragmentModel | null>(null);
   if (!modelRef.current) modelRef.current = new FragmentModel(0);
@@ -1557,6 +1560,7 @@ export function CutEditor({
     stopPolling();
     setExportingUi(false);
     setExportProgress(null);
+    exportJobIdRef.current = null;
   };
 
   const startPolling = () => {
@@ -1564,7 +1568,9 @@ export function CutEditor({
     pollTimerRef.current = window.setInterval(async () => {
       let st: ExportStatus;
       try {
-        st = await getExportStatus(pairId);
+        st = exportJobIdRef.current
+          ? await getExportJobStatus(exportJobIdRef.current)
+          : await getExportStatus(pairId);
       } catch (e) {
         finishExportUi();
         flash(`Ошибка опроса экспорта: ${failureReason(e)}`, "error");
@@ -1588,7 +1594,7 @@ export function CutEditor({
         finishExportUi();
         flash("Экспорт прерван (нет статуса на сервере)", "error");
       }
-    }, 500);
+    }, 2000);
   };
 
   const handleExport = async (force = false) => {
@@ -1615,6 +1621,7 @@ export function CutEditor({
       // Актуальность решает сервер по хешу (границы+видео): совпал — сразу
       // done с файлами, иначе прогон. Локальных сравнений больше нет.
       const st = await startExport(pairId, force);
+      if (st.jobId) exportJobIdRef.current = st.jobId;
       if (st.state === "done") {
         // Нарезки актуальны — сервер отдал готовые без прогона.
         setExportItems(st.files ?? []);
@@ -1690,6 +1697,7 @@ export function CutEditor({
       .then((st) => {
         if (!alive) return;
         if (st.state === "running" || st.state === "cancelling") {
+          if (st.jobId) exportJobIdRef.current = st.jobId;
           setExportingUi(true);
           const total = st.total ?? 1;
           setExportProgress((st.index ?? 0) / Math.max(1, total));

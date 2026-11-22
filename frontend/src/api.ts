@@ -1,5 +1,9 @@
 import type {
+  ExportItem,
   ExportStatus,
+  Job,
+  JobsSummary,
+  JobTypeManifest,
   Project,
   VideoPair,
   VideoPairDetail,
@@ -475,21 +479,150 @@ export function savePosition(
   }).then((r) => json<{ position: number }>(r));
 }
 
+// ─── Фоновые операции: общий API ─────────────────────────────────────────
+
+export interface JobQuery {
+  type?: string;
+  status?: string;
+  owner?: string;
+  target?: string;
+  project_id?: string;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export function listJobs(
+  query: JobQuery = {},
+): Promise<{ jobs: Job[]; next: string | null }> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === "") continue;
+    params.set(key, String(value));
+  }
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  return apiFetch(`${BASE}/jobs${suffix}`).then((r) =>
+    json<{ jobs: Job[]; next: string | null }>(r),
+  );
+}
+
+export function getJob(id: string): Promise<Job> {
+  return apiFetch(`${BASE}/jobs/${encodeURIComponent(id)}`).then((r) =>
+    json<{ job: Job }>(r).then((body) => body.job),
+  );
+}
+
+export interface JobRequest {
+  type: string;
+  target: { kind: string; id: string; project_id?: string | null };
+  params?: Record<string, unknown>;
+  priority?: number;
+  depends_on?: string[];
+  idempotency_key?: string;
+}
+
+export function createJob(
+  request: JobRequest,
+): Promise<{ job: Job; deduplicated: boolean }> {
+  return apiFetch(`${BASE}/jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  }).then((r) => json<{ job: Job; deduplicated: boolean }>(r));
+}
+
+export function cancelJob(id: string): Promise<Job> {
+  return apiFetch(`${BASE}/jobs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  }).then((r) => json<{ job: Job }>(r).then((body) => body.job));
+}
+
+export function retryJob(id: string): Promise<Job> {
+  return apiFetch(`${BASE}/jobs/${encodeURIComponent(id)}/retry`, {
+    method: "POST",
+  }).then((r) => json<{ job: Job }>(r).then((body) => body.job));
+}
+
+export function getJobsSummary(): Promise<JobsSummary> {
+  return apiFetch(`${BASE}/jobs/summary`).then((r) => json<JobsSummary>(r));
+}
+
+export function getJobTypes(): Promise<{ types: JobTypeManifest[] }> {
+  return apiFetch(`${BASE}/jobs/types`).then((r) =>
+    json<{ types: JobTypeManifest[] }>(r),
+  );
+}
+
+/** Операция планировщика → прежний вид статуса экспорта для редактора. */
+function jobToExportStatus(job: Job): ExportStatus {
+  const total = job.progress?.total ?? 0;
+  const index = job.progress?.current ?? 0;
+  const jobId = job.id;
+  if (job.status === "done") {
+    const names = job.result?.files ?? [];
+    const urls = job.result?.urls ?? [];
+    const files: ExportItem[] = names.map((filename, i) => ({
+      index: i + 1,
+      filename,
+      url: urls[i] ?? "",
+    }));
+    return { state: "done", files, index, total, jobId };
+  }
+  if (job.status === "cancelled") {
+    return { state: "cancelled", jobId };
+  }
+  if (job.status === "error" || job.status === "interrupted") {
+    return {
+      state: "error",
+      error:
+        job.error?.message ??
+        (job.status === "interrupted" ? "Операция прервана" : "Ошибка экспорта"),
+      jobId,
+      index,
+      total,
+    };
+  }
+  return {
+    state: job.display_status === "cancelling" ? "cancelling" : "running",
+    index: job.status === "queued" ? 0 : index,
+    total: total || 1,
+    jobId,
+  };
+}
+
 export function startExport(pairId: string, force = false): Promise<ExportStatus> {
-  const url = `${BASE}/pairs/${encodeURIComponent(pairId)}/export${force ? "?force=1" : ""}`;
-  return apiFetch(url, { method: "POST" }).then((r) => json<ExportStatus>(r));
+  return createJob({
+    type: "export.fragments",
+    target: { kind: "task", id: pairId },
+    params: force ? { force: true } : {},
+  }).then((body) => jobToExportStatus(body.job));
+}
+
+export function getExportJobStatus(jobId: string): Promise<ExportStatus> {
+  return getJob(jobId).then(jobToExportStatus);
 }
 
 export function getExportStatus(pairId: string): Promise<ExportStatus> {
-  return apiFetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export/status`).then((r) =>
-    json<ExportStatus>(r),
+  return listJobs({
+    type: "export.fragments",
+    target: `task:${pairId}`,
+    limit: 1,
+  }).then((body) =>
+    body.jobs.length > 0 ? jobToExportStatus(body.jobs[0]) : { state: "idle" },
   );
 }
 
 export function cancelExport(pairId: string): Promise<ExportStatus> {
-  return apiFetch(`${BASE}/pairs/${encodeURIComponent(pairId)}/export/cancel`, { method: "POST" }).then((r) =>
-    json<ExportStatus>(r),
-  );
+  return listJobs({
+    type: "export.fragments",
+    target: `task:${pairId}`,
+    limit: 20,
+  }).then((body) => {
+    const active = body.jobs.find(
+      (job) => job.status === "queued" || job.status === "running",
+    );
+    if (!active) throw new Error("Экспорт не выполняется для этой задачи");
+    return cancelJob(active.id).then(jobToExportStatus);
+  });
 }
 
 export function deleteExport(pairId: string): Promise<ExportStatus> {

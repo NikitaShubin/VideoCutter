@@ -16,6 +16,7 @@ import {
   deleteWorkspace,
   detachTask,
   downloadFile,
+  getJobsSummary,
   importAnnotations,
   importBackup,
   listProjects,
@@ -41,6 +42,7 @@ import {
 } from "../model/markStats";
 import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
 import { failureReason } from "../model/errors";
+import { OperationsPanel } from "./OperationsPanel";
 import { formatPercent } from "../model/format";
 import { pluralCount } from "../model/plural";
 import { diffSync, type SyncSnapshot } from "../model/syncDiff";
@@ -94,7 +96,7 @@ function taskStatsMeta(p: VideoPair): string {
 
 type SortMode = "updated" | "created" | "opened" | "name";
 
-type Tab = "tasks" | "projects";
+type Tab = "tasks" | "projects" | "operations";
 
 const SORT_KEY = "vc-sort";
 const TAB_KEY = "vc-tab";
@@ -124,12 +126,12 @@ function readSortMode(): SortMode {
 
 function readTab(): Tab {
   try {
-    return window.localStorage.getItem(TAB_KEY) === "projects"
-      ? "projects"
-      : "tasks";
+    const saved = window.localStorage.getItem(TAB_KEY);
+    if (saved === "projects" || saved === "operations") return saved;
   } catch {
-    return "tasks";
+    /* ignore */
   }
+  return "tasks";
 }
 
 function timeKey(s: string | null): number {
@@ -222,6 +224,49 @@ export function PairList({
   const [tab, setTab] = useState<Tab>(() => tabProp ?? readTab());
   const tasksTabRef = useRef<HTMLButtonElement>(null);
   const projectsTabRef = useRef<HTMLButtonElement>(null);
+  const operationsTabRef = useRef<HTMLButtonElement>(null);
+  const [activeJobs, setActiveJobs] = useState<number | null>(null);
+
+  // Бейдж вкладки: число активных операций. Пока они есть — опрос чаще;
+  // в покое реже; во фоне не опрашиваем, возврат на вкладку — сразу.
+  useEffect(() => {
+    let alive = true;
+    let timer: number | null = null;
+    let active = false;
+
+    const schedule = () => {
+      if (!alive) return;
+      timer = window.setTimeout(() => {
+        void tick();
+      }, document.hidden ? 15000 : active ? 2000 : 15000);
+    };
+
+    const tick = async () => {
+      try {
+        const summary = await getJobsSummary();
+        if (!alive) return;
+        active = summary.active > 0;
+        setActiveJobs(summary.active);
+      } catch {
+        /* бейдж не критичен; следующий тик повторит */
+      }
+      schedule();
+    };
+
+    const onVisible = () => {
+      if (document.hidden) return;
+      if (timer !== null) window.clearTimeout(timer);
+      void tick();
+    };
+
+    void tick();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      alive = false;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
 
   // Адрес — источник правды, когда он задан (deep link, «Назад»).
   useEffect(() => {
@@ -241,7 +286,7 @@ export function PairList({
   // Клавиатурный паттерн табов: одна вкладка в Tab-порядке, стрелки/Home/End
   // переключают и ведут фокус за собой.
   const onTabsKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    const order: Tab[] = ["tasks", "projects"];
+    const order: Tab[] = ["tasks", "projects", "operations"];
     const i = order.indexOf(tab);
     let next: Tab | null = null;
     if (e.key === "ArrowRight" || e.key === "ArrowDown") {
@@ -256,7 +301,12 @@ export function PairList({
     if (next === null) return;
     e.preventDefault();
     pickTab(next);
-    (next === "tasks" ? tasksTabRef : projectsTabRef).current?.focus();
+    const refs = {
+      tasks: tasksTabRef,
+      projects: projectsTabRef,
+      operations: operationsTabRef,
+    };
+    refs[next].current?.focus();
   };
 
   // ─── Проекты: реестр, фильтр списка, CRUD ────────────────────────────────
@@ -1037,7 +1087,12 @@ export function PairList({
   return (
     <div className="pair-list">
       <h1 className="sr-only">
-        VideoCutter — {tab === "tasks" ? "задачи" : "проекты"}
+        VideoCutter —{" "}
+        {tab === "tasks"
+          ? "задачи"
+          : tab === "projects"
+            ? "проекты"
+            : "фоновые операции"}
       </h1>
       <div className="pair-list-head">
         <div className="title-row">
@@ -1074,6 +1129,21 @@ export function PairList({
             >
               Проекты{" "}
               <span className="tab-count">{projects !== null ? projects.length : "…"}</span>
+            </button>
+            <button
+              ref={operationsTabRef}
+              id="tab-operations"
+              role="tab"
+              aria-selected={tab === "operations"}
+              aria-controls="operations-panel"
+              tabIndex={tab === "operations" ? 0 : -1}
+              className={tab === "operations" ? "tab active" : "tab"}
+              onClick={() => pickTab("operations")}
+            >
+              Фоновые операции{" "}
+              <span className="tab-count">
+                {activeJobs !== null ? activeJobs : "…"}
+              </span>
             </button>
           </div>
           <button
@@ -1318,6 +1388,20 @@ export function PairList({
             Задачи перевешиваются в их форме редактирования (✎ → «Проект»).
           </div>
         </div>
+        </div>
+      )}
+
+      {tab === "operations" && (
+        <div
+          id="operations-panel"
+          className="tab-panel"
+          role="tabpanel"
+          aria-labelledby="tab-operations"
+        >
+          <OperationsPanel
+            onOpenTask={onSelect}
+            onOpenProject={onProjectOpen}
+          />
         </div>
       )}
 

@@ -7,6 +7,7 @@
  *   /                          список, вкладка и фильтр — из localStorage
  *   /tasks                     задачи, все проекты
  *   /projects                  проекты
+ *   /operations                фоновые операции
  *   /projects/<id>             задачи, отфильтрованные по проекту (drill-down)
  *   /tasks/<id>                редактор задачи
  *   /tasks/<id>/fragments/<n>  редактор на начале фрагмента n (нумерация 1-based,
@@ -18,7 +19,7 @@
  * падать: это тот же кадр после клампа.
  */
 
-export type Tab = "tasks" | "projects";
+export type Tab = "tasks" | "projects" | "operations";
 
 /** Значения фильтра проекта повторяют селект списка (см. PairList). */
 export const PROJECT_ALL = "__all__";
@@ -101,6 +102,9 @@ export function parseRoute(pathname: string, search: string): RouteState {
       ? list("projects", null)
       : list("tasks", parts[1]);
   }
+  if (parts[0] === "operations") {
+    return list("operations", null);
+  }
   // `/` — единственный адрес без собственного решения о вкладке.
   if (parts.length === 0) return { ...list("tasks", null), tab: null };
   // Незнакомый путь не ломает приложение: показываем задачи.
@@ -117,7 +121,9 @@ export function projectPath(id: string): string {
 
 /** Адрес вкладки списка. */
 export function listPath(tab: Tab): string {
-  return tab === "projects" ? "/projects" : "/tasks";
+  if (tab === "projects") return "/projects";
+  if (tab === "operations") return "/operations";
+  return "/tasks";
 }
 
 /** Адрес выбранного значения фильтра проекта. */
