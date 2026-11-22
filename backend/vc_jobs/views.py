@@ -53,6 +53,29 @@ def _visible(job, identity) -> bool:
     return not restricted or job.owner == owner
 
 
+def _target_with_project(target: Dict[str, Any]) -> Dict[str, Any]:
+    """Дополняет цель-задачу project_id с диска.
+
+    Журнал и фильтр ``project_id`` должны работать и для операций по
+    задаче. Указатель живёт в ``task.json``; значение клиента не источник
+    правды и перекрывается. Задачи нет в реестре — цель не трогаем.
+    """
+    if target.get("kind") != "task":
+        return target
+    task_id = target.get("id")
+    if not isinstance(task_id, str) or not task_id:
+        return target
+    import project_meta
+
+    membership = project_meta.task_project_ids()
+    if task_id not in membership:
+        return target
+    project_id = membership[task_id]
+    if target.get("project_id") == project_id:
+        return target
+    return {**target, "project_id": project_id}
+
+
 def _job_or_404(scheduler, job_id: str, identity):
     job = scheduler.get(job_id)
     if job is None or not _visible(job, identity):
@@ -142,6 +165,7 @@ def jobs_collection(request):
         return _error("idempotency_key должен быть строкой")
 
     owner, _roles, restricted = identity
+    target = _target_with_project(target)
     upload_ids = []
     if target.get("kind") == "upload" and isinstance(target.get("id"), str):
         upload_ids.append(target["id"])

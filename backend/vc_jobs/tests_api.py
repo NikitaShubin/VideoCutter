@@ -125,6 +125,23 @@ class JobsApiTestBase(SimpleTestCase):
 
 
 class CreateTests(JobsApiTestBase):
+    def test_task_target_gets_project_id_from_task_file(self):
+        import project_meta
+        import task_meta
+
+        project_meta.save("proj-1", {"name": "Проект"})
+        task_dir = os.path.join(self.workspaces, "task-in-project")
+        os.makedirs(task_dir)
+        task_meta.save(task_dir, {"project_id": "proj-1"})
+
+        job = self.create(target={
+            "kind": "task", "id": "task-in-project",
+            "project_id": "forged"})
+
+        self.assertEqual(job["target"]["project_id"], "proj-1")
+        event = self.scheduler.activity.read(limit=10)[0]
+        self.assertEqual(event["project_id"], "proj-1")
+
     def test_create_returns_202_and_persists(self):
         response = self.post(payload={
             "type": "test.echo",
