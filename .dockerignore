@@ -1,7 +1,12 @@
-backend/vc_media
-backend/static
-backend/db.sqlite3
+# Контекст сборки backend: только код и описание пакета.
+# Видео-задачи (workspaces) — данные хоста, в образ не попадают.
+.git
+.github
+workspaces
 frontend
+docs
+scripts
+tools
 **/__pycache__
 *.pyc
 *.pyo
