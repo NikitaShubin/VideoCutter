@@ -127,7 +127,7 @@ README). Активная очередь — память процесса; по
 | `export` | `max(1, min(4, ncpu // 4))` | `VC_EXPORT_WORKERS` |
 | `archive` | 1 | `VC_ARCHIVE_WORKERS` |
 | `import` | 1 | `VC_IMPORT_WORKERS` |
-| `system` | 1 на HDD, иначе 2 | `VC_INDEX_BG_THREADS` |
+| `system` | 1 | `VC_INDEX_BG_THREADS` |
 
 Глобальный предел `VC_JOBS_MAX` (по умолчанию 4) не даёт полосам суммарно
 забить машину. Внутри полосы — приоритет, затем FIFO по `created_at`:
