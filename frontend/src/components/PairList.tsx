@@ -7,7 +7,6 @@ import {
   useState,
 } from "react";
 import {
-  annotationsUrl,
   attachTask,
   assignWorkspaceVideo,
   bumpWorkspaceNonce,
@@ -15,19 +14,14 @@ import {
   deleteProject,
   deleteWorkspace,
   detachTask,
-  downloadFile,
   getJobsSummary,
-  importAnnotations,
-  importBackup,
   listProjects,
-  projectBackupUrl,
   removeWorkspaceVideo,
   renameProject,
   renameWorkspace,
   setTaskName,
   setWorkspaceVideo,
   swapVideos,
-  taskBackupUrl,
 } from "../api";
 import { VIDEO_ACCEPT, type Project, type VideoPair } from "../types";
 import {
@@ -43,6 +37,7 @@ import {
 import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
 import { failureReason } from "../model/errors";
 import { OperationsPanel } from "./OperationsPanel";
+import { JobAction, JobFileAction } from "./JobActions";
 import { formatPercent } from "../model/format";
 import { pluralCount } from "../model/plural";
 import { diffSync, type SyncSnapshot } from "../model/syncDiff";
@@ -320,12 +315,6 @@ export function PairList({
   }, [projectFilterProp]);
   const [newProjectName, setNewProjectName] = useState("");
   const [projError, setProjError] = useState("");
-  // Восстановление из бэкапа: XHR-заливка с прогрессом (default rename —
-  // совпадающие имена получают суффикс _1, ничего не затирается).
-  const [projRestoreProgress, setProjRestoreProgress] = useState<number | null>(null);
-  // Скачивание бэкапа проекта: id строки со спиннером (архив собирается
-  // синхронно — без отклика кнопка выглядит мёртвой).
-  const [dlKey, setDlKey] = useState<string | null>(null);
 
   const loadProjects = useCallback(async (): Promise<Project[] | null> => {
     try {
@@ -789,66 +778,6 @@ export function PairList({
     onChanged();
   };
 
-  // Импорт разметки из архива annotations (только fragments.tsv; видео
-  // задачи не трогается). Прогресс — в тот же бар формы, ошибка — туда же.
-  const doImportAnnotations = (id: string, file: File) => {
-    setEditBusy(true);
-    setEditError("");
-    setEditProgress(0);
-    importAnnotations(id, file, { onProgress: setEditProgress })
-      .then(() => {
-        onChanged();
-        setEditProgress(null);
-      })
-      .catch((e: Error) => {
-        setEditError(e.message);
-        setEditProgress(null);
-      })
-      .finally(() => setEditBusy(false));
-  };
-
-  // Восстановление задачи/проекта из бэкапа (POST /backups/import, 202 —
-  // файлы записаны, индекс догоняет фоном; список опрашивается сам).
-  const doRestoreBackup = (file: File) => {
-    setProjError("");
-    setProjRestoreProgress(0);
-    importBackup(file, { onProgress: setProjRestoreProgress })
-      .then(() => {
-        setProjRestoreProgress(null);
-        loadProjects();
-        onChanged();
-      })
-      .catch((e: Error) => {
-        setProjError(e.message);
-        setProjRestoreProgress(null);
-      });
-  };
-
-  // Скачивание бэкапа проекта с откликом (сборка — на сервере, синхронно).
-  const doDownloadProject = (p: Project) => {
-    if (dlKey !== null) return;
-    setDlKey(p.id);
-    setProjError("");
-    downloadFile(projectBackupUrl(p.id), `${p.id}-backup.zip`)
-      .catch((e: Error) => setProjError(e.message))
-      .finally(() => setDlKey(null));
-  };
-
-  // Скачивание бэкапа/разметки задачи: прогресс — в бар формы.
-  const doDownloadTask = (id: string, kind: "backup" | "annotations") => {
-    if (editBusy) return;
-    setEditBusy(true);
-    setEditError("");
-    setEditProgress(0);
-    const url = kind === "backup" ? taskBackupUrl(id) : annotationsUrl(id);
-    downloadFile(url, `${id}-${kind}.zip`, (f) => setEditProgress(f ?? 0))
-      .catch((e: Error) => setEditError(e.message))
-      .finally(() => {
-        setEditBusy(false);
-        setEditProgress(null);
-      });
-  };
-
   // ─── Форма редактирования одной задачи ───────────────────────────────────
 
   const renderEdit = (p: VideoPair) => {
@@ -1028,13 +957,17 @@ export function PairList({
           pin={false}
           focusable={false}
         >
-          <button
-            className="role-action-plain"
+          <JobAction
+            buttonClassName="role-action-plain"
+            label="⤓ Бэкап"
             disabled={editBusy}
-            onClick={() => doDownloadTask(p.id, "backup")}
-          >
-            ⤓ Бэкап
-          </button>
+            request={() => ({
+              type: "backup.task",
+              target: { kind: "task", id: p.id },
+            })}
+            downloadName={`${p.id}-backup.zip`}
+            onError={setEditError}
+          />
         </Hint>
         <Hint
           className="role-action"
@@ -1042,13 +975,17 @@ export function PairList({
           pin={false}
           focusable={false}
         >
-          <button
-            className="role-action-plain"
+          <JobAction
+            buttonClassName="role-action-plain"
+            label="⤓ Разметка"
             disabled={editBusy}
-            onClick={() => doDownloadTask(p.id, "annotations")}
-          >
-            ⤓ Разметка
-          </button>
+            request={() => ({
+              type: "annotations.export",
+              target: { kind: "task", id: p.id },
+            })}
+            downloadName={`${p.id}-annotations.zip`}
+            onError={setEditError}
+          />
         </Hint>
         <Hint
           className="role-action"
@@ -1056,15 +993,19 @@ export function PairList({
           pin={false}
           focusable={false}
         >
-          <FileButton
-            className="role-action-plain"
-            accept=".zip,application/zip"
-            disabled={editBusy}
+          <JobFileAction
+            buttonClassName="role-action-plain"
+            label="⤒ Импорт"
             title="Импорт разметки из архива"
-            onFile={(f) => doImportAnnotations(p.id, f)}
-          >
-            ⤒ Импорт
-          </FileButton>
+            disabled={editBusy}
+            request={(uploadId) => ({
+              type: "annotations.import",
+              target: { kind: "task", id: p.id },
+              params: { upload_id: uploadId },
+            })}
+            onDone={() => onChanged()}
+            onError={setEditError}
+          />
         </Hint>
       </div>
 
@@ -1291,23 +1232,22 @@ export function PairList({
             >
               Создать проект
             </button>
-            <FileButton
-              className="btn"
-              accept=".zip,application/zip"
+            <JobFileAction
+              buttonClassName="btn"
+              label="Восстановить из бэкапа…"
               title="Восстановить задачу/проект из zip-бэкапа (совпадающие имена получат суффикс _1)"
-              onFile={doRestoreBackup}
-            >
-              Восстановить из бэкапа…
-            </FileButton>
+              request={(uploadId) => ({
+                type: "backup.import",
+                target: { kind: "upload", id: uploadId },
+                params: { on_conflict: "rename" },
+              })}
+              onDone={() => {
+                void loadProjects();
+                onChanged();
+              }}
+              onError={setProjError}
+            />
           </div>
-          {projRestoreProgress !== null && (
-            <div className="pair-edit-progress">
-              <div
-                className="pair-edit-progress-bar"
-                style={{ width: `${Math.round(projRestoreProgress * 100)}%` }}
-              />
-            </div>
-          )}
           {projError && (
             <div className="pair-edit-error" role="alert">
               {projError}
@@ -1339,19 +1279,19 @@ export function PairList({
                   </span>
                 </button>
                 <div className="pair-actions">
-                  <button
-                    className="pair-edit-btn"
+                  <JobAction
+                    buttonClassName="pair-edit-btn"
+                    label="⤓"
+                    ariaLabel="Скачать бэкап проекта"
                     title="Скачать бэкап проекта"
-                    aria-label="Скачать бэкап проекта"
-                    disabled={dlKey !== null}
-                    onClick={() => doDownloadProject(p)}
-                  >
-                    {dlKey === p.id ? (
-                      <span className="btn-spin" aria-hidden="true" />
-                    ) : (
-                      <span aria-hidden="true">⤓</span>
-                    )}
-                  </button>
+                    compact
+                    request={() => ({
+                      type: "backup.project",
+                      target: { kind: "project", id: p.id },
+                    })}
+                    downloadName={`${p.id}-backup.zip`}
+                    onError={setProjError}
+                  />
                   <button
                     className="pair-edit-btn"
                     title="Переименовать проект"

@@ -15,7 +15,7 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -73,6 +73,8 @@ class JobSpec:
     #: Переопределение ключа дедупликации (варианты параметров).
     dedupe_key: Optional[str] = None
     attempt: int = 1
+    #: Предпосылка наследует приоритет заказчика (каскад не голодает).
+    inherit_priority: bool = False
 
 
 @dataclass
@@ -130,13 +132,23 @@ class Scheduler:
                  activity: Optional[ActivityLog] = None,
                  lane_capacities: Optional[Dict[str, int]] = None,
                  max_workers: int = 4,
-                 progress_interval: float = 1.0) -> None:
+                 progress_interval: float = 1.0,
+                 retention_days: float = 30.0,
+                 error_retention_days: float = 90.0,
+                 prune_interval: float = 300.0,
+                 maintenance: Optional[Callable[[List[Job]], None]] = None
+                 ) -> None:
         self.store = store
         self.registry = registry
         self.activity = activity
         self._lane_capacities = dict(lane_capacities or {})
         self._max_workers = max(1, int(max_workers))
         self._progress_interval = max(0.0, float(progress_interval))
+        self._retention_days = max(0.0, float(retention_days))
+        self._error_retention_days = max(0.0, float(error_retention_days))
+        self._prune_interval = max(0.0, float(prune_interval))
+        self._maintenance = maintenance
+        self._last_prune = 0.0
 
         self._lock = threading.RLock()
         self._jobs: Dict[str, Job] = {}
@@ -170,6 +182,7 @@ class Scheduler:
             # предпосылки обязан увидеть зависимые операции.
             for job in list(self._jobs.values()):
                 self._recover_locked(job)
+            self._prune_locked()
             self._pump_locked()
             return self
 
@@ -338,9 +351,19 @@ class Scheduler:
                 if dep_type is None:
                     raise KeyError(
                         f"неизвестный тип предпосылки: {dep_spec.type!r}")
+                if dep_spec.inherit_priority:
+                    dep_spec = replace(
+                        dep_spec, priority=int(spec.priority))
                 dep_key = dep_spec.dedupe_key or self._dedupe_key(dep_spec)
                 dep_job, _ = self._submit_locked(
                     dep_spec, dep_type, dep_key, ancestry + (key,))
+                if dep_spec.inherit_priority \
+                        and dep_job.status == QUEUED \
+                        and dep_job.priority > spec.priority:
+                    # Фоновая проверка уже стояла в очереди; пользователь
+                    # пришёл за ней — поднимаем её до приоритета заказчика.
+                    dep_job.priority = int(spec.priority)
+                    self._save_locked(dep_job)
                 dependency_ids.append(dep_job.id)
             job.depends_on = list(dict.fromkeys(
                 job.depends_on + dependency_ids))
@@ -379,6 +402,7 @@ class Scheduler:
     def _pump_locked(self) -> None:
         if self._stopping:
             return
+        self._maybe_prune_locked()
         while len(self._running) < self._max_workers:
             ready = [
                 job for job in self._jobs.values()
@@ -637,6 +661,44 @@ class Scheduler:
             counts["active"] = counts[QUEUED] + counts[RUNNING]
             return counts
 
+    def prune(self, now: Optional[datetime] = None) -> int:
+        """Удаляет терминальные записи по сроку и зовёт обслуживание."""
+        with self._lock:
+            return self._prune_locked(now)
+
+    def _maybe_prune_locked(self) -> None:
+        if self._prune_interval <= 0:
+            self._prune_locked()
+            return
+        if time.monotonic() - self._last_prune < self._prune_interval:
+            return
+        self._prune_locked()
+
+    def _prune_locked(self, now: Optional[datetime] = None) -> int:
+        moment = now or datetime.now(timezone.utc)
+        self._last_prune = time.monotonic()
+        removed = 0
+        for job in list(self._jobs.values()):
+            if not job.terminal:
+                continue
+            finished = parse_iso(job.finished_at)
+            if finished is None:
+                continue
+            days = (self._error_retention_days if job.status == ERROR
+                    else self._retention_days)
+            if finished >= moment - timedelta(days=days):
+                continue
+            self.store.delete(job.id)
+            self._jobs.pop(job.id, None)
+            self._order_by_id.pop(job.id, None)
+            removed += 1
+        if self._maintenance is not None:
+            try:
+                self._maintenance(list(self._jobs.values()))
+            except Exception:  # noqa: BLE001 — уборка не роняет очередь
+                logger.exception("Обслуживание фоновых операций упало")
+        return removed
+
     def _save_locked(self, job: Job) -> None:
         self.store.save(job)
         self._jobs[job.id] = job
@@ -691,6 +753,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
 def default_lane_capacities() -> Dict[str, int]:
     cores = os.cpu_count() or 4
     export_default = max(1, min(4, cores // 4))
@@ -712,8 +784,34 @@ def build_scheduler(state_root: str) -> Scheduler:
         os.path.join(state_root, "activity"),
         retention_days=_env_int("VC_ACTIVITY_RETENTION_DAYS", 90))
     store = JobStore(os.path.join(state_root, "jobs"))
+
+    def maintenance(jobs):
+        """Сроки хранения: журнал, загрузки, кэш архивов, контрольные точки."""
+        from . import checkpoints, uploads
+        from .archive_cache import ArchiveCache
+
+        pinned = set()
+        for job in jobs:
+            if not job.active:
+                continue
+            if job.target.get("kind") == "upload":
+                pinned.add(job.target.get("id"))
+            upload_id = job.params.get("upload_id")
+            if isinstance(upload_id, str) and upload_id:
+                pinned.add(upload_id)
+        uploads.prune(pinned=pinned)
+        checkpoints.prune()
+        archives = ArchiveCache(os.path.join(state_root, "archives"))
+        archives.prune()
+        archives.enforce_limit()
+        activity.prune()
+
     return Scheduler(
         store, registry, activity=activity,
         lane_capacities=default_lane_capacities(),
         max_workers=_env_int("VC_JOBS_MAX", 4),
+        retention_days=_env_float("VC_JOB_RETENTION_DAYS", 30.0),
+        error_retention_days=_env_float("VC_JOB_ERROR_RETENTION_DAYS", 90.0),
+        prune_interval=_env_float("VC_JOBS_PRUNE_INTERVAL_S", 300.0),
+        maintenance=maintenance,
     )

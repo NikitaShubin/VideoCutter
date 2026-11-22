@@ -8,20 +8,16 @@ import {
   type MutableRefObject,
 } from "react";
 import {
-  annotationsUrl,
   cancelExport,
   deleteExport,
-  downloadFile,
   frameUrl,
   getExportJobStatus,
   getExportStatus,
   getPair,
-  importAnnotations,
   replaceFragments,
   savePosition,
   setPairSettings,
   startExport,
-  taskBackupUrl,
   withTokenQuery,
   workspaceNonce,
 } from "../api";
@@ -217,14 +213,7 @@ export function CutEditor({
   const [waitPct, setWaitPct] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<number | null>(null);
-  // Импорт разметки: заливка архива с прогрессом (видео не трогается).
-  const [annBusy, setAnnBusy] = useState(false);
-  const [annProgress, setAnnProgress] = useState<number | null>(null);
-  // Скачивание разметки/бэкапа: спиннер на сборке, затем %.
-  const [dlState, setDlState] = useState<{
-    key: "ann" | "bak";
-    frac: number | null;
-  } | null>(null);
+
   const [message, setMessage] = useState<{
     text: string;
     kind: "success" | "error";
@@ -1652,38 +1641,15 @@ export function CutEditor({
     }
   };
 
-  // Импорт разметки из архива (только fragments.tsv): после применения
-  // пару перечитываем с сервера — модель, позиция и превью списка свежие.
-  const handleAnnotationsImport = (file: File) => {
-    if (annBusy) return;
+  // Импорт разметки завершён: перечитываем пару — модель, позиция и
+  // превью списка должны стать свежими.
+  const handleAnnotationsImported = () => {
     setPlaying(false);
-    setAnnBusy(true);
-    setAnnProgress(0);
-    importAnnotations(pairId, file, { onProgress: setAnnProgress })
-      .then((res) => {
-        flash(`Разметка применена: фрагментов ${res.fragments}`);
-        return getPair(pairId);
-      })
+    flash("Разметка применена");
+    getPair(pairId)
       .then((p) => loadPairInto(p))
-      .catch((e: Error) => flash(`Ошибка импорта разметки: ${failureReason(e)}`, "error"))
-      .finally(() => {
-        setAnnBusy(false);
-        setAnnProgress(null);
-      });
-  };
-
-  // Скачивание архива с откликом: сборка на сервере синхронна, голая
-  // ссылка висела бы мёртвой всё время подготовки.
-  const handleDownload = (
-    key: "ann" | "bak",
-    url: string,
-    filename: string,
-  ) => {
-    if (dlState !== null || annBusy) return;
-    setDlState({ key, frac: null });
-    downloadFile(url, filename, (f) => setDlState({ key, frac: f }))
-      .catch((e: Error) => flash(`Ошибка скачивания: ${failureReason(e)}`, "error"))
-      .finally(() => setDlState(null));
+      .catch((e: Error) =>
+        flash(`Ошибка чтения задачи: ${failureReason(e)}`, "error"));
   };
 
   // Подхват состояния экспорта при входе: Esc во время экспорта сервер не
@@ -1893,20 +1859,9 @@ export function CutEditor({
                 onOpenChange={(v) => setOpenMenu(v ? "exchange" : null)}
               >
                 <DataMenu
-                  downloading={dlState?.key ?? null}
-                  downloadFrac={dlState?.frac ?? null}
-                  annBusy={annBusy}
-                  annProgress={annProgress}
-                  onDownload={(key) =>
-                    handleDownload(
-                      key,
-                      key === "ann"
-                        ? annotationsUrl(pairId)
-                        : taskBackupUrl(pairId),
-                      `${pairId}-${key === "ann" ? "annotations" : "backup"}.zip`,
-                    )
-                  }
-                  onImport={handleAnnotationsImport}
+                  pairId={pairId}
+                  onAnnotationsImported={handleAnnotationsImported}
+                  onError={(message) => flash(message, "error")}
                 />
               </Popover>
               <Popover
@@ -1997,20 +1952,9 @@ export function CutEditor({
                     <div role="tabpanel" aria-label="Данные">
                       {mobileMenuTab === "exchange" && (
                         <DataMenu
-                          downloading={dlState?.key ?? null}
-                          downloadFrac={dlState?.frac ?? null}
-                          annBusy={annBusy}
-                          annProgress={annProgress}
-                          onDownload={(key) =>
-                            handleDownload(
-                              key,
-                              key === "ann"
-                                ? annotationsUrl(pairId)
-                                : taskBackupUrl(pairId),
-                              `${pairId}-${key === "ann" ? "annotations" : "backup"}.zip`,
-                            )
-                          }
-                          onImport={handleAnnotationsImport}
+                          pairId={pairId}
+                          onAnnotationsImported={handleAnnotationsImported}
+                          onError={(message) => flash(message, "error")}
                         />
                       )}
                     </div>

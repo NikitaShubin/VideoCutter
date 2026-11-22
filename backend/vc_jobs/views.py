@@ -60,8 +60,26 @@ def _job_or_404(scheduler, job_id: str, identity):
     return job
 
 
-def _serialize(job) -> Dict[str, Any]:
-    return {**job.to_dict(), "display_status": job.display_status}
+def _serialize(job, scheduler=None) -> Dict[str, Any]:
+    data = {**job.to_dict(), "display_status": job.display_status}
+    prerequisites = []
+    if scheduler is not None:
+        for dep_id in job.depends_on:
+            dep = scheduler.get(dep_id)
+            if dep is None:
+                continue
+            dep_type = scheduler.registry.get(dep.type)
+            prerequisites.append({
+                "id": dep.id,
+                "type": dep.type,
+                "label": dep_type.label if dep_type is not None else dep.type,
+                "status": dep.status,
+                "display_status": dep.display_status,
+            })
+    data["prerequisites"] = prerequisites
+    data["blocked_by"] = [
+        item["id"] for item in prerequisites if item["status"] != DONE]
+    return data
 
 
 def _body(request) -> Optional[Dict[str, Any]]:
@@ -95,7 +113,7 @@ def jobs_collection(request):
             return _error(str(exc))
         visible = [j for j in jobs if _visible(j, identity)]
         return JsonResponse({
-            "jobs": [_serialize(j) for j in visible],
+            "jobs": [_serialize(j, scheduler) for j in visible],
             "next": cursor,
         })
 
@@ -122,7 +140,21 @@ def jobs_collection(request):
     if idempotency_key is not None and not isinstance(idempotency_key, str):
         return _error("idempotency_key должен быть строкой")
 
-    owner, _roles, _restricted = identity
+    owner, _roles, restricted = identity
+    upload_ids = []
+    if target.get("kind") == "upload" and isinstance(target.get("id"), str):
+        upload_ids.append(target["id"])
+    if isinstance(params.get("upload_id"), str):
+        upload_ids.append(params["upload_id"])
+    if upload_ids:
+        from . import uploads
+
+        for upload_id in dict.fromkeys(upload_ids):
+            upload_owner = uploads.owner(upload_id)
+            if upload_owner is None:
+                return _error("загруженный файл не найден", 404)
+            if restricted and upload_owner != owner:
+                return _error("чужая загрузка: нет доступа", 403)
     try:
         job, deduplicated = scheduler.submit(JobSpec(
             type=job_type, target=target, params=params, owner=owner,
@@ -132,7 +164,7 @@ def jobs_collection(request):
         return _error(str(exc), 400)
     except (JobCycleError, ValueError) as exc:
         return _error(str(exc), 400)
-    return JsonResponse({"job": _serialize(job),
+    return JsonResponse({"job": _serialize(job, scheduler),
                          "deduplicated": deduplicated}, status=202)
 
 
@@ -142,7 +174,7 @@ def job_detail(request, job_id: str):
     job = _job_or_404(scheduler, job_id, _owner(request))
     if job is None:
         return _error("операция не найдена", 404)
-    return JsonResponse({"job": _serialize(job)})
+    return JsonResponse({"job": _serialize(job, scheduler)})
 
 
 @require_http_methods(["POST"])
@@ -156,7 +188,7 @@ def job_cancel(request, job_id: str):
         return _error("операция не найдена", 404)
     except JobConflict as exc:
         return _error(str(exc), 409)
-    return JsonResponse({"job": _serialize(job)}, status=202)
+    return JsonResponse({"job": _serialize(job, scheduler)}, status=202)
 
 
 @require_http_methods(["POST"])
@@ -170,7 +202,7 @@ def job_retry(request, job_id: str):
         return _error("операция не найдена", 404)
     except JobConflict as exc:
         return _error(str(exc), 409)
-    return JsonResponse({"job": _serialize(job)}, status=202)
+    return JsonResponse({"job": _serialize(job, scheduler)}, status=202)
 
 
 def _allowed_download(path: str) -> bool:
@@ -226,13 +258,16 @@ def job_download(request, job_id: str):
 @require_http_methods(["POST"])
 def jobs_upload(request):
     """Принимает архив для фонового импорта; возвращает upload_id."""
-    from . import uploads
+    from . import disk, uploads
 
     upload = request.FILES.get("file")
     if upload is None:
         return _error("Не передан файл архива (поле 'file')")
+    owner, _roles, _restricted = _owner(request)
     try:
-        body = uploads.save(upload)
+        body = uploads.save(upload, owner=owner)
+    except disk.InsufficientSpace as exc:
+        return _error(str(exc), 507)
     except ValueError as exc:
         return _error(str(exc))
     return JsonResponse(body, status=201)

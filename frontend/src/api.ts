@@ -552,6 +552,67 @@ export function getJobTypes(): Promise<{ types: JobTypeManifest[] }> {
   );
 }
 
+export interface JobUpload {
+  id: string;
+  name: string;
+  size: number;
+  owner: string;
+}
+
+/** Загрузка архива для фонового импорта (upload_id вместо тела в задаче). */
+export function uploadJobArchive(
+  file: File,
+  onProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<JobUpload> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", file);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/jobs/uploads`);
+    xhrAuthHeaders(xhr);
+    if (signal) {
+      if (signal.aborted) {
+        reject(new DOMException("Отменено", "AbortError"));
+        return;
+      }
+      signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    }
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        /* ignore */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as JobUpload);
+      } else {
+        reject(xhrError(xhr, body));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Ошибка сети при загрузке архива"));
+    xhr.onabort = () => reject(new DOMException("Отменено", "AbortError"));
+    xhr.send(form);
+  });
+}
+
+export function jobDownloadUrl(id: string): string {
+  return `${BASE}/jobs/${encodeURIComponent(id)}/download`;
+}
+
+/** Скачивает готовый результат операции с тем же откликом, что и старые ссылки. */
+export function downloadJobResult(
+  jobId: string,
+  filename: string,
+  onProgress?: (fraction: number | null) => void,
+): Promise<void> {
+  return downloadFile(jobDownloadUrl(jobId), filename, onProgress);
+}
+
 /** Операция планировщика → прежний вид статуса экспорта для редактора. */
 function jobToExportStatus(job: Job): ExportStatus {
   const total = job.progress?.total ?? 0;

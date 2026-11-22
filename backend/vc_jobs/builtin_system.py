@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Tuple
 import workspace as ws_module
 from vc_pairs import frame_provider
 
+from . import checkpoints
 from .registry import JobRegistry, JobType
 from .scheduler import JobResult, JobSpec
 
@@ -66,19 +67,35 @@ def _task(ws_id: str):
     return ws
 
 
-def _bad_video(ws_id: str, message: str, path: str = "") -> RuntimeError:
+class _VideoProblem(RuntimeError):
+    """Внешний сбой чтения видео: файл, диск, декодер.
+
+    Такой сбой не отменяет уже прочитанные роли: контрольная точка остаётся,
+    и повтор продолжит с проблемного файла.
+    """
+
+
+def _bad_video(ws_id: str, message: str, path: str = "") -> _VideoProblem:
     """Помечает задачу битой и возвращает ошибку для записи операции."""
     ws_module.note_workspace_error(ws_id, message, path)
-    return RuntimeError(message)
+    return _VideoProblem(message)
 
 
-def _inspect(ws_id: str, ws, ctx) -> Dict[str, Any]:
-    """Читает метаданные всех ролей; сбой привязан к конкретному файлу."""
+def _inspect(ws_id: str, ws, ctx, *,
+             fingerprint: str = "") -> Dict[str, Any]:
+    """Читает метаданные всех ролей; сбой привязан к конкретному файлу.
+
+    Успешные роли сохраняются в контрольной точке по отпечатку файлов:
+    внешний сбой на следующей роли не заставляет перечитывать предыдущие.
+    """
     roles = _roles(ws)
     if not roles:
         raise _bad_video(
             ws_id, "Не удалось прочитать видео: видео не распознано "
                    "(расширение файла не видео)")
+
+    key = fingerprint or task_fingerprint(ws)
+    saved = checkpoints.load(ws_id, key)
 
     result: Dict[str, Any] = {"roles": {}}
     total = len(roles)
@@ -86,16 +103,19 @@ def _inspect(ws_id: str, ws, ctx) -> Dict[str, Any]:
         ctx.checkpoint()
         ctx.progress(index - 1, total, message=f"Проверка {role}",
                      unit="файл")
-        try:
-            meta = frame_provider.get_metadata(path)
-        except frame_provider._DecodeCancelled:
-            raise
-        except OSError as exc:
-            raise _bad_video(
-                ws_id, f"Не удалось прочитать видео: {exc}", path)
-        except Exception as exc:  # noqa: BLE001 — любой сбой чтения
-            raise _bad_video(
-                ws_id, f"Не удалось прочитать видео: {exc}", path)
+        meta = saved.get(role)
+        if meta is None:
+            try:
+                meta = frame_provider.get_metadata(path)
+            except frame_provider._DecodeCancelled:
+                raise
+            except OSError as exc:
+                raise _bad_video(
+                    ws_id, f"Не удалось прочитать видео: {exc}", path)
+            except Exception as exc:  # noqa: BLE001 — любой сбой чтения
+                raise _bad_video(
+                    ws_id, f"Не удалось прочитать видео: {exc}", path)
+            checkpoints.save_role(ws_id, key, role, meta)
         if not meta.get("total_frames"):
             raise _bad_video(
                 ws_id, "Не удалось прочитать видео: видео не содержит кадров",
@@ -120,11 +140,21 @@ def _inspect(ws_id: str, ws, ctx) -> Dict[str, Any]:
 def execute_index(job, ctx) -> JobResult:
     ws_id = job.target.get("id")
     ws = _task(ws_id)
+    key = task_fingerprint(ws)
     try:
-        data = _inspect(ws_id, ws, ctx)
+        data = _inspect(ws_id, ws, ctx, fingerprint=key)
     except frame_provider._DecodeCancelled:
         return JobResult(summary="Задача удалена во время индексации")
+    except _VideoProblem:
+        raise
+    except BaseException:
+        # Внутренняя ошибка — точка могла быть записана частично и уже
+        # не описывает реальный прогресс; проверка начнётся заново.
+        checkpoints.clear(ws_id, key)
+        raise
 
+    # Точку не убираем: следующая валидация той же версии переиспользует
+    # прочитанные роли, не декодируя видео второй раз.
     ctx.progress(1, 1, message="Индекс готов", unit="задача")
     summary = f"Индекс: {data['total_frames']} кадров"
     return JobResult(summary=summary, extra={
@@ -136,11 +166,18 @@ def execute_index(job, ctx) -> JobResult:
 def execute_validate(job, ctx) -> JobResult:
     ws_id = job.target.get("id")
     ws = _task(ws_id)
+    key = task_fingerprint(ws)
     try:
-        data = _inspect(ws_id, ws, ctx)
+        data = _inspect(ws_id, ws, ctx, fingerprint=key)
     except frame_provider._DecodeCancelled:
         return JobResult(summary="Задача удалена во время проверки")
+    except _VideoProblem:
+        raise
+    except BaseException:
+        checkpoints.clear(ws_id, key)
+        raise
 
+    checkpoints.clear(ws_id, key)
     # Успешная проверка — единственный способ снять старую отметку о
     # поломке без перезапуска процесса.
     ws_module.clear_workspace_error(ws_id)
@@ -162,7 +199,8 @@ def _index_prerequisite(spec) -> List[JobSpec]:
         type=INDEX_TYPE,
         target=dict(spec.target),
         owner="system",
-        priority=1,
+        priority=spec.priority,
+        inherit_priority=True,
         idempotency_key=f"index:{key}",
     )]
 
@@ -187,7 +225,8 @@ def validation_prerequisites(spec) -> List[JobSpec]:
         type=VALIDATE_TYPE,
         target=dict(target),
         owner="system",
-        priority=1,
+        priority=spec.priority,
+        inherit_priority=True,
         idempotency_key=f"validate:{key}",
     )]
 

@@ -16,6 +16,7 @@ from unittest import mock
 import vc_jobs
 import workspace
 from vc_fragments.tests import WorkspaceApiTestBase
+from vc_jobs import checkpoints
 from vc_jobs.builtin import register_builtin
 from vc_jobs.builtin_export import EXPORT_TYPE
 from vc_jobs.builtin_system import (INDEX_TYPE, VALIDATE_TYPE,
@@ -42,6 +43,10 @@ class SystemJobTestBase(WorkspaceApiTestBase):
     def setUp(self):
         super().setUp()
         self.root = os.path.join(self._tmpdir, ".state")
+        self.env = mock.patch.dict(
+            os.environ, {"VC_STATE_ROOT": self.root})
+        self.env.start()
+        self.addCleanup(self.env.stop)
         self.store = JobStore(os.path.join(self.root, "jobs"))
         self.registry = JobRegistry()
         register_builtin(self.registry)
@@ -148,6 +153,14 @@ class FingerprintTests(SystemJobTestBase):
         self.assertEqual(specs[0].owner, "system")
         self.assertTrue(specs[0].idempotency_key)
 
+    def test_validation_prerequisite_inherits_requester_priority(self):
+        specs = validation_prerequisites(JobSpec(
+            type=EXPORT_TYPE, target={"kind": "task", "id": self.ws_id},
+            priority=10))
+
+        self.assertEqual(specs[0].priority, 10)
+        self.assertTrue(specs[0].inherit_priority)
+
     def test_missing_task_has_no_prerequisites(self):
         specs = validation_prerequisites(JobSpec(
             type=EXPORT_TYPE, target={"kind": "task", "id": "no-such"}))
@@ -162,6 +175,112 @@ class FingerprintTests(SystemJobTestBase):
         second = self.run_job(VALIDATE_TYPE, idempotency_key=key)
 
         self.assertEqual(second.id, first.id)
+
+
+class CheckpointResumeTests(SystemJobTestBase):
+    """Внешний сбой не отменяет уже прочитанные роли той же версии."""
+
+    def _ws(self, source="/source.mp4", preview="/preview.mp4"):
+        return SimpleNamespace(original=source, visualization=preview)
+
+    def test_external_failure_keeps_completed_role(self):
+        ws = self._ws()
+        calls = []
+
+        def metadata(path):
+            calls.append(path)
+            if path == "/preview.mp4":
+                raise OSError("диск отвалился")
+            return {"total_frames": 10, "fps": 25}
+
+        with mock.patch.object(
+                frame_provider, "get_metadata", side_effect=metadata):
+            with self.assertRaises(RuntimeError):
+                _inspect(self.ws_id, ws, _Ctx())
+
+        saved = checkpoints.load(self.ws_id, task_fingerprint(ws))
+        self.assertEqual(set(saved), {"source"})
+
+        calls.clear()
+
+        def recovered(path):
+            calls.append(path)
+            return {"total_frames": 10, "fps": 25}
+
+        with mock.patch.object(
+                frame_provider, "get_metadata", side_effect=recovered):
+            data = _inspect(self.ws_id, ws, _Ctx())
+
+        self.assertEqual(calls, ["/preview.mp4"])
+        self.assertEqual(data["total_frames"], 10)
+
+    def test_changed_fingerprint_restarts_from_first_role(self):
+        ws = self._ws()
+        with mock.patch.object(
+                frame_provider, "get_metadata",
+                side_effect=OSError("сбой")):
+            with self.assertRaises(RuntimeError):
+                _inspect(self.ws_id, ws, _Ctx())
+
+        calls = []
+
+        def metadata(path):
+            calls.append(path)
+            return {"total_frames": 10}
+
+        with mock.patch.object(
+                frame_provider, "get_metadata", side_effect=metadata):
+            _inspect(self.ws_id, self._ws("/other.mp4"), _Ctx())
+
+        self.assertEqual(calls, ["/other.mp4", "/preview.mp4"])
+
+    def test_successful_validation_removes_checkpoint(self):
+        ws = self._ws()
+        key = task_fingerprint(ws)
+        checkpoints.save_role(
+            self.ws_id, key, "source", {"total_frames": 10})
+
+        with mock.patch("vc_jobs.builtin_system._task", return_value=ws), \
+                mock.patch("vc_jobs.builtin_system.ws_module."
+                           "clear_workspace_error"), \
+                mock.patch.object(
+                    frame_provider, "get_metadata",
+                    return_value={"total_frames": 10}):
+            execute_validate(
+                SimpleNamespace(target={"kind": "task", "id": self.ws_id}),
+                _Ctx())
+
+        self.assertEqual(checkpoints.load(self.ws_id, key), {})
+
+    def test_internal_error_removes_checkpoint(self):
+        ws = self._ws()
+        key = task_fingerprint(ws)
+        checkpoints.save_role(
+            self.ws_id, key, "source", {"total_frames": 10})
+
+        with mock.patch("vc_jobs.builtin_system._task", return_value=ws), \
+                mock.patch("vc_jobs.builtin_system._inspect",
+                           side_effect=KeyError("баг")):
+            with self.assertRaises(KeyError):
+                execute_validate(
+                    SimpleNamespace(
+                        target={"kind": "task", "id": self.ws_id}), _Ctx())
+
+        self.assertEqual(checkpoints.load(self.ws_id, key), {})
+
+    def test_index_checkpoint_is_reused_by_validation(self):
+        self.run_job(INDEX_TYPE)
+        ws = workspace.get_workspace(self.ws_id)
+        key = task_fingerprint(ws)
+        self.assertTrue(checkpoints.load(self.ws_id, key))
+
+        with mock.patch.object(
+                frame_provider, "get_metadata",
+                side_effect=AssertionError("видео декодировано повторно")):
+            job = self.run_job(VALIDATE_TYPE)
+
+        self.assertTrue(job.result["valid"])
+        self.assertEqual(checkpoints.load(self.ws_id, key), {})
 
 
 class OpenTaskTests(SystemJobTestBase):

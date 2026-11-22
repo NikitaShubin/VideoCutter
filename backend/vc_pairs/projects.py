@@ -21,7 +21,8 @@ import workspace as ws_module
 from videocutter.standalone import workspace as ws_fs
 from workspace import scan_workspaces
 
-from .views import _workspace_delete
+from .views import (_active_jobs_for, _active_jobs_response,
+                    _cancel_active_jobs, _flag, _workspace_delete)
 
 
 def _project_404(pid: str) -> JsonResponse:
@@ -156,13 +157,27 @@ def _project_delete(request, pid: str) -> JsonResponse:
     members = [name for name, cur in project_meta.task_project_ids().items()
                if cur == pid]
 
+    # Операции над проектом и (при каскаде) над его задачами — стоп-сигнал.
+    # Без force отвечаем списком; с force отменяем и удаляем.
+    targets = [f"project:{pid}"]
+    if mode == "cascade":
+        targets += [f"task:{name}" for name in members]
+    jobs = _active_jobs_for(*targets)
+    if jobs:
+        if not _flag(request.GET.get("force")):
+            return _active_jobs_response(jobs)
+        # Задачи отменит их собственный _workspace_delete(force=True);
+        # здесь — только операции над самим проектом, без двойной отмены.
+        _cancel_active_jobs(
+            [job for job in jobs if job.target.get("kind") == "project"])
+
     if mode == "cascade":
         # Каскад — как в CVAT: проект удаляется вместе с задачами (и видео).
         # Прерванный на полу пути оставляет проект: лучше сообщить об ошибке,
         # чем удалить пусто.
         failed = []
         for name in members:
-            resp = _workspace_delete(name)
+            resp = _workspace_delete(name, force=True)
             if resp.status_code != 200:
                 failed.append(f"{name}: {resp.content.decode('utf-8', 'replace')}")
         if failed:

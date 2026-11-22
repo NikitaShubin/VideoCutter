@@ -17,7 +17,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from vc_jobs import uploads
+from vc_jobs import disk, uploads
 
 
 class FakeUpload:
@@ -82,6 +82,13 @@ class SaveTests(UploadsTestBase):
             with self.assertRaises(ValueError):
                 uploads.save(FakeUpload(size=2 * 1024 * 1024))
 
+    def test_save_checks_free_space_before_creating_file(self):
+        with mock.patch("vc_jobs.disk.free_bytes", return_value=0):
+            with self.assertRaises(disk.InsufficientSpace):
+                uploads.save(FakeUpload())
+
+        self.assertEqual(os.listdir(self.directory()), [])
+
     def test_failed_write_removes_partial_file(self):
         upload = FakeUpload(error=OSError("диск"))
 
@@ -131,6 +138,57 @@ class PruneTests(UploadsTestBase):
             uploads.prune()
 
         self.assertTrue(os.path.exists(old))
+
+
+class OwnershipTests(UploadsTestBase):
+    def test_save_remembers_owner(self):
+        body = uploads.save(FakeUpload(), owner="alice")
+
+        self.assertEqual(body["owner"], "alice")
+        self.assertEqual(uploads.owner(body["id"]), "alice")
+
+    def test_legacy_upload_without_sidecar_is_local(self):
+        path = self.make_file("a" * 32 + ".zip")
+
+        self.assertEqual(uploads.owner("a" * 32), "local")
+        self.assertTrue(os.path.isfile(path))
+
+    def test_owner_of_missing_upload_is_none(self):
+        self.assertIsNone(uploads.owner(uuid.uuid4().hex))
+        self.assertIsNone(uploads.owner("../bad"))
+
+    def test_broken_sidecar_falls_back_to_local(self):
+        body = uploads.save(FakeUpload())
+        with open(os.path.join(
+                self.directory(), body["id"] + ".json"), "w") as fh:
+            fh.write("{broken")
+
+        self.assertEqual(uploads.owner(body["id"]), "local")
+
+
+class PinTests(UploadsTestBase):
+    def test_prune_keeps_upload_pinned_by_active_job(self):
+        body = uploads.save(FakeUpload())
+        path = os.path.join(self.directory(), body["id"] + ".zip")
+        old = time.time() - 2 * 86400
+        os.utime(path, (old, old))
+
+        uploads.prune(pinned={body["id"]})
+
+        self.assertTrue(os.path.isfile(path))
+
+    def test_prune_removes_sidecar_with_archive(self):
+        body = uploads.save(FakeUpload())
+        path = os.path.join(self.directory(), body["id"] + ".zip")
+        meta = os.path.join(self.directory(), body["id"] + ".json")
+        old = time.time() - 2 * 86400
+        os.utime(path, (old, old))
+        os.utime(meta, (old, old))
+
+        uploads.prune()
+
+        self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(meta))
 
 
 class ResolveTests(UploadsTestBase):

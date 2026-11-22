@@ -5,6 +5,7 @@
 """
 
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -13,13 +14,14 @@ import time
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
 
 import vc_jobs
 import workspace
 from vc_jobs.activity import ActivityLog
 from vc_jobs.registry import JobRegistry, JobType
-from vc_jobs.scheduler import Scheduler
+from vc_jobs.scheduler import JobSpec, Scheduler
 from vc_jobs.store import JobStore
 
 JOBS = "/api/v1/jobs"
@@ -201,6 +203,29 @@ class CreateTests(JobsApiTestBase):
         response = self.post(payload={"type": "test.echo", "target": "task"})
 
         self.assertEqual(response.status_code, 400)
+
+    def test_prerequisites_are_serialized_with_label_and_status(self):
+        self.reg.register(JobType(
+            key="test.parent", lane="system", label="Проверка видео",
+            executor=self._slow))
+        self.reg.register(JobType(
+            key="test.child", lane="export", label="Экспорт",
+            executor=lambda job, ctx: None,
+            prerequisites=lambda spec: [JobSpec(
+                type="test.parent", target=spec.target,
+                owner=spec.owner)]))
+        child = self.create(type="test.child")
+
+        body = self.client.get(f"{JOBS}/{child['id']}").json()["job"]
+
+        self.assertEqual(body["blocked_by"],
+                         [body["prerequisites"][0]["id"]])
+        self.assertEqual(body["prerequisites"][0]["type"], "test.parent")
+        self.assertEqual(body["prerequisites"][0]["label"],
+                         "Проверка видео")
+        self.assertIn(body["prerequisites"][0]["status"],
+                      ("queued", "running"))
+        self.release.set()
 
     def test_bad_depends_on_is_400(self):
         response = self.post(payload={
@@ -465,3 +490,77 @@ class OwnerTests(JobsApiTestBase):
 
         self.assertEqual(response.status_code, 404)
         self.release.set()
+
+
+class UploadOwnershipTests(JobsApiTestBase):
+    def setUp(self):
+        super().setUp()
+        os.environ["VC_TRUST_PROXY"] = "1"
+
+    def upload(self, user="alice"):
+        archive = SimpleUploadedFile(
+            "a.zip", b"zipdata", content_type="application/zip")
+        response = self.client.post(
+            f"{JOBS}/uploads", {"file": archive}, HTTP_X_VC_USER=user)
+        self.assertEqual(response.status_code, 201)
+        return response.json()
+
+    def test_upload_records_owner(self):
+        body = self.upload()
+
+        self.assertEqual(body["owner"], "alice")
+
+    def test_foreign_user_cannot_use_upload(self):
+        body = self.upload()
+
+        response = self.post(
+            payload={"type": "test.echo",
+                     "target": {"kind": "upload", "id": body["id"]}},
+            HTTP_X_VC_USER="bob")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_foreign_user_cannot_use_upload_param(self):
+        body = self.upload()
+
+        response = self.post(
+            payload={"type": "test.echo",
+                     "target": {"kind": "task", "id": "t1"},
+                     "params": {"upload_id": body["id"]}},
+            HTTP_X_VC_USER="bob")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_owner_and_admin_may_use_upload(self):
+        body = self.upload()
+        payload = {"type": "test.echo",
+                   "target": {"kind": "upload", "id": body["id"]}}
+
+        owner = self.post(payload=payload, HTTP_X_VC_USER="alice")
+        admin = self.post(payload=payload, HTTP_X_VC_USER="root",
+                          HTTP_X_VC_ROLES="admin")
+
+        self.assertEqual(owner.status_code, 202)
+        self.assertEqual(admin.status_code, 202)
+
+    def test_missing_upload_is_404(self):
+        response = self.post(
+            payload={"type": "test.echo",
+                     "target": {"kind": "upload", "id": "a" * 32}},
+            HTTP_X_VC_USER="alice")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_upload_disk_full_is_507(self):
+        archive = SimpleUploadedFile("a.zip", b"zipdata")
+        logging.disable(logging.CRITICAL)
+        try:
+            with mock.patch("vc_jobs.disk.free_bytes", return_value=0):
+                response = self.client.post(
+                    f"{JOBS}/uploads", {"file": archive},
+                    HTTP_X_VC_USER="alice")
+        finally:
+            logging.disable(logging.NOTSET)
+
+        self.assertEqual(response.status_code, 507)
+        self.assertIn("места", response.json()["error"])

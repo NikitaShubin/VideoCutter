@@ -43,6 +43,67 @@ class ArchiveCacheTestBase(SimpleTestCase):
         return archive_path, metadata
 
 
+class SizeLimitTests(ArchiveCacheTestBase):
+    def test_cache_limit_evicts_oldest_archives(self):
+        with mock.patch.dict(
+                os.environ, {"VC_ARCHIVE_CACHE_MAX_MB": "1"}):
+            self.cache.store("ns", "old", b"x" * 400_000, "old.zip")
+            self.cache.store("ns", "mid", b"x" * 400_000, "mid.zip")
+            self.cache.store("ns", "new", b"x" * 400_000, "new.zip")
+
+        self.assertIsNone(self.cache.lookup("ns", "old"))
+        self.assertIsNotNone(self.cache.lookup("ns", "mid"))
+        self.assertIsNotNone(self.cache.lookup("ns", "new"))
+
+    def test_cache_limit_uses_creation_order_within_one_millisecond(self):
+        """Три архива подряд не должны становиться «одновременными».
+
+        Раньше timestamp обрезался до миллисекунд, и при совпадении порядок
+        решал алфавит ключей: первым вытеснялся не старый архив, а тот, чьё
+        имя меньше. Ключи выбраны так, чтобы алфавитный порядок был обратным
+        порядку создания.
+        """
+        base = datetime.now(timezone.utc).replace(microsecond=0)
+        ticks = iter(base + timedelta(microseconds=i) for i in range(100))
+        with mock.patch.dict(
+                os.environ, {"VC_ARCHIVE_CACHE_MAX_MB": "1"}), \
+                mock.patch("vc_jobs.archive_cache._now",
+                           side_effect=lambda: next(ticks)):
+            self.cache.store("ns", "z-old", b"x" * 400_000, "old.zip")
+            self.cache.store("ns", "m-mid", b"x" * 400_000, "mid.zip")
+            self.cache.store("ns", "a-new", b"x" * 400_000, "new.zip")
+
+            self.assertIsNone(self.cache.lookup("ns", "z-old"))
+            self.assertIsNotNone(self.cache.lookup("ns", "m-mid"))
+            self.assertIsNotNone(self.cache.lookup("ns", "a-new"))
+
+    def test_single_archive_over_limit_is_kept(self):
+        with mock.patch.dict(
+                os.environ, {"VC_ARCHIVE_CACHE_MAX_MB": "1"}):
+            entry = self.cache.store(
+                "ns", "big", b"x" * (2 * 1024 * 1024), "big.zip")
+
+        self.assertTrue(os.path.isfile(entry.archive_path))
+
+    def test_new_temp_checks_free_space_before_creating_file(self):
+        from vc_jobs import disk
+
+        with mock.patch("vc_jobs.disk.free_bytes", return_value=0):
+            with self.assertRaises(disk.InsufficientSpace):
+                self.cache.new_temp("ns")
+
+        self.assertEqual(
+            [name for name in os.listdir(os.path.join(self.root, "ns"))
+             if name.startswith(".build-")], [])
+
+    def test_bad_cache_limit_env_falls_back_to_default(self):
+        with mock.patch.dict(
+                os.environ, {"VC_ARCHIVE_CACHE_MAX_MB": "nope"}):
+            entry = self.cache.store("ns", "k", b"zip", "k.zip")
+
+        self.assertTrue(os.path.isfile(entry.archive_path))
+
+
 class MetadataReadTests(ArchiveCacheTestBase):
     def test_corrupt_metadata_is_ignored(self):
         _, _, metadata = self.paths()

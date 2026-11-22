@@ -1,81 +1,59 @@
-import { formatPercent } from "../model/format";
-import { FileButton } from "./FileButton";
+import type { Job } from "../types";
+import { JobAction, JobFileAction } from "./JobActions";
 
 interface Props {
-  downloading: "ann" | "bak" | null;
-  downloadFrac: number | null;
-  annBusy: boolean;
-  annProgress: number | null;
-  onDownload: (key: "ann" | "bak") => void;
-  onImport: (file: File) => void;
+  pairId: string;
+  disabled?: boolean;
+  onAnnotationsImported?: (job: Job) => void;
+  onError?: (message: string) => void;
 }
 
-function progressLabel(base: string, frac: number | null): string {
-  return frac === null
-    ? `${base}…`
-    : `${base} ${formatPercent(Math.round(frac * 100))}`;
-}
-
-/** Данные: разметка и бэкапы — три файловых действия с пояснениями. */
+/** Данные: разметка и бэкапы — фоновые операции с прогрессом и отменой. */
 export function DataMenu({
-  downloading,
-  downloadFrac,
-  annBusy,
-  annProgress,
-  onDownload,
-  onImport,
+  pairId,
+  disabled,
+  onAnnotationsImported,
+  onError,
 }: Props) {
-  const busy = downloading !== null || annBusy;
-  const annDownloading = downloading === "ann";
-  const bakDownloading = downloading === "bak";
-
   return (
     <div className="menu-stack">
-      <button
-        type="button"
-        className="menu-action"
-        disabled={busy}
-        onClick={() => onDownload("ann")}
-      >
-        <span className="menu-action-title">
-          {annDownloading
-            ? progressLabel("Скачиваю разметку", downloadFrac)
-            : "Скачать разметку"}
-        </span>
-        <span className="menu-action-note">
-          fragments.tsv + манифест, без видео
-        </span>
-      </button>
-      <FileButton
-        className="menu-action"
-        accept=".zip,application/zip"
-        disabled={annBusy}
-        onFile={onImport}
-      >
-        <span className="menu-action-title">
-          {annProgress !== null
-            ? `Импортирую разметку ${formatPercent(Math.round(annProgress * 100))}`
-            : "Импортировать разметку"}
-        </span>
-        <span className="menu-action-note">
-          применить архив к задаче; видео не меняется
-        </span>
-      </FileButton>
-      <button
-        type="button"
-        className="menu-action"
-        disabled={busy}
-        onClick={() => onDownload("bak")}
-      >
-        <span className="menu-action-title">
-          {bakDownloading
-            ? progressLabel("Скачиваю бэкап", downloadFrac)
-            : "Скачать бэкап"}
-        </span>
-        <span className="menu-action-note">
-          видео + разметка + паспорт задачи
-        </span>
-      </button>
+      <JobAction
+        buttonClassName="menu-action"
+        label="Скачать разметку"
+        title="Скачать fragments.tsv + манифест"
+        disabled={disabled}
+        request={() => ({
+          type: "annotations.export",
+          target: { kind: "task", id: pairId },
+        })}
+        downloadName={`${pairId}-annotations.zip`}
+        onError={onError}
+      />
+      <JobFileAction
+        buttonClassName="menu-action"
+        label="Импортировать разметку"
+        title="Применить архив к задаче; видео не меняется"
+        disabled={disabled}
+        request={(uploadId) => ({
+          type: "annotations.import",
+          target: { kind: "task", id: pairId },
+          params: { upload_id: uploadId },
+        })}
+        onDone={onAnnotationsImported}
+        onError={onError}
+      />
+      <JobAction
+        buttonClassName="menu-action"
+        label="Скачать бэкап"
+        title="Скачать видео + разметку + паспорт задачи"
+        disabled={disabled}
+        request={() => ({
+          type: "backup.task",
+          target: { kind: "task", id: pairId },
+        })}
+        downloadName={`${pairId}-backup.zip`}
+        onError={onError}
+      />
     </div>
   );
 }

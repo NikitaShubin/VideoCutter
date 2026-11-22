@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -872,6 +873,71 @@ class DeleteRobustnessTests(WorkspaceApiTestBase):
             with EXPORTS_LOCK:
                 EXPORTS.pop(self.ws_id, None)
                 EXPORT_CANCEL.discard(self.ws_id)
+
+
+class _FakeRegistry:
+    def get(self, key):
+        return SimpleNamespace(label="Резервная копия")
+
+
+class _FakeScheduler:
+    """Минимальный планировщик для проверки стража удаления."""
+
+    def __init__(self, jobs):
+        self.jobs = list(jobs)
+        self.cancelled = []
+        self.registry = _FakeRegistry()
+
+    def all(self):
+        return list(self.jobs)
+
+    def cancel(self, job_id):
+        self.cancelled.append(job_id)
+        return next(job for job in self.jobs if job.id == job_id)
+
+
+class DeleteJobGuardTests(WorkspaceApiTestBase):
+    """Активная фоновая операция не даёт удалить задачу без ``force=1``."""
+
+    def _job(self, kind="task", ident=None, job_id="job-1"):
+        return SimpleNamespace(
+            id=job_id, type="backup.task",
+            target={"kind": kind, "id": ident or self.ws_id},
+            active=True, display_status="running")
+
+    def _scheduler(self, jobs):
+        fake = _FakeScheduler(jobs)
+        patcher = mock.patch("vc_jobs.peek_scheduler", return_value=fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return fake
+
+    def test_delete_is_409_while_job_is_active(self):
+        job = self._job()
+        self._scheduler([job])
+
+        resp = self.client.delete(self.ws_detail_url)
+
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["active_jobs"][0]["id"], job.id)
+        self.assertTrue(os.path.isdir(self.ws_dir))
+
+    def test_force_cancels_active_job_and_deletes(self):
+        job = self._job()
+        fake = self._scheduler([job])
+
+        resp = self.client.delete(self.ws_detail_url + "?force=1")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(fake.cancelled, [job.id])
+        self.assertFalse(os.path.exists(self.ws_dir))
+
+    def test_foreign_task_job_does_not_block_delete(self):
+        self._scheduler([self._job(ident="other-task")])
+
+        resp = self.client.delete(self.ws_detail_url)
+
+        self.assertEqual(resp.status_code, 200)
 
 
 class _CovHelperMixin:

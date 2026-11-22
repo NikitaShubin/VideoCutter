@@ -9,6 +9,8 @@
 
 import json
 import os
+from types import SimpleNamespace
+from unittest import mock
 from urllib.parse import quote
 
 import task_meta
@@ -399,6 +401,79 @@ class ProjectDetailUpdateTests(ProjectTestBase):
             resp = self.json_put(
                 self.project_url(p["id"]), {"name": "ok"})
         self.assertEqual(resp.status_code, 400)
+
+
+class _JobRegistry:
+    def get(self, key):
+        return SimpleNamespace(label="Резервная копия проекта")
+
+
+class _JobScheduler:
+    def __init__(self, jobs):
+        self.jobs = list(jobs)
+        self.cancelled = []
+        self.registry = _JobRegistry()
+
+    def all(self):
+        return list(self.jobs)
+
+    def cancel(self, job_id):
+        self.cancelled.append(job_id)
+        return next(job for job in self.jobs if job.id == job_id)
+
+
+class ProjectDeleteJobGuardTests(ProjectTestBase):
+    """Каскад проекта проверяет операции всех задач, а не только проекта."""
+
+    def _scheduler(self, jobs):
+        fake = _JobScheduler(jobs)
+        patcher = mock.patch("vc_jobs.peek_scheduler", return_value=fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return fake
+
+    def _job(self, kind, ident, job_id="job-1"):
+        return SimpleNamespace(
+            id=job_id, type="backup.task",
+            target={"kind": kind, "id": ident},
+            active=True, display_status="running")
+
+    def _project_with_task(self):
+        self.client.get(self.ws_list_url)  # миграция → default
+        p = self.create_project("Занятый")
+        self.json_post(self.tasks_url(p["id"]), {"task_id": self.ws_id})
+        return p
+
+    def test_cascade_is_409_while_member_task_has_active_job(self):
+        p = self._project_with_task()
+        self._scheduler([self._job("task", self.ws_id)])
+
+        resp = self.client.delete(self.project_url(p["id"]))
+
+        self.assertEqual(resp.status_code, HTTP_CONFLICT)
+        self.assertEqual(resp.json()["active_jobs"][0]["id"], "job-1")
+        self.assertTrue(os.path.isdir(self.ws_dir))
+
+    def test_project_job_blocks_delete_even_with_keep(self):
+        p = self._project_with_task()
+        self._scheduler([self._job("project", p["id"])])
+
+        resp = self.client.delete(
+            self.project_url(p["id"]) + "?with_tasks=keep")
+
+        self.assertEqual(resp.status_code, HTTP_CONFLICT)
+        self.assertTrue(project_meta.exists(p["id"]))
+
+    def test_force_cancels_member_job_and_deletes_cascade(self):
+        p = self._project_with_task()
+        fake = self._scheduler([self._job("task", self.ws_id)])
+
+        resp = self.client.delete(self.project_url(p["id"]) + "?force=1")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(fake.cancelled, ["job-1"])
+        self.assertFalse(os.path.exists(self.ws_dir))
+        self.assertFalse(project_meta.exists(p["id"]))
 
 
 class ProjectDeleteDetachEdgeTests(ProjectTestBase):

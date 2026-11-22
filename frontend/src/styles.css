@@ -1757,6 +1757,42 @@ kbd {
   cursor: default;
 }
 
+.job-action {
+  position: relative;
+  overflow: hidden;
+}
+
+.job-action-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--inset);
+  pointer-events: none;
+}
+
+.job-action-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+  transition: width 0.15s linear;
+}
+
+.job-action-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--red);
+  font-size: 0.9em;
+}
+
+.job-action-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
 .menu-action-title {
   display: flex;
   align-items: center;

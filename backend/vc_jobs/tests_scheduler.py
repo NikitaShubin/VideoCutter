@@ -26,6 +26,7 @@ from vc_jobs.scheduler import (
     JobSpec,
     LaneCapacity,
     Scheduler,
+    _env_float,
     _env_int,
     build_scheduler,
     default_lane_capacities,
@@ -719,6 +720,31 @@ class DependencyTests(SchedulerTestBase):
         gate.release.set()
         self.assertTrue(wait_until(lambda: s.get(child.id).status == "done"))
 
+    def test_existing_prerequisite_priority_is_promoted(self):
+        gate = Gate()
+        self.make(key="blocker", lane="system", executor=gate)
+        self.make(key="parent", lane="system",
+                  executor=lambda job, ctx: None)
+        self.make(key="child", lane="export",
+                  executor=lambda job, ctx: None,
+                  prerequisites=lambda spec: [
+                      JobSpec(type="parent", target=spec.target,
+                              owner=spec.owner, inherit_priority=True)])
+        s = self.scheduler()
+
+        self.submit(s, type="blocker", target={"kind": "task", "id": "b"})
+        self.assertTrue(gate.started.wait(2))
+        parent, _ = self.submit(
+            s, type="parent", target={"kind": "task", "id": "t1"},
+            priority=100)
+        self.assertEqual(s.get(parent.id).status, "queued")
+
+        self.submit(s, type="child", target={"kind": "task", "id": "t1"},
+                    priority=0)
+
+        self.assertEqual(s.get(parent.id).priority, 0)
+        gate.release.set()
+
     def test_prerequisite_cycle_rejected(self):
         self.make(key="a", prerequisites=lambda spec: [JobSpec(
             type="b", target=spec.target, owner=spec.owner)])
@@ -952,6 +978,119 @@ class ListSummaryTests(SchedulerTestBase):
         self.assertTrue(wait_until(lambda: s.get(job.id).status == "done"))
 
 
+class RetentionTests(SchedulerTestBase):
+    def setUp(self):
+        super().setUp()
+        self.make()
+
+    def _done(self, scheduler, **kw):
+        job, _ = self.submit(scheduler, **kw)
+        self.assertTrue(wait_until(
+            lambda: scheduler.get(job.id).status == "done"))
+        return scheduler.get(job.id)
+
+    def _age(self, job, days):
+        job.finished_at = (datetime.now(timezone.utc)
+                           - timedelta(days=days)).isoformat()
+        self.store.save(job)
+
+    def test_old_done_job_is_pruned_from_memory_and_disk(self):
+        scheduler = self.scheduler()
+        job = self._done(scheduler)
+        self._age(job, 31)
+
+        removed = scheduler.prune()
+
+        self.assertEqual(removed, 1)
+        self.assertIsNone(scheduler.get(job.id))
+        self.assertIsNone(self.store.get(job.id))
+
+    def test_recent_terminal_job_survives(self):
+        scheduler = self.scheduler()
+        job = self._done(scheduler)
+        self._age(job, 29)
+
+        self.assertEqual(scheduler.prune(), 0)
+        self.assertIsNotNone(scheduler.get(job.id))
+
+    def test_errors_live_longer_than_done(self):
+        self.make(key="test.fail",
+                  executor=lambda job, ctx: (_ for _ in ()).throw(
+                      RuntimeError("сбой")))
+        scheduler = self.scheduler()
+        job, _ = self.submit(scheduler, type="test.fail")
+        self.assertTrue(wait_until(
+            lambda: scheduler.get(job.id).status == "error"))
+        job = scheduler.get(job.id)
+        self._age(job, 40)
+
+        self.assertEqual(scheduler.prune(), 0)
+
+        self._age(job, 100)
+        self.assertEqual(scheduler.prune(), 1)
+
+    def test_active_job_is_never_pruned(self):
+        gate = Gate()
+        self.make(key="test.gate", executor=gate)
+        scheduler = self.scheduler()
+        job, _ = self.submit(scheduler, type="test.gate")
+        self.assertTrue(gate.started.wait(2))
+        job.finished_at = (datetime.now(timezone.utc)
+                           - timedelta(days=365)).isoformat()
+
+        self.assertEqual(scheduler.prune(), 0)
+        self.assertIsNotNone(scheduler.get(job.id))
+        gate.release.set()
+
+    def test_terminal_without_finish_time_is_kept(self):
+        scheduler = self.scheduler()
+        job = self._done(scheduler)
+        job.finished_at = None
+
+        self.assertEqual(scheduler.prune(), 0)
+
+    def test_maintenance_sees_remaining_jobs(self):
+        seen = []
+        scheduler = self.scheduler(maintenance=seen.append)
+        old = self._done(scheduler)
+        fresh = self._done(scheduler, target={"kind": "task", "id": "t2"})
+        self._age(old, 31)
+
+        scheduler.prune()
+
+        remaining = [job.id for job in seen[-1]]
+        self.assertIn(fresh.id, remaining)
+        self.assertNotIn(old.id, remaining)
+
+    def test_maintenance_failure_does_not_break_prune(self):
+        import logging
+
+        def boom(jobs):
+            raise RuntimeError("уборка")
+
+        logging.disable(logging.CRITICAL)
+        try:
+            scheduler = self.scheduler(maintenance=boom)
+            job = self._done(scheduler)
+            self._age(job, 31)
+            removed = scheduler.prune()
+        finally:
+            logging.disable(logging.NOTSET)
+
+        self.assertEqual(removed, 1)
+
+    def test_start_prunes_old_records_before_resuming(self):
+        first = self.scheduler()
+        job = self._done(first)
+        self._age(job, 31)
+        first.stop()
+
+        second = self.scheduler()
+
+        self.assertIsNone(second.get(job.id))
+        self.assertIsNone(self.store.get(job.id))
+
+
 class ConfigTests(SimpleTestCase):
     def test_env_int_parses_and_falls_back(self):
         with mock.patch.dict(os.environ, {"VC_TEST_INT": "5"}):
@@ -962,6 +1101,16 @@ class ConfigTests(SimpleTestCase):
             self.assertEqual(_env_int("VC_TEST_INT", 1), 1)
         with mock.patch.dict(os.environ, {"VC_TEST_INT": "0"}):
             self.assertEqual(_env_int("VC_TEST_INT", 1), 1)
+
+    def test_env_float_parses_and_falls_back(self):
+        with mock.patch.dict(os.environ, {"VC_TEST_FLOAT": "2.5"}):
+            self.assertEqual(_env_float("VC_TEST_FLOAT", 1.0), 2.5)
+        with mock.patch.dict(os.environ, {"VC_TEST_FLOAT": ""}):
+            self.assertEqual(_env_float("VC_TEST_FLOAT", 1.0), 1.0)
+        with mock.patch.dict(os.environ, {"VC_TEST_FLOAT": "abc"}):
+            self.assertEqual(_env_float("VC_TEST_FLOAT", 1.0), 1.0)
+        with mock.patch.dict(os.environ, {"VC_TEST_FLOAT": "-3"}):
+            self.assertEqual(_env_float("VC_TEST_FLOAT", 1.0), 0.0)
 
     def test_default_lane_capacities_read_env(self):
         with mock.patch("vc_jobs.scheduler.os.cpu_count", return_value=8), \

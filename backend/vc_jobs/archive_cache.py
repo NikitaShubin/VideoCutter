@@ -24,8 +24,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from . import disk
+
 _CONTEXT_LOCK = threading.Lock()
 _LOCKS: Dict[str, threading.Lock] = {}
+
+
+def _max_bytes() -> int:
+    try:
+        mb = int(os.getenv("VC_ARCHIVE_CACHE_MAX_MB", "8192"))
+    except ValueError:
+        mb = 8192
+    return max(1, mb) * 1024 * 1024
 
 
 def _now() -> datetime:
@@ -33,7 +43,10 @@ def _now() -> datetime:
 
 
 def _iso(value: datetime) -> str:
-    return value.isoformat(timespec="milliseconds")
+    # Микросекунды, а не миллисекунды: порядок вытеснения сравнивает
+    # timestamps строкой, и три архива, собранные подряд, не должны
+    # становиться «одновременными» и решаться алфавитом ключей.
+    return value.isoformat(timespec="microseconds")
 
 
 def _parse(value: Optional[str]) -> Optional[datetime]:
@@ -94,6 +107,7 @@ class ArchiveCache:
         """Временный файл сборки рядом с будущим архивом (rename без копии)."""
         directory = self._dir(namespace)
         os.makedirs(directory, exist_ok=True)
+        disk.ensure_free(directory)
         fd, path = tempfile.mkstemp(
             prefix=".build-", suffix=".zip", dir=directory)
         os.close(fd)
@@ -182,6 +196,7 @@ class ArchiveCache:
             except OSError:
                 pass
             raise
+        self.enforce_limit(keep=archive)
         return entry
 
     def store(self, namespace: str, key: str, data: bytes, download_name: str,
@@ -275,6 +290,42 @@ class ArchiveCache:
                     if os.path.isdir(os.path.join(self.root, name))]
         except OSError:
             return []
+
+    def enforce_limit(self, keep: Optional[str] = None,
+                      max_bytes: Optional[int] = None) -> List[str]:
+        """Удаляет самые старые архивы, пока кэш не влезет в лимит.
+
+        ``keep`` (только что собранный файл) не удаляется даже если один
+        архив больше лимита: иначе операция вернула бы уже стёртый файл.
+        """
+        limit = _max_bytes() if max_bytes is None else max(0, int(max_bytes))
+        entries = list(self._entries())
+        sizes = {}
+        total = 0
+        for entry in entries:
+            try:
+                sizes[entry.archive_path] = os.path.getsize(
+                    entry.archive_path)
+            except OSError:
+                sizes[entry.archive_path] = 0
+            total += sizes[entry.archive_path]
+        if total <= limit:
+            return []
+
+        removed = []
+        ordered = sorted(entries, key=lambda item: (
+            item.last_access, item.created_at, item.key))
+        for entry in ordered:
+            if total <= limit:
+                break
+            if keep is not None \
+                    and os.path.abspath(entry.archive_path) == os.path.abspath(
+                        keep):
+                continue
+            self._remove(entry)
+            total -= sizes.get(entry.archive_path, 0)
+            removed.append(entry.archive_path)
+        return removed
 
     def prune(self, now: Optional[datetime] = None) -> List[str]:
         """Удаляет просроченные архивы и осиротевшие временные файлы."""

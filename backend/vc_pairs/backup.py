@@ -551,7 +551,7 @@ def _place_task(staging: str, target: str, on_conflict: str) -> None:
     """
     target_path = ws_fs.workspace_path(ws_module.WORKSPACE_ROOT, target)
     if on_conflict == "overwrite" and os.path.isdir(target_path):
-        resp = _workspace_delete(target)
+        resp = _workspace_delete(target, force=True)
         if resp.status_code != 200:
             try:
                 message = resp.json().get("error") or "не удалось удалить"

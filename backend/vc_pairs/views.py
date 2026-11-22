@@ -83,6 +83,64 @@ _DELETE_ATTEMPTS = 4
 _DELETE_RETRY_DELAY = 2.0
 
 
+def _flag(value) -> bool:
+    """Query-флаг: ``1/true/yes/on`` (пустое и мусор — False)."""
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _active_jobs_for(*targets: str):
+    """Активные операции по целям ``kind:id`` без дублей."""
+    import vc_jobs
+
+    jobs = {}
+    for target in targets:
+        for job in vc_jobs.active_jobs(target=target):
+            jobs[job.id] = job
+    return list(jobs.values())
+
+
+def _job_entry(job) -> dict:
+    label = job.type
+    try:
+        import vc_jobs
+
+        scheduler = vc_jobs.peek_scheduler()
+        job_type = scheduler.registry.get(job.type) if scheduler else None
+        if job_type is not None:
+            label = job_type.label
+    except Exception:  # noqa: BLE001 — подпись не должна ломать 409
+        pass
+    return {
+        "id": job.id,
+        "type": job.type,
+        "label": label,
+        "status": job.display_status,
+    }
+
+
+def _active_jobs_response(jobs) -> JsonResponse:
+    return JsonResponse(
+        {"error": "Задача занята фоновой операцией",
+         "active_jobs": [_job_entry(job) for job in jobs]},
+        status=409)
+
+
+def _cancel_active_jobs(jobs) -> None:
+    """Просит планировщик остановить операции (force-удаление)."""
+    import vc_jobs
+
+    scheduler = vc_jobs.peek_scheduler()
+    if scheduler is None:
+        return
+    for job in jobs:
+        try:
+            scheduler.cancel(job.id)
+        except KeyError:
+            continue
+        except Exception:  # noqa: BLE001 — операция уже завершилась
+            continue
+
+
 @require_http_methods(["GET", "POST"])
 def workspace_list(request):
     """GET — список workspace-ов; POST — создать workspace из загруженного видео.
@@ -128,7 +186,8 @@ def workspace_detail(request, workspace_id: str):
         return JsonResponse(data)
     if request.method == "PATCH":
         return _workspace_rename(request, workspace_id)
-    return _workspace_delete(workspace_id)
+    return _workspace_delete(
+        workspace_id, force=_flag(request.GET.get("force")))
 
 
 def _validation_failed(name: str, message: str, path: str = "") -> None:
@@ -359,11 +418,21 @@ def _workspace_rename(request, name: str) -> JsonResponse:
     return JsonResponse(data if data is not None else {"id": renamed})
 
 
-def _workspace_delete(name: str) -> JsonResponse:
-    """Удаляет workspace и чистит процессные кэши (кадры, экспорт)."""
+def _workspace_delete(name: str, *, force: bool = False) -> JsonResponse:
+    """Удаляет workspace и чистит процессные кэши (кадры, экспорт).
+
+    Активная фоновая операция — повод отказать (409 со списком), пока не
+    пришёл ``force``: тогда операции отменяются, а удаление продолжается.
+    """
     ws = get_workspace(name)
     if ws is None:
         return _ws_404(name)
+
+    jobs = _active_jobs_for(f"task:{name}")
+    if jobs:
+        if not force:
+            return _active_jobs_response(jobs)
+        _cancel_active_jobs(jobs)
 
     # 1. Останавливаем фоновую работу СНАЧАЛА: in-flight декоды/индекс
     #    прерываются на ближайшем пакете и закрывают хендлы — иначе rmdir
