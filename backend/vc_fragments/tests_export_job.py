@@ -17,6 +17,7 @@ from unittest import mock
 
 import vc_jobs
 import vc_fragments.views as export_views
+from vc_jobs import disk
 from vc_jobs.builtin import register_builtin
 from vc_jobs.builtin_export import _JobExportHooks, execute as execute_export
 from vc_jobs.registry import JobRegistry
@@ -259,6 +260,32 @@ class ExportJobRunTests(ExportJobTestBase):
         finished = self.wait_status(job.id, "error")
         self.assertEqual(finished.error["message"],
                          "Нет фрагментов для экспорта")
+
+    def test_export_refuses_before_creating_files_without_disk_reserve(self):
+        out_dir = os.path.join(self.ws_dir, "exports")
+        with mock.patch.object(export_views, "Exporter", FakeExporter), \
+                mock.patch.object(
+                    disk, "ensure_free",
+                    side_effect=disk.InsufficientSpace("Нет места на диске")):
+            job = self.export()
+            failed = self.wait_status(job.id, "error")
+
+        self.assertIn("Нет места на диске", failed.error["message"])
+        self.assertFalse(os.path.isdir(out_dir)
+                         and os.listdir(out_dir))
+
+    def test_export_stops_midway_when_disk_reserve_disappears(self):
+        out_dir = os.path.join(self.ws_dir, "exports")
+        with mock.patch.object(export_views, "Exporter", FakeExporter), \
+                mock.patch.object(
+                    disk, "ensure_free",
+                    side_effect=[None, disk.InsufficientSpace("Нет места")]):
+            job = self.export()
+            failed = self.wait_status(job.id, "error")
+
+        self.assertIn("Нет места", failed.error["message"])
+        self.assertFalse(os.path.isdir(out_dir)
+                         and os.listdir(out_dir))
 
     def test_export_job_is_persisted_after_completion(self):
         job = self.run_export()

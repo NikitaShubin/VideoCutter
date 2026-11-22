@@ -517,6 +517,11 @@ def _run_export(ws_id: str, hooks=None) -> None:
             return
 
         out_dir = os.path.join(ws.path, "exports")
+        # Запас места проверяется до создания каталога и файлов: экспорт
+        # не должен забивать диск под ноль. Внутри — перед каждым фрагментом.
+        from vc_jobs import disk
+
+        disk.ensure_free(ws.path)
         export_access.ensure_access(
             ws.path,
             root=os.environ.get("VC_ACCESS_ANCHOR")
@@ -550,6 +555,7 @@ def _run_export(ws_id: str, hooks=None) -> None:
                         f"[0, {len(vpts)})")
             frame_ts_ranges = None
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
+            disk.ensure_free(out_dir)
             if not hooks.progress(ws_id, fragment_ind, total):
                 raise _ExportCancelled()
 
