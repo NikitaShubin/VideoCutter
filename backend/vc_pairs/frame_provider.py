@@ -985,6 +985,10 @@ class _Provider:
         self._gen = 0  # поколение позиции: каждый разрыв обхода (прыжок,
         # смена знака) инвалидирует queued-спекуляцию прошлого места
         self._last_demand = 0.0  # monotonic-время последнего get_frame
+        # Сборки по требованию, ждущие _build_lock: пока такая есть, путь
+        # горячий и фоновая сборка того же файла не паркуется (иначе она
+        # держит лок и ждёт чужой спрос — взаимная блокировка).
+        self._fg_waiters = 0
         self._demand_sem = threading.BoundedSemaphore(DEMAND_PER_PROVIDER)
         # Отдельный лок сборки индекса: сама сборка (минуты на гигабайтах)
         # идёт ВНЕ _ilock, иначе весь провайдер (кэш-хиты, финализация
@@ -1018,15 +1022,26 @@ class _Provider:
                 return self._index
         # Строим вне _ilock (один строитель на провайдер): минуты сборки
         # не держат ни кэш-хиты, ни финализацию, ни debug-снапшот.
-        with self._build_lock:
+        # Сборка по требованию отмечает путь горячим на всё время ожидания
+        # лока: фоновая сборка того же файла не имеет права парковаться под
+        # чужим спросом, иначе валидация/экспорт ждут её вечно.
+        if not background:
             with self._ilock:
-                if self._index is not None:
+                self._fg_waiters += 1
+        try:
+            with self._build_lock:
+                with self._ilock:
+                    if self._index is not None:
+                        return self._index
+                idx = _build_index(self.path, background=background)
+                with self._ilock:
+                    if self._index is None:
+                        self._index = idx
                     return self._index
-            idx = _build_index(self.path, background=background)
-            with self._ilock:
-                if self._index is None:
-                    self._index = idx
-                return self._index
+        finally:
+            if not background:
+                with self._ilock:
+                    self._fg_waiters -= 1
 
     # --- кэш ---
     def _cache_hit(self, key: tuple, index: int) -> Optional[bytes]:
@@ -1984,7 +1999,12 @@ def _global_demand_hot() -> bool:
 
 
 def _path_demand_hot(path: str) -> bool:
-    """Есть ли живой спрос на конкретный файл (ждуны или свежее обращение)."""
+    """Есть ли живой спрос на конкретный файл (ждуны или свежее обращение).
+
+    Ждущая сборка по требованию — тоже спрос: она держит _build_lock, и
+    припаркованная фоновая сборка этого файла обязана ехать, иначе они
+    ждут друг друга (валидация против тёплого превью).
+    """
     key = os.path.abspath(path)
     with _providers_lock:
         p = _providers.get(path)
@@ -1994,6 +2014,8 @@ def _path_demand_hot(path: str) -> bool:
         return False
     now = time.monotonic()
     with p._ilock:
+        if p._fg_waiters > 0:
+            return True
         if now - p._last_demand <= PREFETCH_IDLE_S:
             return True
         return any(t.waiters > 0 for t in p._tasks.values())

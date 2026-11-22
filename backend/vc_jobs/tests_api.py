@@ -276,6 +276,23 @@ class ReadTests(JobsApiTestBase):
         self.assertEqual(len(by_target["jobs"]), 1)
         self.assertEqual(by_target["jobs"][0]["target"]["id"], "t1")
 
+    def test_list_active_filter_returns_only_unfinished(self):
+        done = self.create(type="test.echo",
+                           target={"kind": "task", "id": "done"})
+        self.wait_done(done["id"])
+        running = self.create(type="test.slow",
+                              target={"kind": "task", "id": "running"})
+        queued = self.create(type="test.slow",
+                             target={"kind": "task", "id": "queued"})
+
+        body = self.client.get(JOBS, {"active": "1"}).json()
+        ids = {job["id"] for job in body["jobs"]}
+
+        self.assertIn(running["id"], ids)
+        self.assertIn(queued["id"], ids)
+        self.assertNotIn(done["id"], ids)
+        self.release.set()
+
     def test_bad_limit_and_cursor_are_400(self):
         self.assertEqual(
             self.client.get(JOBS, {"limit": "x"}).status_code, 400)

@@ -33,6 +33,7 @@ import workspace
 from vc_fragments.tests import WorkspaceApiTestBase
 from vc_pairs import backup as backup_mod
 from vc_pairs import frame_provider
+from vc_pairs import views as views_mod
 from vc_pairs.backup import _task_members
 from vc_pairs.tests_projects import ProjectTestBase, u
 from vc_pairs.tests_workspace import _wait_ready
@@ -101,14 +102,15 @@ class BackupArchiveMixin:
                 "backup.zip", data, content_type="application/zip")})
 
 
-def _wait_validation(testcase, ws_id: str, path: str) -> dict:
+def _wait_validation(testcase, ws_id: str, path: str,
+                     timeout: float = 30) -> dict:
     """Ждёт конца фоновой валидации: паспорт дописан (created_at).
 
     ``created_at`` штампует только валидация — её absence значит, что тред
     ещё работает (или упал), и членство может дозаписаться позже.
     """
     _wait_ready(testcase, ws_id)
-    deadline = time.time() + 30
+    deadline = time.time() + timeout
     while True:
         meta = task_meta.load(path)
         if meta.get("created_at"):
@@ -638,6 +640,23 @@ class TaskImportTests(BackupArchiveMixin, ProjectTestBase):
         meta = _wait_validation(self, self.new_id, self.new_dir)
         self.assertEqual(meta["project_id"],
                          project_meta.DEFAULT_PROJECT_ID)
+
+    def test_import_validation_survives_transient_scan_miss(self):
+        """Импорт мог опередить скан: один промах не отменяет проверку."""
+        real_get = views_mod.get_workspace
+        misses = {"left": 1}
+
+        def flaky(name):
+            if name == self.new_id and misses["left"] > 0:
+                misses["left"] -= 1
+                return None
+            return real_get(name)
+
+        with mock.patch.object(views_mod, "get_workspace",
+                               side_effect=flaky):
+            resp = self.import_archive(self.archive)
+            self.assertEqual(resp.status_code, 202, resp.content)
+            _wait_validation(self, self.new_id, self.new_dir, timeout=2)
 
     def test_import_rename_keeps_original_display_name(self):
         """Суффикс — папке, исходное имя — показу (дубли разрешены)."""

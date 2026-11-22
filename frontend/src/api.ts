@@ -487,6 +487,7 @@ export interface JobQuery {
   owner?: string;
   target?: string;
   project_id?: string;
+  active?: boolean;
   limit?: number;
   cursor?: string | null;
 }
@@ -496,8 +497,10 @@ export function listJobs(
 ): Promise<{ jobs: Job[]; next: string | null }> {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null || value === "") continue;
-    params.set(key, String(value));
+    if (value === undefined || value === null || value === "" || value === false) {
+      continue;
+    }
+    params.set(key, value === true ? "1" : String(value));
   }
   const suffix = params.size > 0 ? `?${params.toString()}` : "";
   return apiFetch(`${BASE}/jobs${suffix}`).then((r) =>

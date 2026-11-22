@@ -1206,6 +1206,48 @@ class IndexThrottleTest(SimpleTestCase):
                 self.clip, float(tb), kf_us, 4, background=True)
         self.assertEqual(own, full)
 
+    def test_foreground_build_resumes_paused_background_build(self):
+        # Валидация/экспорт строят индекс по требованию и ждут _build_lock.
+        # Фоновая сборка того же файла, припаркованная чужим спросом, не
+        # имеет права держать этот лок: иначе тёплый превью (warm_gop)
+        # навсегда блокирует проверку источника, ждущего ту же сборку.
+        real_sleep = time.sleep
+        paused = threading.Event()
+
+        def fake_sleep(seconds):
+            paused.set()
+            real_sleep(0.01)
+
+        clip = os.path.join(self.tmpdir.name, "demand.mp4")
+        shutil.copyfile(self.clip, clip)
+        prov = _prop(clip)
+        bg = threading.Thread(
+            target=prov._ensure_index, kwargs={"background": True},
+            daemon=True)
+        got = []
+        fg = threading.Thread(
+            target=lambda: got.append(prov._ensure_index()), daemon=True)
+        try:
+            with mock.patch.object(
+                    fp, "_global_demand_hot", return_value=True), \
+                 mock.patch.object(
+                    fp.time, "sleep", side_effect=fake_sleep):
+                bg.start()
+                self.assertTrue(
+                    paused.wait(10), "фоновая сборка не приостановилась")
+                fg.start()
+                fg.join(5)
+                # Фиксируем исход до снятия патча: иначе сборка проснётся
+                # от «похолодания» и тест замаскирует дедлок.
+                finished = not fg.is_alive()
+            bg.join(10)
+            fg.join(10)
+            self.assertTrue(
+                finished, "сборка по требованию ждёт чужой спрос")
+            self.assertEqual(got[0].total, CLIP_FRAMES)
+        finally:
+            fp.close_source(clip)
+
 
 class DecodeCancelTests(SimpleTestCase):
     """Отмена in-flight декодов при удалении (поколения путей)."""

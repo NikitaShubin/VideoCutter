@@ -618,6 +618,7 @@ class Scheduler:
              status: Optional[str] = None, owner: Optional[str] = None,
              target: Optional[str] = None,
              project_id: Optional[str] = None,
+             active: bool = False,
              limit: int = 100,
              cursor: Optional[str] = None) -> Tuple[List[Job], Optional[str]]:
         with self._lock:
@@ -638,6 +639,8 @@ class Scheduler:
         if project_id:
             jobs = [j for j in jobs
                     if j.target.get("project_id") == project_id]
+        if active:
+            jobs = [j for j in jobs if j.status in (QUEUED, RUNNING)]
         jobs.sort(key=lambda j: (j.created_at, j.id), reverse=True)
         if cursor:
             cursor_id = _decode_cursor(cursor)

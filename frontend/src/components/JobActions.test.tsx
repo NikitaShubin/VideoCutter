@@ -10,10 +10,15 @@ import {
   createJob,
   downloadJobResult,
   getJob,
+  listJobs,
   uploadJobArchive,
 } from "../api";
 import type { Job } from "../types";
-import { JobAction, JobFileAction } from "./JobActions";
+import {
+  JobAction,
+  JobFileAction,
+  resetActiveJobsCache,
+} from "./JobActions";
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
@@ -22,6 +27,7 @@ vi.mock("../api", async (importOriginal) => {
     createJob: vi.fn(),
     getJob: vi.fn(),
     cancelJob: vi.fn(),
+    listJobs: vi.fn(),
     uploadJobArchive: vi.fn(),
     downloadJobResult: vi.fn(),
   };
@@ -50,6 +56,14 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     retention: { expires_at: null, keep: false },
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 const mounted: Array<() => void> = [];
@@ -92,8 +106,11 @@ beforeEach(() => {
   vi.mocked(createJob).mockReset();
   vi.mocked(getJob).mockReset();
   vi.mocked(cancelJob).mockReset();
+  vi.mocked(listJobs).mockReset();
+  vi.mocked(listJobs).mockResolvedValue({ jobs: [], next: null });
   vi.mocked(uploadJobArchive).mockReset();
   vi.mocked(downloadJobResult).mockReset();
+  resetActiveJobsCache();
 });
 
 afterEach(() => {
@@ -110,6 +127,7 @@ describe("кнопка-операция", () => {
     const { host } = await mount(
       <JobAction
         label="Собрать бэкап"
+        shortLabel="бэкап"
         request={() => ({
           type: "backup.task",
           target: { kind: "task", id: "cam-1" },
@@ -121,9 +139,9 @@ describe("кнопка-операция", () => {
       type: "backup.task",
       target: { kind: "task", id: "cam-1" },
     });
-    expect(button(host).textContent).toContain("Отменить · 25 %");
+    expect(button(host).textContent).toContain("Отменить · бэкап · 25 %");
     expect(button(host).getAttribute("title")).toBe(
-      "Нажмите, чтобы отменить операцию",
+      "Нажмите, чтобы отменить: бэкап",
     );
     expect(
       host.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"),
@@ -180,6 +198,78 @@ describe("кнопка-операция", () => {
     expect(downloadJobResult).toHaveBeenCalledTimes(2);
     expect(createJob).toHaveBeenCalledTimes(1);
     expect(host.querySelector('[role="progressbar"]')).toBeNull();
+  });
+
+  it("ошибка скачивания видна и повторяется по клику", async () => {
+    const done = makeJob({
+      status: "done",
+      display_status: "done",
+      progress: { current: 4, total: 4, unit: "файлов", message: "" },
+      result: { files: ["cam-1-backup.zip"] },
+    });
+    vi.mocked(createJob).mockResolvedValue({
+      job: makeJob(),
+      deduplicated: false,
+    });
+    vi.mocked(getJob).mockResolvedValue(done);
+    vi.mocked(downloadJobResult).mockRejectedValue(
+      new Error("сеть недоступна"),
+    );
+    const { host } = await mount(
+      <JobAction
+        label="Собрать бэкап"
+        shortLabel="бэкап"
+        request={() => ({ type: "backup.task", target: { kind: "task", id: "cam-1" } })}
+        downloadName="cam-1-backup.zip"
+      />,
+    );
+    await click(host);
+    await tick();
+    await act(async () => {});
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(
+      "Не удалось скачать результат: сеть недоступна",
+    );
+    expect(button(host).textContent).toBe("↻ Собрать бэкап");
+    await click(host);
+    expect(downloadJobResult).toHaveBeenCalledTimes(2);
+    expect(createJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("с onError ошибка скачивания уходит наверх без дубля", async () => {
+    const onError = vi.fn();
+    const done = makeJob({
+      status: "done",
+      display_status: "done",
+      progress: { current: 4, total: 4, unit: "файлов", message: "" },
+      result: { files: ["cam-1-backup.zip"] },
+    });
+    vi.mocked(createJob).mockResolvedValue({
+      job: makeJob(),
+      deduplicated: false,
+    });
+    vi.mocked(getJob).mockResolvedValue(done);
+    vi.mocked(downloadJobResult).mockRejectedValue(
+      new Error("сеть недоступна"),
+    );
+    const { host } = await mount(
+      <JobAction
+        label="Собрать бэкап"
+        shortLabel="бэкап"
+        request={() => ({ type: "backup.task", target: { kind: "task", id: "cam-1" } })}
+        downloadName="cam-1-backup.zip"
+        onError={onError}
+      />,
+    );
+    await click(host);
+    await tick();
+    await act(async () => {});
+    expect(onError).toHaveBeenCalledWith(
+      "Не удалось скачать результат: сеть недоступна",
+    );
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(button(host).getAttribute("title")).toBe(
+      "Не удалось скачать результат: сеть недоступна — нажмите, чтобы скачать ещё раз",
+    );
   });
 
   it("ошибка показывает причину и предлагает повторить запуск", async () => {
@@ -270,7 +360,9 @@ describe("кнопка-операция", () => {
       <JobAction label="Собрать бэкап" request={() => ({ type: "backup.task", target: { kind: "task", id: "cam-1" } })} />,
     );
     await click(host);
-    expect(button(host).textContent).toBe("Отменить · в очереди");
+    expect(button(host).textContent).toBe(
+      "Отменить · Собрать бэкап · в очереди",
+    );
   });
 
   it("во время отмены кнопка заблокирована и не шлёт вторую отмену", async () => {
@@ -286,7 +378,7 @@ describe("кнопка-операция", () => {
       <JobAction label="Собрать бэкап" request={() => ({ type: "backup.task", target: { kind: "task", id: "cam-1" } })} />,
     );
     await click(host);
-    expect(button(host).textContent).toBe("Отмена…");
+    expect(button(host).textContent).toBe("Отмена · Собрать бэкап…");
     expect(button(host).disabled).toBe(true);
     expect(cancelJob).not.toHaveBeenCalled();
   });
@@ -314,6 +406,168 @@ describe("кнопка-операция", () => {
     );
     expect(button(host).getAttribute("aria-label")).toContain(
       "нажмите, чтобы отменить",
+    );
+  });
+
+  it("после перезагрузки подхватывает активную операцию", async () => {
+    const running = makeJob({
+      id: "job-restored",
+      progress: { current: 2, total: 4, unit: "файлов", message: "" },
+    });
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [running], next: null });
+    const { host } = await mount(
+      <JobAction
+        label="Собрать бэкап"
+        shortLabel="бэкап"
+        request={() => ({
+          type: "backup.task",
+          target: { kind: "task", id: "cam-1" },
+        })}
+      />,
+    );
+    await act(async () => {});
+    expect(createJob).not.toHaveBeenCalled();
+    expect(button(host).textContent).toBe("Отменить · бэкап · 50 %");
+    expect(
+      host.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"),
+    ).toBe("50");
+  });
+
+  it("без активной операции кнопка остаётся в покое", async () => {
+    const { host } = await mount(
+      <JobAction label="Собрать бэкап" request={() => ({ type: "backup.task", target: { kind: "task", id: "cam-1" } })} />,
+    );
+    await act(async () => {});
+    expect(button(host).textContent).toBe("Собрать бэкап");
+    expect(host.querySelector('[role="progressbar"]')).toBeNull();
+  });
+
+  it("сбой поиска активной операции не пугает пользователя", async () => {
+    vi.mocked(listJobs).mockRejectedValue(new Error("сеть"));
+    const { host } = await mount(
+      <JobAction label="Собрать бэкап" request={() => ({ type: "backup.task", target: { kind: "task", id: "cam-1" } })} />,
+    );
+    await act(async () => {});
+    expect(button(host).textContent).toBe("Собрать бэкап");
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("поздний ответ поиска не перебивает только что запущенную операцию", async () => {
+    const lookup = deferred<{ jobs: Job[]; next: null }>();
+    vi.mocked(listJobs).mockReturnValue(lookup.promise);
+    vi.mocked(createJob).mockResolvedValue({
+      job: makeJob({
+        id: "new-job",
+        progress: { current: 1, total: 4, unit: "файлов", message: "" },
+      }),
+      deduplicated: false,
+    });
+    const { host } = await mount(
+      <JobAction
+        label="Собрать бэкап"
+        shortLabel="бэкап"
+        request={() => ({ type: "backup.task", target: { kind: "task", id: "cam-1" } })}
+      />,
+    );
+    await click(host);
+    lookup.resolve({
+      jobs: [
+        makeJob({
+          id: "old-job",
+          progress: { current: 3, total: 4, unit: "файлов", message: "" },
+        }),
+      ],
+      next: null,
+    });
+    await act(async () => {});
+    expect(button(host).textContent).toBe("Отменить · бэкап · 25 %");
+    expect(getJob).not.toHaveBeenCalledWith("old-job");
+  });
+
+  it("кнопки делят один запрос активных операций", async () => {
+    await mount(
+      <JobAction label="Собрать бэкап" request={() => ({ type: "backup.task", target: { kind: "task", id: "cam-1" } })} />,
+    );
+    await mount(
+      <JobAction label="Скачать разметку" request={() => ({ type: "annotations.export", target: { kind: "task", id: "cam-2" } })} />,
+    );
+    await act(async () => {});
+    expect(listJobs).toHaveBeenCalledTimes(1);
+    expect(listJobs).toHaveBeenCalledWith({ active: true, limit: 200 });
+  });
+
+  it("компактная кнопка помечает ошибку и называет причину", async () => {
+    vi.mocked(createJob).mockResolvedValue({
+      job: makeJob(),
+      deduplicated: false,
+    });
+    vi.mocked(getJob).mockResolvedValue(
+      makeJob({
+        status: "error",
+        display_status: "error",
+        error: { code: "ffmpeg", message: "ffmpeg завершился с кодом 1" },
+      }),
+    );
+    const { host } = await mount(
+      <JobAction
+        label="⤓"
+        ariaLabel="Скачать бэкап проекта"
+        compact
+        request={() => ({
+          type: "backup.project",
+          target: { kind: "project", id: "p-1" },
+        })}
+      />,
+    );
+    await click(host);
+    await tick();
+    expect(host.querySelector(".job-action-dot")).not.toBeNull();
+    expect(button(host).textContent).toBe("↻");
+    expect(button(host).getAttribute("aria-label")).toContain(
+      "ffmpeg завершился с кодом 1",
+    );
+    expect(button(host).getAttribute("aria-label")).toContain("повторить");
+  });
+
+  it("компактная кнопка не прячет ошибку скачивания за хостом", async () => {
+    const onError = vi.fn();
+    const done = makeJob({
+      status: "done",
+      display_status: "done",
+      progress: { current: 4, total: 4, unit: "файлов", message: "" },
+      result: { files: ["p-1-backup.zip"] },
+    });
+    vi.mocked(createJob).mockResolvedValue({
+      job: makeJob(),
+      deduplicated: false,
+    });
+    vi.mocked(getJob).mockResolvedValue(done);
+    vi.mocked(downloadJobResult).mockRejectedValue(
+      new Error("сеть недоступна"),
+    );
+    const { host } = await mount(
+      <JobAction
+        label="⤓"
+        ariaLabel="Скачать бэкап проекта"
+        compact
+        request={() => ({
+          type: "backup.project",
+          target: { kind: "project", id: "p-1" },
+        })}
+        downloadName="p-1-backup.zip"
+        onError={onError}
+      />,
+    );
+    await click(host);
+    await tick();
+    await act(async () => {});
+    expect(onError).toHaveBeenCalledWith(
+      "Не удалось скачать результат: сеть недоступна",
+    );
+    expect(host.querySelector(".job-action-dot")).not.toBeNull();
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(button(host).getAttribute("aria-label")).toContain(
+      "скачать ещё раз",
     );
   });
 });
@@ -347,6 +601,7 @@ describe("файловая кнопка-операция", () => {
     const { host } = await mount(
       <JobFileAction
         label="Импортировать разметку"
+        shortLabel="импорт"
         request={(uploadId) => ({
           type: "annotations.import",
           target: { kind: "task", id: "cam-1" },
@@ -366,7 +621,7 @@ describe("файловая кнопка-операция", () => {
       target: { kind: "task", id: "cam-1" },
       params: { upload_id: "up-1" },
     });
-    expect(button(host).textContent).toContain("Отменить · 25 %");
+    expect(button(host).textContent).toContain("Отменить · импорт · 25 %");
   });
 
   it("успешный импорт сообщает наверх и возвращает выбор файла", async () => {
@@ -507,5 +762,32 @@ describe("файловая кнопка-операция", () => {
     );
     expect(button(host).textContent).toBe("↻ Импортировать разметку");
     expect(host.querySelector('input[type="file"]')).not.toBeNull();
+  });
+
+  it("компактная файловая кнопка помечает ошибку загрузки", async () => {
+    const file = new File(["zip"], "annotations.zip", {
+      type: "application/zip",
+    });
+    vi.mocked(uploadJobArchive).mockRejectedValue(
+      new Error("Не хватает места на диске"),
+    );
+    const { host } = await mount(
+      <JobFileAction
+        label="⤒"
+        ariaLabel="Импорт разметки"
+        compact
+        request={(uploadId) => ({
+          type: "annotations.import",
+          target: { kind: "task", id: "cam-1" },
+          params: { upload_id: uploadId },
+        })}
+      />,
+    );
+    chooseFile(host, file);
+    await act(async () => {});
+    expect(host.querySelector(".job-action-dot")).not.toBeNull();
+    expect(button(host).getAttribute("aria-label")).toContain(
+      "Не хватает места на диске",
+    );
   });
 });

@@ -1761,6 +1761,25 @@ kbd {
   position: relative;
   overflow: hidden;
 }
+/* Компактная кнопка не прячет ошибку в title: красная точка видна и на
+ * сенсорном экране, а причина остаётся в aria-label. */
+.job-action-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--red);
+  pointer-events: none;
+}
+/* Внутри чипа кнопка-операция растягивается на весь чип: иначе полоса
+ * прогресса заканчивается по ширине текста, а не по краю кнопки. */
+.pair-edit .role-action > .job-action {
+  display: block;
+  margin: -3px -10px;
+  padding: 3px 10px;
+}
 
 .job-action-bar {
   position: absolute;

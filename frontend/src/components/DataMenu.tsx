@@ -20,6 +20,7 @@ export function DataMenu({
       <JobAction
         buttonClassName="menu-action"
         label="Скачать разметку"
+        shortLabel="разметку"
         title="Скачать fragments.tsv + манифест"
         disabled={disabled}
         request={() => ({
@@ -32,6 +33,7 @@ export function DataMenu({
       <JobFileAction
         buttonClassName="menu-action"
         label="Импортировать разметку"
+        shortLabel="импорт"
         title="Применить архив к задаче; видео не меняется"
         disabled={disabled}
         request={(uploadId) => ({
@@ -45,6 +47,7 @@ export function DataMenu({
       <JobAction
         buttonClassName="menu-action"
         label="Скачать бэкап"
+        shortLabel="бэкап"
         title="Скачать видео + разметку + паспорт задачи"
         disabled={disabled}
         request={() => ({

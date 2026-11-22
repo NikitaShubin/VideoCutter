@@ -206,6 +206,25 @@ def _validation_failed(name: str, message: str, path: str = "") -> None:
     scan_workspaces()
 
 
+def _workspace_for_validation(name: str):
+    """Workspace для фоновой проверки, переживая гонку со сканом.
+
+    Импорт кладёт папку атомарно, но параллельный скан мог начаться
+    раньше и вернуть список без неё. Один промах не означает удаление:
+    даём сканеру несколько шансов, иначе паспорт навсегда останется без
+    ``created_at``.
+    """
+    ws = get_workspace(name)
+    if ws is not None:
+        return ws
+    for _ in range(5):
+        time.sleep(0.05)
+        ws = get_workspace(name)
+        if ws is not None:
+            return ws
+    return None
+
+
 def _validate_workspace_async(name: str, join_default: bool = True) -> None:
     """Фоновая валидация после создания: индекс строится вне запроса.
 
@@ -218,7 +237,7 @@ def _validate_workspace_async(name: str, join_default: bool = True) -> None:
     не нужен — импорт не должен менять членство молча.
     """
     try:
-        ws = get_workspace(name)
+        ws = _workspace_for_validation(name)
         if ws is None:
             return  # удалили раньше, чем проверили
         roles = [p for p in (ws.original, ws.visualization) if p]
@@ -252,7 +271,7 @@ def _validate_workspace_async(name: str, join_default: bool = True) -> None:
 
     # Паспорт задачи: создание — единственное место рождения created_at.
     # Перечитываем: каталог могли удалить/пересоздать, пока шёл декод.
-    ws = get_workspace(name)
+    ws = _workspace_for_validation(name)
     if ws is None:
         return
     ws_module.clear_workspace_error(name)

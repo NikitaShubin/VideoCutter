@@ -106,6 +106,7 @@ def jobs_collection(request):
                 owner=(request.GET.get("owner") or None),
                 target=request.GET.get("target") or None,
                 project_id=request.GET.get("project_id") or None,
+                active=request.GET.get("active") in ("1", "true", "yes"),
                 limit=limit,
                 cursor=request.GET.get("cursor") or None,
             )

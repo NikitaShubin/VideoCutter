@@ -8,6 +8,7 @@ import {
   createJob,
   downloadJobResult,
   getJob,
+  listJobs,
   uploadJobArchive,
   type JobRequest,
 } from "../api";
@@ -17,6 +18,40 @@ import { formatPercent } from "../model/format";
 import { FileButton } from "./FileButton";
 
 const ACTIVE = new Set(["queued", "running"]);
+const ACTIVE_CACHE_MS = 2000;
+
+// Все кнопки на экране делят один запрос активных операций: иначе список
+// из сотни задач отправил бы сотни одинаковых запросов при загрузке.
+let activeJobsCache: { at: number; jobs: Promise<Job[]> } | null = null;
+
+export function resetActiveJobsCache(): void {
+  activeJobsCache = null;
+}
+
+function loadActiveJobs(): Promise<Job[]> {
+  const now = Date.now();
+  if (activeJobsCache && now - activeJobsCache.at < ACTIVE_CACHE_MS) {
+    return activeJobsCache.jobs;
+  }
+  const jobs = listJobs({ active: true, limit: 200 })
+    .then((body) => body.jobs)
+    .catch(() => []);
+  activeJobsCache = { at: now, jobs };
+  return jobs;
+}
+
+async function findActiveJob(
+  type: string,
+  target: Job["target"],
+): Promise<Job | null> {
+  const jobs = await loadActiveJobs();
+  return jobs.find(
+    (job) =>
+      job.type === type &&
+      job.target.kind === target.kind &&
+      job.target.id === target.id,
+  ) ?? null;
+}
 
 export function isActiveJob(job: Job | null): boolean {
   return job !== null && ACTIVE.has(job.status);
@@ -44,8 +79,8 @@ function progressLabel(job: Job | null): string {
   return pct === null ? "Выполняется…" : `Выполняется ${pct}`;
 }
 
-/** Текст активной кнопки: видимое действие — отмена, прогресс — рядом. */
-function activeText(job: Job | null, compact: boolean): string {
+/** Текст активной кнопки: действие, название операции и прогресс. */
+function activeText(job: Job | null, compact: boolean, name: string): string {
   if (!job) return "";
   if (compact) {
     if (job.status === "queued" || job.display_status === "cancelling") {
@@ -53,10 +88,10 @@ function activeText(job: Job | null, compact: boolean): string {
     }
     return percentText(job) ?? "…";
   }
-  if (job.display_status === "cancelling") return "Отмена…";
-  if (job.status === "queued") return "Отменить · в очереди";
+  if (job.display_status === "cancelling") return `Отмена · ${name}…`;
+  if (job.status === "queued") return `Отменить · ${name} · в очереди`;
   const pct = percentText(job);
-  return pct === null ? "Отменить" : `Отменить · ${pct}`;
+  return pct === null ? `Отменить · ${name}` : `Отменить · ${name} · ${pct}`;
 }
 
 function uploadText(frac: number | null, compact: boolean): string {
@@ -72,6 +107,9 @@ interface Runner {
   error: string;
   notice: string;
   start: (
+    request: JobRequest | (() => JobRequest | Promise<JobRequest>),
+  ) => Promise<void>;
+  attach: (
     request: JobRequest | (() => JobRequest | Promise<JobRequest>),
   ) => Promise<void>;
   startUpload: (
@@ -95,6 +133,9 @@ function useJobRunner(
   const timer = useRef<number | null>(null);
   const uploadAbort = useRef<AbortController | null>(null);
   const alive = useRef(true);
+  // Номер поколения отсекает поздний ответ поиска: если пользователь уже
+  // нажал «запустить», старая операция не должна перебить новую.
+  const generation = useRef(0);
   const doneRef = useRef(onDone);
   const errorRef = useRef(onError);
   doneRef.current = onDone;
@@ -117,6 +158,7 @@ function useJobRunner(
   }, [clearTimer]);
 
   const finish = useCallback((next: Job) => {
+    resetActiveJobsCache();
     setJob(next);
     if (next.status === "done") {
       setError("");
@@ -181,6 +223,7 @@ function useJobRunner(
     async (
       request: JobRequest | (() => JobRequest | Promise<JobRequest>),
     ) => {
+      generation.current += 1;
       setError("");
       setNotice("");
       setJob(null);
@@ -189,6 +232,7 @@ function useJobRunner(
         const payload = typeof request === "function" ? await request() : request;
         const body = await createJob(payload);
         if (!alive.current) return;
+        resetActiveJobsCache();
         track(body.job);
       } catch (e) {
         if (!alive.current) return;
@@ -200,8 +244,26 @@ function useJobRunner(
     [track],
   );
 
+  const attach = useCallback(
+    async (
+      request: JobRequest | (() => JobRequest | Promise<JobRequest>),
+    ) => {
+      const gen = generation.current;
+      try {
+        const payload = typeof request === "function" ? await request() : request;
+        const existing = await findActiveJob(payload.type, payload.target);
+        if (!alive.current || gen !== generation.current || !existing) return;
+        track(existing);
+      } catch {
+        // Подхват — необязательный: сбой поиска оставляет кнопку в покое.
+      }
+    },
+    [track],
+  );
+
   const startUpload = useCallback(
     async (file: File, request: (uploadId: string) => JobRequest) => {
+      generation.current += 1;
       setError("");
       setNotice("");
       setJob(null);
@@ -245,9 +307,11 @@ function useJobRunner(
       return;
     }
     if (!job || !isActiveJob(job)) return;
+    generation.current += 1;
     try {
       const next = await cancelJob(job.id);
       if (!alive.current) return;
+      resetActiveJobsCache();
       track(next);
     } catch (e) {
       if (!alive.current) return;
@@ -258,6 +322,7 @@ function useJobRunner(
   }, [job, track, uploading]);
 
   const reset = useCallback(() => {
+    generation.current += 1;
     clearTimer();
     uploadAbort.current?.abort();
     uploadAbort.current = null;
@@ -276,6 +341,7 @@ function useJobRunner(
     error,
     notice,
     start,
+    attach,
     startUpload,
     cancel,
     reset,
@@ -302,6 +368,8 @@ function ActionProgress({ job }: { job: Job | null }) {
 
 export interface JobActionProps {
   label: string;
+  /** Короткое название операции для активной подписи: «бэкап», «разметка». */
+  shortLabel?: string;
   title?: string;
   ariaLabel?: string;
   buttonClassName?: string;
@@ -317,6 +385,7 @@ export interface JobActionProps {
 /** Кнопка-операция: запуск → прогресс/отмена → скачивание результата. */
 export function JobAction({
   label,
+  shortLabel,
   title,
   ariaLabel,
   buttonClassName,
@@ -329,18 +398,30 @@ export function JobAction({
 }: JobActionProps) {
   const runner = useJobRunner(onDone, onError);
   const downloaded = useRef(false);
+  const requestRef = useRef(request);
+  requestRef.current = request;
+  const [downloadError, setDownloadError] = useState("");
+  const name = shortLabel ?? label;
   const cancelling = runner.job?.display_status === "cancelling";
   const done = runner.job?.status === "done";
+  const failure = runner.error || downloadError;
+
+  useEffect(() => {
+    if (disabled) return;
+    void runner.attach(requestRef.current);
+  }, [disabled, runner.attach]);
 
   const download = useCallback(
     async (job: Job) => {
       if (!downloadName) return;
-      const name =
+      setDownloadError("");
+      const filename =
         typeof downloadName === "function" ? downloadName(job) : downloadName;
       try {
-        await downloadJobResult(job.id, name);
+        await downloadJobResult(job.id, filename);
       } catch (e) {
         const message = `Не удалось скачать результат: ${failureReason(e)}`;
+        setDownloadError(message);
         onError?.(message);
       }
     },
@@ -364,38 +445,47 @@ export function JobAction({
       void download(runner.job);
       return;
     }
+    setDownloadError("");
     void runner.start(request);
   };
 
   const text = runner.uploading
     ? uploadText(runner.uploadFrac, compact)
     : runner.active
-      ? activeText(runner.job, compact)
-      : done
-        ? (compact ? "✓" : `✓ ${label}`)
-        : runner.error || runner.notice
-          ? (compact ? "↻" : `↻ ${label}`)
+      ? activeText(runner.job, compact, name)
+      : failure || runner.notice
+        ? (compact ? "↻" : `↻ ${label}`)
+        : done
+          ? (compact ? "✓" : `✓ ${label}`)
           : label;
 
   const titleText = runner.uploading || runner.active
-    ? (cancelling ? "Отмена…" : "Нажмите, чтобы отменить операцию")
-    : done
-      ? (downloadName
-        ? "Результат готов — скачать ещё раз"
-        : "Готово — можно запустить снова")
-      : runner.error
-        ? `${runner.error} — нажмите, чтобы повторить`
+    ? (cancelling
+      ? `Отмена · ${name}…`
+      : `Нажмите, чтобы отменить: ${name}`)
+    : failure
+      ? `${failure} — нажмите, чтобы ${
+        done ? "скачать ещё раз" : "повторить"
+      }`
+      : done
+        ? (downloadName
+          ? "Результат готов — скачать ещё раз"
+          : "Готово — можно запустить снова")
         : runner.notice
           ? `${runner.notice} — нажмите, чтобы запустить снова`
           : title;
 
-  const accessibleLabel = compact && (runner.active || runner.uploading)
-    ? `${ariaLabel ?? label}: ${
-      runner.uploading
-        ? uploadText(runner.uploadFrac, false)
-        : progressLabel(runner.job)
-    }, нажмите, чтобы отменить`
-    : ariaLabel;
+  const accessibleLabel = compact && failure
+    ? `${ariaLabel ?? label}: ${failure}, нажмите, чтобы ${
+      done ? "скачать ещё раз" : "повторить"
+    }`
+    : compact && (runner.active || runner.uploading)
+      ? `${ariaLabel ?? label}: ${
+        runner.uploading
+          ? uploadText(runner.uploadFrac, false)
+          : progressLabel(runner.job)
+      }, нажмите, чтобы отменить`
+      : ariaLabel;
 
   return (
     <>
@@ -407,12 +497,15 @@ export function JobAction({
         disabled={disabled || cancelling}
         onClick={click}
       >
+        {compact && failure && (
+          <span className="job-action-dot" aria-hidden="true" />
+        )}
         {text}
         <ActionProgress job={runner.job} />
       </button>
-      {!compact && runner.error && !onError && (
+      {!compact && failure && !onError && (
         <span className="job-action-error" role="alert">
-          {runner.error}
+          {failure}
         </span>
       )}
       {!compact && runner.notice && (
@@ -426,6 +519,8 @@ export function JobAction({
 
 export interface JobFileActionProps {
   label: string;
+  /** Короткое название операции для активной подписи. */
+  shortLabel?: string;
   title?: string;
   ariaLabel?: string;
   buttonClassName?: string;
@@ -440,6 +535,7 @@ export interface JobFileActionProps {
 /** Файловая операция: загрузка архива → фоновая задача → прогресс/отмена. */
 export function JobFileAction({
   label,
+  shortLabel,
   title,
   ariaLabel,
   buttonClassName,
@@ -452,27 +548,32 @@ export function JobFileAction({
 }: JobFileActionProps) {
   const runner = useJobRunner(onDone, onError);
   const className = `job-action ${buttonClassName ?? ""}`.trim();
+  const name = shortLabel ?? label;
   const cancelling = runner.job?.display_status === "cancelling";
   const done = runner.job?.status === "done";
 
-  const accessibleLabel = compact && (runner.active || runner.uploading)
-    ? `${ariaLabel ?? label}: ${
-      runner.uploading
-        ? uploadText(runner.uploadFrac, false)
-        : progressLabel(runner.job)
-    }, нажмите, чтобы отменить`
-    : ariaLabel;
+  const accessibleLabel = compact && runner.error
+    ? `${ariaLabel ?? label}: ${runner.error}, нажмите, чтобы повторить`
+    : compact && (runner.active || runner.uploading)
+      ? `${ariaLabel ?? label}: ${
+        runner.uploading
+          ? uploadText(runner.uploadFrac, false)
+          : progressLabel(runner.job)
+      }, нажмите, чтобы отменить`
+      : ariaLabel;
 
   if (runner.active || runner.uploading) {
     const text = runner.uploading
       ? uploadText(runner.uploadFrac, compact)
-      : activeText(runner.job, compact);
+      : activeText(runner.job, compact, name);
     return (
       <>
         <button
           type="button"
           className={className}
-          title={cancelling ? "Отмена…" : "Нажмите, чтобы отменить операцию"}
+          title={cancelling
+            ? `Отмена · ${name}…`
+            : `Нажмите, чтобы отменить: ${name}`}
           aria-label={accessibleLabel}
           disabled={cancelling}
           onClick={() => void runner.cancel()}
@@ -514,8 +615,12 @@ export function JobFileAction({
         accept={accept}
         disabled={disabled}
         title={titleText}
+        ariaLabel={accessibleLabel}
         onFile={(file) => void runner.startUpload(file, request)}
       >
+        {compact && runner.error && (
+          <span className="job-action-dot" aria-hidden="true" />
+        )}
         {text}
       </FileButton>
       {!compact && runner.error && !onError && (

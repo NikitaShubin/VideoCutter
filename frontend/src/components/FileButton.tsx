@@ -5,6 +5,7 @@ interface Props {
   accept?: string;
   disabled?: boolean;
   title?: string;
+  ariaLabel?: string;
   onFile: (file: File) => void;
   children: React.ReactNode;
 }
@@ -17,6 +18,7 @@ export function FileButton({
   accept,
   disabled,
   title,
+  ariaLabel,
   onFile,
   children,
 }: Props) {
@@ -28,6 +30,7 @@ export function FileButton({
         className={className}
         disabled={disabled}
         title={title}
+        aria-label={ariaLabel}
         onClick={() => inputRef.current?.click()}
       >
         {children}

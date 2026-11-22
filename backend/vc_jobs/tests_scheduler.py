@@ -960,12 +960,15 @@ class ListSummaryTests(SchedulerTestBase):
         cancelling, _ = s.list(status="cancelling")
         by_type, _ = s.list(type="test.echo")
         by_project, _ = s.list(project_id="p2")
+        active, _ = s.list(active=True)
         gate.release.set()
 
         self.assertEqual([job.id for job in cancelling], [running.id])
         self.assertEqual({job.id for job in by_type},
                          {running.id, queued.id})
         self.assertEqual([job.id for job in by_project], [queued.id])
+        self.assertEqual({job.id for job in active},
+                         {running.id, queued.id})
 
     def test_activity_failure_does_not_break_job(self):
         activity = mock.Mock()

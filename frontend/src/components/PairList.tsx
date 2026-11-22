@@ -960,6 +960,7 @@ export function PairList({
           <JobAction
             buttonClassName="role-action-plain"
             label="⤓ Бэкап"
+            shortLabel="Бэкап"
             disabled={editBusy}
             request={() => ({
               type: "backup.task",
@@ -978,6 +979,7 @@ export function PairList({
           <JobAction
             buttonClassName="role-action-plain"
             label="⤓ Разметка"
+            shortLabel="Разметка"
             disabled={editBusy}
             request={() => ({
               type: "annotations.export",
@@ -996,6 +998,7 @@ export function PairList({
           <JobFileAction
             buttonClassName="role-action-plain"
             label="⤒ Импорт"
+            shortLabel="Импорт"
             title="Импорт разметки из архива"
             disabled={editBusy}
             request={(uploadId) => ({
@@ -1235,6 +1238,7 @@ export function PairList({
             <JobFileAction
               buttonClassName="btn"
               label="Восстановить из бэкапа…"
+              shortLabel="восстановление"
               title="Восстановить задачу/проект из zip-бэкапа (совпадающие имена получат суффикс _1)"
               request={(uploadId) => ({
                 type: "backup.import",
@@ -1282,6 +1286,7 @@ export function PairList({
                   <JobAction
                     buttonClassName="pair-edit-btn"
                     label="⤓"
+                    shortLabel="Бэкап проекта"
                     ariaLabel="Скачать бэкап проекта"
                     title="Скачать бэкап проекта"
                     compact
