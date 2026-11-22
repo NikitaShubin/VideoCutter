@@ -184,6 +184,9 @@ export function OperationsPanel({
             const files = resultKind(job) === "files" ? exportFiles(job) : [];
             const canDownload =
               job.status === "done" && resultKind(job) === "file";
+            const waiting = job.status === "queued"
+              ? (job.prerequisites ?? []).filter((dep) => dep.status !== "done")
+              : [];
             return (
               <li key={job.id} className={`operation-card status-${job.display_status}`}>
                 <div className="operation-main">
@@ -225,6 +228,12 @@ export function OperationsPanel({
                     )}
                     {job.attempt > 1 && <span>попытка {job.attempt}</span>}
                   </div>
+
+                  {waiting.length > 0 && (
+                    <div className="operation-prereq">
+                      Подготовка: {waiting.map((dep) => dep.label).join(", ")}
+                    </div>
+                  )}
 
                   {total > 0 && (
                     <div

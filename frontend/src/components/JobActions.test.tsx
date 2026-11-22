@@ -365,6 +365,39 @@ describe("кнопка-операция", () => {
     );
   });
 
+  it("очередь называет проверку, которая держит операцию", async () => {
+    vi.mocked(createJob).mockResolvedValue({
+      job: makeJob({
+        type: "export.fragments",
+        status: "queued",
+        display_status: "queued",
+        progress: { current: 0, total: 33, unit: "фрагмент", message: "" },
+        prerequisites: [
+          {
+            id: "dep-1",
+            type: "system.validate",
+            label: "Проверка видео",
+            status: "running",
+            display_status: "running",
+          },
+        ],
+        blocked_by: ["dep-1"],
+      }),
+      deduplicated: false,
+    });
+    const { host } = await mount(
+      <JobAction label="Экспорт" request={() => ({ type: "export.fragments", target: { kind: "task", id: "cam-1" } })} />,
+    );
+    await click(host);
+
+    expect(button(host).textContent).toBe(
+      "Отменить · Экспорт · проверка видео",
+    );
+    expect(
+      host.querySelector('[role="progressbar"]')?.getAttribute("aria-label"),
+    ).toBe("Подготовка: Проверка видео");
+  });
+
   it("во время отмены кнопка заблокирована и не шлёт вторую отмену", async () => {
     vi.mocked(createJob).mockResolvedValue({
       job: makeJob({

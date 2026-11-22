@@ -105,6 +105,14 @@ export interface JobError {
   message: string;
 }
 
+export interface JobPrerequisite {
+  id: string;
+  type: string;
+  label: string;
+  status: JobStatus;
+  display_status: string;
+}
+
 export interface JobResult {
   summary?: string;
   files?: string[];
@@ -125,6 +133,10 @@ export interface Job {
   params: Record<string, unknown>;
   priority: number;
   depends_on: string[];
+  /** Предпосылки с подписями и статусами (от API). */
+  prerequisites?: JobPrerequisite[];
+  /** id незавершённых предпосылок: операция ждёт их. */
+  blocked_by?: string[];
   attempt: number;
   progress: JobProgress;
   result: JobResult | null;

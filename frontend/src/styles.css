@@ -516,21 +516,20 @@ select option {
   padding: 12px 16px;
   background: var(--panel);
   border: 1px solid var(--edge);
-  border-left: 3px solid var(--line);
   border-radius: var(--r);
 }
 
 .operation-card.status-running,
 .operation-card.status-queued {
-  border-left-color: var(--accent);
+  border-color: #4a5f85;
 }
 
 .operation-card.status-done {
-  border-left-color: var(--green-bright);
+  border-color: #3f6b52;
 }
 
 .operation-card.status-error {
-  border-left-color: var(--red);
+  border-color: #7a4444;
 }
 
 .operation-main {
@@ -615,6 +614,12 @@ select option {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.operation-prereq {
+  margin-top: 4px;
   color: var(--muted);
   font-size: 0.85em;
 }

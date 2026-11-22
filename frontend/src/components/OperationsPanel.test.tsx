@@ -130,6 +130,30 @@ describe("экран фоновых операций", () => {
     expect(card.textContent).toContain("2 / 10 файлов");
   });
 
+  it("очередь показывает проверку, которая держит операцию", async () => {
+    const { host } = await mount([
+      makeJob({
+        status: "queued",
+        display_status: "queued",
+        progress: { current: 0, total: 0, unit: "", message: "" },
+        prerequisites: [
+          {
+            id: "dep-1",
+            type: "system.validate",
+            label: "Проверка видео",
+            status: "running",
+            display_status: "running",
+          },
+        ],
+        blocked_by: ["dep-1"],
+      }),
+    ]);
+
+    expect(host.querySelector(".operation-prereq")?.textContent).toBe(
+      "Подготовка: Проверка видео",
+    );
+  });
+
   it("у выполняющейся операции есть отмена", async () => {
     const { host } = await mount([makeJob()]);
     const cancel = host.querySelector<HTMLButtonElement>(".operation-actions .btn")!;

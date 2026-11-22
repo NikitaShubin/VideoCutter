@@ -12,7 +12,7 @@ import {
   uploadJobArchive,
   type JobRequest,
 } from "../api";
-import type { Job } from "../types";
+import type { Job, JobPrerequisite } from "../types";
 import { failureReason } from "../model/errors";
 import { formatPercent } from "../model/format";
 import { FileButton } from "./FileButton";
@@ -69,10 +69,18 @@ function percentText(job: Job | null): string | null {
     : formatPercent(Math.round(frac * 100));
 }
 
+/** Первая незавершённая предпосылка: почему операция ещё не началась. */
+function blocker(job: Job | null): JobPrerequisite | null {
+  if (!job || job.status !== "queued") return null;
+  return (job.prerequisites ?? []).find((dep) => dep.status !== "done") ?? null;
+}
+
 /** Подпись для скринридера и подсказки: что именно происходит. */
 function progressLabel(job: Job | null): string {
   if (!job) return "";
   if (job.display_status === "cancelling") return "Отмена";
+  const waiting = blocker(job);
+  if (waiting) return `Подготовка: ${waiting.label}`;
   if (job.status === "queued") return "В очереди";
   if (job.progress.message) return job.progress.message;
   const pct = percentText(job);
@@ -89,6 +97,10 @@ function activeText(job: Job | null, compact: boolean, name: string): string {
     return percentText(job) ?? "…";
   }
   if (job.display_status === "cancelling") return `Отмена · ${name}…`;
+  const waiting = blocker(job);
+  if (waiting) {
+    return `Отменить · ${name} · ${waiting.label.toLowerCase()}`;
+  }
   if (job.status === "queued") return `Отменить · ${name} · в очереди`;
   const pct = percentText(job);
   return pct === null ? `Отменить · ${name}` : `Отменить · ${name} · ${pct}`;
