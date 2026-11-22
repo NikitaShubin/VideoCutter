@@ -24,6 +24,17 @@ class ExportCancelled(RuntimeError):
     """Отмена экспорта пользователем (в т.ч. посреди фрагмента)."""
 
 
+# Контейнеры, в которых копирование потока без пересжатия проверено:
+# метки/индексы ключевых кадров читаются ffmpeg точно, а смена контейнера
+# не требуется (webm/ogv получают .mp4 и потому копированию не подлежат).
+_COPY_SAFE_EXTS = (".mp4", ".mov", ".m4v", ".mkv")
+
+
+def _seconds(value: float) -> str:
+    """Секунды для аргументов ffmpeg: фиксированная точность, без exp."""
+    return f"{float(value):.6f}"
+
+
 class Exporter:
     def __init__(
         self,
@@ -58,15 +69,74 @@ class Exporter:
         self.tune = tune
         self.nice = nice
 
+    def _copy_allowed(self, target_file: str) -> bool:
+        """Копирование потока допустимо: видео, не PNG, безопасный контейнер."""
+        if target_file.lower().endswith(".png"):
+            return False
+        ext = os.path.splitext(self.source_video_file)[1].lower()
+        return ext in _COPY_SAFE_EXTS
+
+    def _build_copy_command(self, target_file: str,
+                            copy_range: Tuple[float, Optional[float]]) -> List[str]:
+        """Команда вырезания без пересжатия: -ss по ключевому кадру, -c copy.
+
+        ``copy_range`` — (начало, конец-исключающий) в секундах; ``None``
+        вместо конца — до конца файла. Диапазон обязан начинаться с
+        ключевого кадра: иначе ffmpeg молча притянет предыдущий ключевой
+        кадр и в нарезку попадут лишние кадры (это ловит сверка).
+        """
+        t0, t1 = copy_range
+        t0 = float(t0)
+        if t1 is not None:
+            t1 = float(t1)
+            if t1 <= t0:
+                raise FFmpegError(
+                    f"Некорректный диапазон копирования: {t0}..{t1}")
+        cmd = [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            # Входной seek: для -c copy это переход к ключевому кадру.
+            "-ss",
+            _seconds(t0),
+            "-i",
+            self.source_video_file,
+            "-y",
+            "-map",
+            "0:v:0",
+            "-an",
+        ]
+        if t1 is not None:
+            # Верхняя граница — начало следующего GOP: его ключевой кадр
+            # не входит (ffmpeg режет по PTS пакета).
+            cmd += ["-t", _seconds(t1 - t0)]
+        cmd += [
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "make_zero",
+            target_file,
+        ]
+        if self.nice is not None:
+            cmd = ["nice", "-n", str(int(self.nice))] + cmd
+        return cmd
+
     def build_command(self, start: int, end: int, target_file: str,
-                      frame_ts_range=None) -> List[str]:
+                      frame_ts_range=None, copy_range=None) -> List[str]:
         """Собирает команду ffmpeg для вырезания кадров [start, end] (вкл.).
 
         Привязка — только к кадрам: ``start``/``end`` — индексы. Отбор идёт
         по ``frame_ts_range`` (секунды из индекса — метки именно этих кадров):
         неуязвим к сбоям счётчика ``n`` на аномальных файлах.
         ``between`` инклюзивен: ровно end-start+1.
+
+        ``copy_range`` (секунды) включает копирование потока без пересжатия;
+        допустимо только для видео в безопасном контейнере и диапазона,
+        начинающегося с ключевого кадра. PNG и небезопасные контейнеры
+        копирование игнорируют — остаётся проверенный libx264-путь.
         """
+        if copy_range is not None and self._copy_allowed(target_file):
+            return self._build_copy_command(target_file, copy_range)
         # Аргумент передаётся списком (subprocess), поэтому кавычки не нужны.
         # БЕЗ setpts: setpts=N/... съедает один кадр из выхлопа (доказано
         # матрицей: 5 отобранных -> 4 в файле; без setpts — ровно). Метки
@@ -151,12 +221,47 @@ class Exporter:
         os.replace(partial_path, final_path)
         return final_path
 
+    def _run_ffmpeg(self, cmd: List[str], cancelled,
+                    fragment_ind: int) -> Tuple[int, str]:
+        """Запускает ffmpeg с отменой и возвращает (код, stderr)."""
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True)
+        try:
+            while proc.poll() is None:
+                if cancelled is not None and cancelled():
+                    raise ExportCancelled(
+                        f"Экспорт отменён на фрагменте {fragment_ind}")
+                try:
+                    proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    pass
+            _, stderr = proc.communicate()
+        finally:
+            # Подбираем процесс при любом исходе (мёртвый — no-op).
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+            try:
+                if proc.stderr:
+                    proc.stderr.close()
+            except Exception:
+                pass
+        return proc.returncode, stderr
+
     def extract_fragments(
         self,
         fragments: Sequence[Fragment],
         progress: Optional[Callable[[int, int, Fragment], None]] = None,
         cancelled: Optional[Callable[[], bool]] = None,
         frame_ts_ranges: Optional[Sequence[Optional[Tuple[float, float]]]] = None,
+        copy_ranges: Optional[Sequence[Optional[Tuple[float, Optional[float]]]]] = None,
     ) -> List[str]:
         """Режет все фрагменты и возвращает список созданных файлов.
 
@@ -166,6 +271,10 @@ class Exporter:
             немедленно (не ждать границу фрагмента) и бросить ExportCancelled.
         :param frame_ts_ranges: опционально диапазоны меток кадров
             [(t0, t1), ...] параллельно fragments (None — отбор по счётчику n).
+        :param copy_ranges: опционально секундные диапазоны [(t0, t1|None), ...]
+            параллельно fragments для копирования без пересжатия. None в
+            элементе — фрагмент пересжатием. Если копирование сорвалось,
+            фрагмент автоматически пересжимается.
         :return: пути к скрытым частичным файлам (публикация — publish()).
         """
         if not shutil.which("ffmpeg"):
@@ -173,6 +282,8 @@ class Exporter:
 
         if frame_ts_ranges is not None and len(frame_ts_ranges) != len(fragments):
             raise FFmpegError("frame_ts_ranges не совпадает с fragments по длине")
+        if copy_ranges is not None and len(copy_ranges) != len(fragments):
+            raise FFmpegError("copy_ranges не совпадает с fragments по длине")
 
         created: List[str] = []
         total = len(fragments)
@@ -189,39 +300,26 @@ class Exporter:
                 progress(fragment_ind, total, (start, end))
 
             frame_ts_range = frame_ts_ranges[fragment_ind - 1] if frame_ts_ranges is not None else None
+            copy_range = copy_ranges[fragment_ind - 1] if copy_ranges is not None else None
+            used_copy = (copy_range is not None
+                         and self._copy_allowed(partial_file))
             self._create_partial(partial_file)
             cmd = self.build_command(start, end, partial_file,
-                                     frame_ts_range=frame_ts_range)
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True)
-            try:
-                while proc.poll() is None:
-                    if cancelled is not None and cancelled():
-                        raise ExportCancelled(
-                            f"Экспорт отменён на фрагменте {fragment_ind}")
-                    try:
-                        proc.wait(timeout=0.5)
-                    except subprocess.TimeoutExpired:
-                        pass
-                _, stderr = proc.communicate()
-            finally:
-                # Подбираем процесс при любом исходе (мёртвый — no-op).
-                try:
-                    if proc.poll() is None:
-                        proc.kill()
-                except Exception:
-                    pass
-                try:
-                    proc.wait(timeout=10)
-                except Exception:
-                    pass
-                try:
-                    if proc.stderr:
-                        proc.stderr.close()
-                except Exception:
-                    pass
-            if proc.returncode != 0:
+                                     frame_ts_range=frame_ts_range,
+                                     copy_range=copy_range)
+            returncode, stderr = self._run_ffmpeg(
+                cmd, cancelled, fragment_ind)
+            if returncode != 0 and used_copy:
+                # Копирование не удалось (необычный контейнер/поток) —
+                # тот же фрагмент пересжатием: экспорт не должен падать
+                # из-за необязательной оптимизации.
+                self._create_partial(partial_file)
+                cmd = self.build_command(
+                    start, end, partial_file,
+                    frame_ts_range=frame_ts_range)
+                returncode, stderr = self._run_ffmpeg(
+                    cmd, cancelled, fragment_ind)
+            if returncode != 0:
                 raise FFmpegError(
                     f"FFmpeg не смог обработать фрагмент {fragment_ind} "
                     f"(кадры {start}-{end}):\n{stderr[-2000:]}"

@@ -71,6 +71,22 @@ def _wait_scheduled(prov, key, timeout=30.0) -> bool:
     return False
 
 
+class GopStartsTest(SimpleTestCase):
+    """Кандидаты на копирование без пересжатия: начала GOP."""
+
+    def test_reliable_file_returns_gop_starts(self):
+        idx = mock.Mock(pts_unreliable=False, bounds=[0, 25, 50, 96])
+        prov = mock.Mock(_ensure_index=lambda: idx)
+        with mock.patch.object(fp, "_get_provider", return_value=prov):
+            self.assertEqual(fp.get_gop_starts("x.mp4"), [0, 25, 50])
+
+    def test_unreliable_pts_disables_copy(self):
+        idx = mock.Mock(pts_unreliable=True, bounds=[0, 25, 96])
+        prov = mock.Mock(_ensure_index=lambda: idx)
+        with mock.patch.object(fp, "_get_provider", return_value=prov):
+            self.assertEqual(fp.get_gop_starts("x.avi"), [])
+
+
 class GopIndexTest(SimpleTestCase):
     """Чистые юнит-тесты геометрии GOP без медиа."""
 

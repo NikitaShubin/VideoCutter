@@ -22,6 +22,7 @@ from django.conf import settings
 from django.test import SimpleTestCase
 
 from workspace import WORKSPACE_ROOT, _workspaces
+import vc_fragments.views as export_views
 from vc_fragments.views import EXPORTS, EXPORTS_LOCK, EXPORT_CANCEL, \
     _EXPORT_QUEUE
 
@@ -362,7 +363,7 @@ class ExportApiTests(WorkspaceApiTestBase):
                 pass
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 while True:
                     if progress:
                         progress(1, len(fragments), fragments[0])
@@ -435,10 +436,10 @@ class ExportApiTests(WorkspaceApiTestBase):
                 self.real = RealExporter(src, out_dir)
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 return self.real.extract_fragments(
                     fragments, progress=progress, cancelled=cancelled,
-                    frame_ts_ranges=frame_ts_ranges)
+                    frame_ts_ranges=frame_ts_ranges, copy_ranges=copy_ranges)
 
             def publish(self, path):
                 return self.real.publish(path)
@@ -535,10 +536,10 @@ class ExportApiTests(WorkspaceApiTestBase):
                 self.real = RealExporter(src, out_dir)
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 return self.real.extract_fragments(
                     fragments, progress=progress, cancelled=cancelled,
-                    frame_ts_ranges=frame_ts_ranges)
+                    frame_ts_ranges=frame_ts_ranges, copy_ranges=copy_ranges)
 
             def publish(self, path):
                 return self.real.publish(path)
@@ -585,10 +586,10 @@ class ExportApiTests(WorkspaceApiTestBase):
                 self.real = RealExporter(*a, **k)
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 return self.real.extract_fragments(
                     fragments, progress=progress, cancelled=cancelled,
-                    frame_ts_ranges=frame_ts_ranges)
+                    frame_ts_ranges=frame_ts_ranges, copy_ranges=copy_ranges)
 
             def publish(self, path):
                 return self.real.publish(path)
@@ -610,7 +611,7 @@ class ExportApiTests(WorkspaceApiTestBase):
                 pass
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 while True:
                     if cancelled is not None and cancelled():
                         raise ExportCancelled("cancelled in test")
@@ -747,10 +748,10 @@ class ExportConsistencyTests(WorkspaceApiTestBase):
                 self.real = RealExporter(src, out_dir)
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 return self.real.extract_fragments(
                     fragments, progress=progress, cancelled=cancelled,
-                    frame_ts_ranges=frame_ts_ranges)
+                    frame_ts_ranges=frame_ts_ranges, copy_ranges=copy_ranges)
 
             def publish(self, path):
                 return self.real.publish(path)
@@ -1007,7 +1008,8 @@ class ExportQueueTests(WorkspaceApiTestBase):
                 pass
 
             def extract_fragments(self, fragments, progress=None,
-                                  cancelled=None, frame_ts_ranges=None):
+                                  cancelled=None, frame_ts_ranges=None,
+                                  copy_ranges=None):
                 if progress:
                     progress(1, len(fragments), fragments[0])
                 gate.wait(timeout=30)
@@ -1534,6 +1536,121 @@ class VerifyCutCountTests(WorkspaceApiTestBase):
             v._verify_cut(self.video, 0, cut, 10)
 
 
+class ExportCopyRangesTest(WorkspaceApiTestBase):
+    """Выбор диапазонов копирования: только по границам GOP."""
+
+    class CaptureExporter:
+        calls = []
+
+        def __init__(self, src, out_dir, **kwargs):
+            self.out_dir = out_dir
+            self.prefix = os.path.splitext(os.path.basename(src))[0]
+
+        def extract_fragments(self, fragments, progress=None, cancelled=None,
+                              frame_ts_ranges=None, copy_ranges=None):
+            type(self).calls.append(
+                None if copy_ranges is None else list(copy_ranges))
+            created = []
+            for index, _fragment in enumerate(fragments, 1):
+                path = os.path.join(
+                    self.out_dir,
+                    f".{self.prefix}_fragment_{index}.mp4")
+                with open(path, "wb") as f:
+                    f.write(b"fragment")
+                created.append(path)
+            return created
+
+        def publish(self, partial_path):
+            directory, name = os.path.split(partial_path)
+            final_path = os.path.join(directory, name[1:])
+            os.chmod(partial_path, 0o644)
+            os.replace(partial_path, final_path)
+            return final_path
+
+    def setUp(self):
+        super().setUp()
+        self.CaptureExporter.calls = []
+        self.vpts = [i * 100000 for i in range(10)]
+        self.pts_patch = mock.patch.object(
+            export_views.frame_provider, "get_visible_pts",
+            return_value=self.vpts)
+        self.pts_patch.start()
+        self.addCleanup(self.pts_patch.stop)
+        self.unreliable_patch = mock.patch.object(
+            export_views.frame_provider, "index_pts_unreliable",
+            return_value=False)
+        self.unreliable_patch.start()
+        self.addCleanup(self.unreliable_patch.stop)
+        self.gop_patch = mock.patch.object(
+            export_views.frame_provider, "get_gop_starts",
+            return_value=[0, 5])
+        self.gop_patch.start()
+        self.addCleanup(self.gop_patch.stop)
+        self.verify_patch = mock.patch.object(
+            export_views, "_verify_export_cuts")
+        self.verify_patch.start()
+        self.addCleanup(self.verify_patch.stop)
+
+    def _set_fragments(self, *pairs):
+        path = os.path.join(self.ws_dir, "fragments.tsv")
+        with open(path, "w") as f:
+            f.write("start\tend\tcomment\n")
+            for start, end in pairs:
+                f.write(f"{start}\t{end}\t\n")
+
+    def test_copy_only_on_gop_boundaries(self):
+        with mock.patch.object(export_views, "Exporter",
+                               self.CaptureExporter):
+            export_views._run_export(self.ws_id)
+        self.assertEqual(
+            self.CaptureExporter.calls,
+            [[None, (0.5, None)]])
+
+    def test_middle_gop_range_gets_exclusive_end(self):
+        self._set_fragments((0, 4), (5, 9))
+        with mock.patch.object(export_views, "Exporter",
+                               self.CaptureExporter):
+            export_views._run_export(self.ws_id)
+        self.assertEqual(
+            self.CaptureExporter.calls,
+            [[(0.0, 0.5), (0.5, None)]])
+
+    def test_unaligned_start_is_not_copied(self):
+        self._set_fragments((1, 4))
+        with mock.patch.object(export_views, "Exporter",
+                               self.CaptureExporter):
+            export_views._run_export(self.ws_id)
+        self.assertEqual(self.CaptureExporter.calls, [[None]])
+
+    def test_unreliable_pts_disables_copy(self):
+        self.unreliable_patch.stop()
+        with mock.patch.object(
+                export_views.frame_provider, "index_pts_unreliable",
+                return_value=True), \
+                mock.patch.object(export_views, "Exporter",
+                                  self.CaptureExporter):
+            export_views._run_export(self.ws_id)
+        self.assertEqual(self.CaptureExporter.calls, [None])
+
+    def test_verification_failure_retries_without_copy(self):
+        from videocutter.core.exporter import FFmpegError
+
+        self._set_fragments((0, 4))
+        self.verify_patch.stop()
+        with mock.patch.object(
+                export_views, "_verify_export_cuts",
+                side_effect=[FFmpegError("copy mismatch"), None]) as verify, \
+                mock.patch.object(export_views, "Exporter",
+                                  self.CaptureExporter):
+            export_views._run_export(self.ws_id)
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(
+            self.CaptureExporter.calls,
+            [[(0.0, 0.5)], None])
+        with EXPORTS_LOCK:
+            state = EXPORTS[self.ws_id]["state"]
+        self.assertEqual(state, "done")
+
 
 class RunExportErrorTests(WorkspaceApiTestBase):
     def test_run_export_ws_missing(self):
@@ -1584,7 +1701,7 @@ class RunExportErrorTests(WorkspaceApiTestBase):
                 pass
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 self.seen_ranges = frame_ts_ranges
                 return []
 
@@ -1616,7 +1733,7 @@ class RunExportErrorTests(WorkspaceApiTestBase):
                 pass
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 raise v._ExportCancelled()
 
         with mock.patch.object(v, "Exporter", CancelExporter), \
@@ -1635,7 +1752,7 @@ class RunExportErrorTests(WorkspaceApiTestBase):
                 self.out_dir = out_dir
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 with open(os.path.join(self.out_dir, "video_fragment_1.mp4"), "wb") as f:
                     f.write(b"x")
                 raise FFmpegError("boom-ffmpeg")
@@ -1662,7 +1779,7 @@ class RunExportErrorTests(WorkspaceApiTestBase):
                 self.out_dir = out_dir
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 with open(os.path.join(self.out_dir, "video_fragment_9.mp4"), "wb") as f:
                     f.write(b"x")
                 raise FFmpegError("boom2")
@@ -1699,7 +1816,7 @@ class RunExportErrorTests(WorkspaceApiTestBase):
                 self.out_dir = out_dir
 
             def extract_fragments(self, fragments, progress=None, cancelled=None,
-                                  frame_ts_ranges=None):
+                                  frame_ts_ranges=None, copy_ranges=None):
                 with open(os.path.join(self.out_dir, "video_fragment_7.mp4"), "wb") as f:
                     f.write(b"x")
                 raise FFmpegError("boom3")
@@ -1789,10 +1906,10 @@ class RunExportSinglePassTests(WorkspaceApiTestBase):
                 self.real = RealExporter(src, out_dir)
 
             def extract_fragments(self, fragments, progress=None,
-                                  cancelled=None, frame_ts_ranges=None):
+                                  cancelled=None, frame_ts_ranges=None, copy_ranges=None):
                 return self.real.extract_fragments(
                     fragments, progress=progress, cancelled=cancelled,
-                    frame_ts_ranges=frame_ts_ranges)
+                    frame_ts_ranges=frame_ts_ranges, copy_ranges=copy_ranges)
 
             def publish(self, path):
                 return self.real.publish(path)
@@ -1817,7 +1934,7 @@ class RunExportSinglePassTests(WorkspaceApiTestBase):
                 self.out_dir = out_dir
 
             def extract_fragments(self, fragments, progress=None,
-                                  cancelled=None, frame_ts_ranges=None):
+                                  cancelled=None, frame_ts_ranges=None, copy_ranges=None):
                 path = os.path.join(self.out_dir, ".video_fragment_1.mp4")
                 with open(path, "wb") as f:
                     f.write(b"partial")
@@ -1923,7 +2040,7 @@ class ExportHttpExtraTests(WorkspaceApiTestBase):
                 pass
 
             def extract_fragments(self, fragments, progress=None,
-                                  cancelled=None, frame_ts_ranges=None):
+                                  cancelled=None, frame_ts_ranges=None, copy_ranges=None):
                 from videocutter.core.exporter import ExportCancelled
                 if progress:
                     progress(1, len(fragments), fragments[0])

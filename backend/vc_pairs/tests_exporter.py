@@ -130,6 +130,61 @@ class ExporterRangeTest(SimpleTestCase):
             Exporter("a.avi", "/tmp").target_suffix == ".avi")
 
 
+class ExporterCopyCommandTest(SimpleTestCase):
+    """Копирование без пересжатия: команда и ограничения применимости."""
+
+    def test_copy_command_stream_copies_keyframe_range(self):
+        cmd = Exporter("a.mp4", "/tmp").build_command(
+            10, 19, "/tmp/x.mp4", copy_range=(1.5, 2.5))
+        self.assertEqual(cmd[cmd.index("-ss") + 1], "1.500000")
+        self.assertEqual(cmd[cmd.index("-t") + 1], "1.000000")
+        self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+        self.assertEqual(cmd[cmd.index("-map") + 1], "0:v:0")
+        self.assertIn("-an", cmd)
+        self.assertNotIn("-vf", cmd)
+        self.assertNotIn("-frames:v", cmd)
+
+    def test_copy_command_to_eof_has_no_duration(self):
+        cmd = Exporter("a.mp4", "/tmp").build_command(
+            0, 9, "/tmp/x.mp4", copy_range=(0.0, None))
+        self.assertIn("-ss", cmd)
+        self.assertNotIn("-t", cmd)
+        self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+
+    def test_copy_ignored_for_single_frame_png(self):
+        cmd = Exporter("a.mp4", "/tmp").build_command(
+            10, 10, "/tmp/x.png", copy_range=(0.0, None))
+        self.assertNotIn("copy", cmd)
+        self.assertIn("-c:v", cmd)
+
+    def test_copy_ignored_for_unsafe_container(self):
+        cmd = Exporter("a.avi", "/tmp").build_command(
+            0, 9, "/tmp/x.avi", copy_range=(0.0, None))
+        self.assertNotIn("copy", cmd)
+        self.assertIn("-vf", cmd)
+
+    def test_copy_ignored_when_container_changes(self):
+        """webm/ogv получают .mp4 — копирование потока небезопасно."""
+        cmd = Exporter("a.webm", "/tmp").build_command(
+            0, 9, "/tmp/x.mp4", copy_range=(0.0, None))
+        self.assertNotIn("copy", cmd)
+        self.assertIn("-vf", cmd)
+
+    def test_copy_range_rejects_empty_span(self):
+        from videocutter.core.exporter import FFmpegError
+
+        with self.assertRaises(FFmpegError):
+            Exporter("a.mp4", "/tmp").build_command(
+                0, 9, "/tmp/x.mp4", copy_range=(2.0, 2.0))
+
+    def test_copy_ranges_length_mismatch(self):
+        from videocutter.core.exporter import FFmpegError
+
+        exp = Exporter("a.mp4", "/tmp")
+        with self.assertRaises(FFmpegError):
+            exp.extract_fragments([(0, 3)], copy_ranges=[None, None])
+
+
 class ExporterBoundaryTest(SimpleTestCase):
     """Точность границ нарезки: какие кадры реально попадают в файл.
 
@@ -344,6 +399,123 @@ class ExporterVfrTest(SimpleTestCase):
             export_views._verify_cut(self.path, a, created[0], b - a + 1)
         finally:
             shutil.rmtree(out, ignore_errors=True)
+
+
+class ExporterCopyTest(SimpleTestCase):
+    """Копирование потока на реальном ffmpeg: кадры те же, есть откат."""
+
+    N = 40
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+            raise unittest.SkipTest("ffmpeg/ffprobe не найдены")
+        super().setUpClass()
+        cls.tmpdir = tempfile.TemporaryDirectory(prefix="vccopy_")
+        cls.path = os.path.join(cls.tmpdir.name, "copyclip.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", f"testsrc2=size=64x64:rate=25:duration={cls.N / 25}",
+             "-c:v", "libx264", "-preset", "ultrafast", "-g", "10",
+             "-pix_fmt", "yuv420p", cls.path],
+            check=True, capture_output=True)
+        assert _ffprobe_count(cls.path) == cls.N
+
+    @classmethod
+    def tearDownClass(cls):
+        from vc_pairs import frame_provider as fp
+        fp.close_source(cls.path)
+        cls.tmpdir.cleanup()
+        super().tearDownClass()
+
+    def tearDown(self):
+        from vc_pairs import frame_provider as fp
+        fp.close_source(self.path)
+
+    def _copy(self, start, end):
+        from vc_fragments.views import _frame_ts_bounds
+        from vc_pairs import frame_provider as fp
+
+        vpts = fp.get_visible_pts(self.path)
+        gops = fp.get_gop_starts(self.path)
+        self.assertIn(start, gops)
+        stop = None if end == len(vpts) - 1 else vpts[end + 1] / 1e6
+        out = tempfile.mkdtemp(dir=self.tmpdir.name)
+        self.addCleanup(shutil.rmtree, out, True)
+        created = Exporter(self.path, out).extract_fragments(
+            [(start, end)],
+            frame_ts_ranges=[_frame_ts_bounds(vpts, start, end)],
+            copy_ranges=[(vpts[start] / 1e6, stop)])
+        self.assertEqual(len(created), 1)
+        return created[0]
+
+    def test_gop_starts_are_keyframe_indices(self):
+        from vc_pairs import frame_provider as fp
+
+        self.assertEqual(fp.get_gop_starts(self.path), [0, 10, 20, 30])
+
+    def test_middle_gop_copy_is_frame_exact(self):
+        import vc_fragments.views as export_views
+
+        cut = self._copy(10, 19)
+        self.assertEqual(_ffprobe_count(cut), 10)
+        export_views._verify_cut(self.path, 10, cut, 10)
+
+    def test_copy_to_eof_is_frame_exact(self):
+        import vc_fragments.views as export_views
+
+        cut = self._copy(20, self.N - 1)
+        self.assertEqual(_ffprobe_count(cut), self.N - 20)
+        export_views._verify_cut(self.path, 20, cut, self.N - 20)
+
+    def test_whole_video_copy_is_frame_exact(self):
+        import vc_fragments.views as export_views
+
+        cut = self._copy(0, self.N - 1)
+        self.assertEqual(_ffprobe_count(cut), self.N)
+        export_views._verify_cut(self.path, 0, cut, self.N)
+
+    def test_copy_failure_falls_back_to_reencode(self):
+        """Копирование сорвалось — фрагмент пересжат, а не потерян."""
+        from vc_pairs import frame_provider as fp
+        import videocutter.core.exporter as exporter_module
+
+        vpts = fp.get_visible_pts(self.path)
+        real_popen = subprocess.Popen
+        calls = []
+
+        class Failed:
+            returncode = 1
+            stderr = None
+
+            def poll(self):
+                return 1
+
+            def communicate(self):
+                return None, "copy failed"
+
+            def wait(self, timeout=None):
+                return 1
+
+            def kill(self):
+                pass
+
+        def flaky(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            if len(calls) == 1:
+                return Failed()
+            return real_popen(cmd, *args, **kwargs)
+
+        out = tempfile.mkdtemp(dir=self.tmpdir.name)
+        self.addCleanup(shutil.rmtree, out, True)
+        with mock.patch.object(exporter_module.subprocess, "Popen",
+                               side_effect=flaky):
+            created = Exporter(self.path, out).extract_fragments(
+                [(0, self.N - 1)],
+                copy_ranges=[(vpts[0] / 1e6, None)])
+        self.assertEqual(calls[0][calls[0].index("-c") + 1], "copy")
+        self.assertIn("-vf", calls[1])
+        self.assertEqual(_ffprobe_count(created[0]), self.N)
 
 
 class StartOffsetTest(SimpleTestCase):

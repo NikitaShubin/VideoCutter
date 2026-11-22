@@ -1749,6 +1749,20 @@ def get_visible_pts(path: str) -> list:
     return [v - off for v in idx.visible_pts]
 
 
+def get_gop_starts(path: str) -> list:
+    """Начала GOP (видимые индексы) — кандидаты на копирование без пересжатия.
+
+    Копировать поток можно только с ключевого кадра. Файлам с
+    недостоверными метками (pts_unreliable) не доверяем: границы групп
+    там гадаются декодером, поэтому отдаём пустой список — экспорт идёт
+    пересжатием.
+    """
+    idx = _get_provider(path)._ensure_index()
+    if idx.pts_unreliable:
+        return []
+    return list(idx.bounds[:-1])
+
+
 logger = logging.getLogger(__name__)
 
 # Фоновая сборка индексов: путь -> поток уже запущен. При ошибке сборки

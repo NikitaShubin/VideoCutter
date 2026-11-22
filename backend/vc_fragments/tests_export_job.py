@@ -50,7 +50,7 @@ class FakeExporter:
         self.prefix = os.path.splitext(os.path.basename(source))[0]
 
     def extract_fragments(self, fragments, progress=None, cancelled=None,
-                          frame_ts_ranges=None):
+                          frame_ts_ranges=None, copy_ranges=None):
         created = []
         for index, (start, end) in enumerate(fragments, 1):
             path = os.path.join(

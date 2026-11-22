@@ -540,13 +540,26 @@ def _run_export(ws_id: str, hooks=None) -> None:
         vpts = frame_provider.get_visible_pts(ws.original)
         by_count = frame_provider.index_pts_unreliable(ws.original)
         frame_ts_ranges = []
+        copy_ranges = []
         if not by_count:
+            gop_starts = set(frame_provider.get_gop_starts(ws.original))
+            last = len(vpts) - 1
             for (start, end) in fragments:
                 if not 0 <= start <= end < len(vpts):
                     raise FFmpegError(
                         f"Фрагмент [{start}, {end}] вне диапазона "
                         f"[0, {len(vpts)})")
                 frame_ts_ranges.append(_frame_ts_bounds(vpts, start, end))
+                # Копирование без пересжатия — только по границам GOP:
+                # фрагмент обязан начинаться с ключевого кадра и
+                # заканчиваться последним кадром группы или файла.
+                # Иначе в нарезку попали бы чужие кадры.
+                if start in gop_starts and (
+                        end == last or end + 1 in gop_starts):
+                    t1 = None if end == last else vpts[end + 1] / 1e6
+                    copy_ranges.append((vpts[start] / 1e6, t1))
+                else:
+                    copy_ranges.append(None)
         else:
             for (start, end) in fragments:
                 if not 0 <= start <= end < len(vpts):
@@ -554,6 +567,7 @@ def _run_export(ws_id: str, hooks=None) -> None:
                         f"Фрагмент [{start}, {end}] вне диапазона "
                         f"[0, {len(vpts)})")
             frame_ts_ranges = None
+            copy_ranges = None
         def progress(fragment_ind: int, _total: int, _fragment) -> None:
             disk.ensure_free(out_dir)
             if not hooks.progress(ws_id, fragment_ind, total):
@@ -562,12 +576,26 @@ def _run_export(ws_id: str, hooks=None) -> None:
         def cancelled() -> bool:
             return hooks.cancelled(ws_id)
 
-        created = exporter.extract_fragments(
-            fragments, progress=progress, cancelled=cancelled,
-            frame_ts_ranges=frame_ts_ranges)
-        items = [(start, end, path)
-                 for (start, end), path in zip(fragments, created)]
-        _verify_export_cuts(ws.original, items, cancelled=cancelled)
+        def extract(ranges):
+            created = exporter.extract_fragments(
+                fragments, progress=progress, cancelled=cancelled,
+                frame_ts_ranges=frame_ts_ranges,
+                copy_ranges=ranges)
+            return [(start, end, path)
+                    for (start, end), path in zip(fragments, created)]
+
+        items = extract(copy_ranges)
+        try:
+            _verify_export_cuts(ws.original, items, cancelled=cancelled)
+        except FFmpegError:
+            # Копирование дало не тот поток (например, открытый GOP или
+            # нестандартный контейнер). Неподтверждённые файлы не
+            # публикуем: повторяем весь набор пересжатием.
+            if not copy_ranges or not any(copy_ranges):
+                raise
+            _remove_created_since(out_dir, before)
+            items = extract(None)
+            _verify_export_cuts(ws.original, items, cancelled=cancelled)
         published = [exporter.publish(path) for _, _, path in items]
         vid = _video_identity(ws.original)
         task_hash = _task_hash(frags, vid["size"], vid["mtime_ns"]) \
