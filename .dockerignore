@@ -3,6 +3,9 @@
 .git
 .github
 workspaces
+backend/vc_media
+backend/static
+backend/db.sqlite3
 frontend
 docs
 scripts
