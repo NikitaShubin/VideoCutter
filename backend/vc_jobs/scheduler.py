@@ -680,6 +680,13 @@ class Scheduler:
     def _prune_locked(self, now: Optional[datetime] = None) -> int:
         moment = now or datetime.now(timezone.utc)
         self._last_prune = time.monotonic()
+        # Терминальная предпосылка ещё нужна активному зависимому:
+        # удалить её — значит оставить зависимого без причины ожидания.
+        referenced = {
+            dep_id
+            for job in self._jobs.values() if job.active
+            for dep_id in job.depends_on
+        }
         removed = 0
         for job in list(self._jobs.values()):
             if not job.terminal:
@@ -687,8 +694,15 @@ class Scheduler:
             finished = parse_iso(job.finished_at)
             if finished is None:
                 continue
-            days = (self._error_retention_days if job.status == ERROR
-                    else self._retention_days)
+            if job.id in referenced:
+                continue
+            job_type = self.registry.get(job.type)
+            if job.status == DONE and job_type is not None \
+                    and job_type.record_retention_days is not None:
+                days = job_type.record_retention_days
+            else:
+                days = (self._error_retention_days if job.status == ERROR
+                        else self._retention_days)
             if finished >= moment - timedelta(days=days):
                 continue
             self.store.delete(job.id)

@@ -100,16 +100,22 @@ class RegistryTests(SimpleTestCase):
         with self.assertRaises(ValueError):
             self._type(prerequisites="not-callable")
 
+    def test_negative_record_retention_rejected(self):
+        with self.assertRaises(ValueError):
+            self._type(record_retention_days=-1.0)
+
     def test_manifest_is_json_ready_and_has_no_executor(self):
         reg = JobRegistry()
         reg.register(self._type(cancellable=False, resumable=False,
-                                result_kind="file", retention_days=7.0))
+                                result_kind="file", retention_days=7.0,
+                                record_retention_days=1.0))
 
         manifest = reg.manifest()
 
         self.assertEqual(manifest[0]["key"], "test.echo")
         self.assertEqual(manifest[0]["cancellable"], False)
         self.assertEqual(manifest[0]["retention_days"], 7.0)
+        self.assertEqual(manifest[0]["record_retention_days"], 1.0)
         self.assertNotIn("executor", manifest[0])
 
 
@@ -1031,6 +1037,43 @@ class RetentionTests(SchedulerTestBase):
 
         self._age(job, 100)
         self.assertEqual(scheduler.prune(), 1)
+
+    def test_type_can_expire_done_record_earlier(self):
+        self.make(key="test.short", record_retention_days=1.0)
+        scheduler = self.scheduler()
+        job = self._done(scheduler, type="test.short")
+        self._age(job, 2)
+
+        self.assertEqual(scheduler.prune(), 1)
+        self.assertIsNone(scheduler.get(job.id))
+
+    def test_record_retention_does_not_shorten_errors(self):
+        self.make(
+            key="test.shortfail", record_retention_days=1.0,
+            executor=lambda job, ctx: (_ for _ in ()).throw(
+                RuntimeError("сбой")))
+        scheduler = self.scheduler()
+        job, _ = self.submit(scheduler, type="test.shortfail")
+        self.assertTrue(wait_until(
+            lambda: scheduler.get(job.id).status == "error"))
+        self._age(scheduler.get(job.id), 2)
+
+        self.assertEqual(scheduler.prune(), 0)
+
+    def test_terminal_prerequisite_survives_while_dependent_runs(self):
+        self.make(key="test.short", record_retention_days=1.0)
+        gate = Gate()
+        self.make(key="test.gate", executor=gate)
+        scheduler = self.scheduler()
+        dep = self._done(scheduler, type="test.short")
+        self._age(dep, 2)
+
+        self.submit(scheduler, type="test.gate", depends_on=[dep.id])
+        self.assertTrue(gate.started.wait(2))
+
+        self.assertEqual(scheduler.prune(), 0)
+        self.assertIsNotNone(scheduler.get(dep.id))
+        gate.release.set()
 
     def test_active_job_is_never_pruned(self):
         gate = Gate()

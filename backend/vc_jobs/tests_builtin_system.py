@@ -10,6 +10,7 @@
 
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -130,6 +131,21 @@ class ValidationJobTests(SystemJobTestBase):
         deps = self.scheduler.get(job.id).depends_on
         self.assertEqual(len(deps), 1)
         self.assertEqual(self.scheduler.get(deps[0]).type, INDEX_TYPE)
+
+
+class SystemRetentionTests(SystemJobTestBase):
+    def test_completed_system_record_expires_after_a_day(self):
+        self.assertEqual(
+            self.registry.get(INDEX_TYPE).record_retention_days, 1.0)
+        self.assertEqual(
+            self.registry.get(VALIDATE_TYPE).record_retention_days, 1.0)
+        job = self.run_job(INDEX_TYPE)
+        job.finished_at = (
+            datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        self.store.save(job)
+
+        self.assertEqual(self.scheduler.prune(), 1)
+        self.assertIsNone(self.scheduler.get(job.id))
 
 
 class FingerprintTests(SystemJobTestBase):

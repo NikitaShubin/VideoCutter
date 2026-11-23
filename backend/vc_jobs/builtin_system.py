@@ -269,6 +269,7 @@ def register(registry: JobRegistry) -> None:
         cancellable=True,
         resumable=True,
         retention_days=None,
+        record_retention_days=1.0,
     ))
     registry.register(JobType(
         key=VALIDATE_TYPE,
@@ -279,5 +280,6 @@ def register(registry: JobRegistry) -> None:
         cancellable=True,
         resumable=True,
         retention_days=None,
+        record_retention_days=1.0,
         prerequisites=_index_prerequisite,
     ))

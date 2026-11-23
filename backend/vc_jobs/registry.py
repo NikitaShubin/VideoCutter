@@ -38,6 +38,9 @@ class JobType:
     resumable: bool = True
     #: Срок жизни результата в днях; None — результат не протухает.
     retention_days: Optional[float] = None
+    #: Срок жизни записи об успешной операции; None — общий срок очереди.
+    #: Ошибки всегда живут по общему сроку: их нельзя терять раньше.
+    record_retention_days: Optional[float] = None
     params_schema: Dict[str, Any] = field(default_factory=dict)
     prerequisites: Optional[Callable[[Any], Sequence[Any]]] = None
 
@@ -48,6 +51,9 @@ class JobType:
             raise UnknownLane(f"неизвестная полоса: {self.lane!r}")
         if not callable(self.executor):
             raise ValueError("executor должен быть вызываемым")
+        if self.record_retention_days is not None \
+                and self.record_retention_days < 0:
+            raise ValueError("record_retention_days не может быть меньше нуля")
         if self.prerequisites is not None and not callable(self.prerequisites):
             raise ValueError("prerequisites должен быть вызываемым")
 
@@ -61,6 +67,7 @@ class JobType:
             "cancellable": self.cancellable,
             "resumable": self.resumable,
             "retention_days": self.retention_days,
+            "record_retention_days": self.record_retention_days,
             "params_schema": dict(self.params_schema),
             "has_prerequisites": self.prerequisites is not None,
         }
