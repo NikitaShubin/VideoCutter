@@ -44,6 +44,36 @@ class ArchiveCacheTestBase(SimpleTestCase):
 
 
 class SizeLimitTests(ArchiveCacheTestBase):
+    def test_zero_cache_limit_means_unlimited(self):
+        with mock.patch.dict(
+                os.environ, {"VC_ARCHIVE_CACHE_MAX_MB": "0"}):
+            entries = [
+                self.cache.store("ns", f"k{i}", b"x" * 400_000, f"{i}.zip")
+                for i in range(3)
+            ]
+
+        for entry in entries:
+            self.assertTrue(os.path.isfile(entry.archive_path))
+
+    def _sparse_archive(self, key: str, size: int = 3 * 1024 ** 3):
+        """Архив нужного размера без записи гигабайт: разреженный файл."""
+        directory = os.path.join(self.root, "ns")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f".build-{key}")
+        with open(path, "wb") as fh:
+            fh.truncate(size)
+        return self.cache.commit(
+            "ns", key, path, target="", download_name=f"{key}.zip",
+            ttl_days=1)
+
+    def test_unset_cache_limit_means_unlimited(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VC_ARCHIVE_CACHE_MAX_MB", None)
+            entries = [self._sparse_archive(f"k{i}") for i in range(3)]
+
+        for entry in entries:
+            self.assertTrue(os.path.isfile(entry.archive_path))
+
     def test_cache_limit_evicts_oldest_archives(self):
         with mock.patch.dict(
                 os.environ, {"VC_ARCHIVE_CACHE_MAX_MB": "1"}):
@@ -275,6 +305,23 @@ class RemoveTests(ArchiveCacheTestBase):
         self.cache.clear()
 
         self.assertFalse(os.path.exists(self.root))
+
+
+class RemoveEntryTests(ArchiveCacheTestBase):
+    def test_remove_entry_deletes_archive_and_metadata(self):
+        entry = self.cache.store("ns", "k", b"zip", "a.zip")
+
+        removed = self.cache.remove("ns", "k")
+
+        self.assertTrue(removed)
+        self.assertFalse(os.path.exists(entry.archive_path))
+        self.assertFalse(os.path.exists(entry.metadata_path))
+
+    def test_remove_missing_entry_is_false(self):
+        self.assertFalse(self.cache.remove("ns", "missing"))
+
+    def test_remove_unsafe_key_is_false(self):
+        self.assertFalse(self.cache.remove("ns", "../escape"))
 
 
 class PruneTests(ArchiveCacheTestBase):

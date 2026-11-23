@@ -45,6 +45,10 @@ services:
       # Входной фильтр-токен (дверь локального контура): пуст — выключен,
       # задан — API требует тот же токен (фронт спросит один раз).
       VC_AUTH_TOKEN: ${VC_AUTH_TOKEN:-}
+      # Предел кэша архивов, МБ. 0 (по умолчанию) — без предела: на сервере
+      # с запасом диска архивы чистятся только по TTL. Локально можно
+      # ограничить в .env, например VC_ARCHIVE_CACHE_MAX_MB=8192.
+      VC_ARCHIVE_CACHE_MAX_MB: ${VC_ARCHIVE_CACHE_MAX_MB:-0}
     volumes:
       - ./workspaces:/data/workspaces
     ports:

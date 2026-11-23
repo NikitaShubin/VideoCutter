@@ -31,11 +31,12 @@ _LOCKS: Dict[str, threading.Lock] = {}
 
 
 def _max_bytes() -> int:
+    """Предел кэша в байтах; 0 — без предела (значение по умолчанию)."""
     try:
-        mb = int(os.getenv("VC_ARCHIVE_CACHE_MAX_MB", "8192"))
+        mb = int(os.getenv("VC_ARCHIVE_CACHE_MAX_MB", "0"))
     except ValueError:
-        mb = 8192
-    return max(1, mb) * 1024 * 1024
+        mb = 0
+    return max(0, mb) * 1024 * 1024
 
 
 def _now() -> datetime:
@@ -254,6 +255,32 @@ class ArchiveCache:
             except OSError:
                 pass
 
+    def remove(self, namespace: str, key: str) -> bool:
+        """Удаляет одну запись кэша: архив и метаданные.
+
+        Нужна ручной чистке из списка операций. Битые метаданные не
+        мешают убрать файл: ключ проверяется, поэтому выйти за каталог
+        кэша нельзя.
+        """
+        if not isinstance(key, str) or not key \
+                or os.path.basename(key) != key or key in (".", ".."):
+            return False
+        entry = self._read(namespace, key)
+        if entry is not None:
+            self._remove(entry)
+            return True
+        archive, metadata = self._paths(namespace, key)
+        removed = False
+        for path in (archive, metadata):
+            try:
+                os.remove(path)
+                removed = True
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        return removed
+
     def remove_target(self, namespace: str, target: str,
                       keep_key: Optional[str] = None) -> List[str]:
         """Убирает прежние версии объекта после успешной пересборки."""
@@ -297,8 +324,11 @@ class ArchiveCache:
 
         ``keep`` (только что собранный файл) не удаляется даже если один
         архив больше лимита: иначе операция вернула бы уже стёртый файл.
+        Лимит ``0`` — без предела: кэш чистится только по TTL и вручную.
         """
         limit = _max_bytes() if max_bytes is None else max(0, int(max_bytes))
+        if limit == 0:
+            return []
         entries = list(self._entries())
         sizes = {}
         total = 0
