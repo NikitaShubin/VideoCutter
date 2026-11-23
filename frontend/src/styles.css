@@ -510,6 +510,25 @@ select option {
   text-align: center;
 }
 
+/* История — необязательный режим: по умолчанию список остаётся рабочим,
+ * а полные записи открываются одной текстовой кнопкой. */
+.operations-history {
+  align-self: flex-start;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.9em;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.operations-history:hover {
+  color: var(--text);
+}
+
 .operation-list {
   list-style: none;
   padding: 0;

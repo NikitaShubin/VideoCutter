@@ -306,6 +306,58 @@ describe("экран фоновых операций", () => {
     expect(host.querySelectorAll(".operation-card")).toHaveLength(0);
   });
 
+  it("по умолчанию скрывает историю, но показывает её по кнопке", async () => {
+    const { host } = await mount([
+      makeJob({
+        id: "cancelled-1",
+        status: "cancelled",
+        display_status: "cancelled",
+      }),
+    ]);
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(0);
+
+    const toggle = Array.from(host.querySelectorAll("button")).find(
+      (button) => button.textContent === "Показать историю",
+    )!;
+    expect(toggle).toBeTruthy();
+
+    act(() => toggle.click());
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(1);
+    expect(host.textContent).toContain("Отменено");
+
+    act(() => toggle.click());
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(0);
+  });
+
+  it("не предлагает историю, когда записей нет вовсе", async () => {
+    const { host } = await mount([]);
+    expect(host.textContent).not.toContain("Показать историю");
+  });
+
+  it("в истории не предлагает скачать истёкший бэкап", async () => {
+    const { host } = await mount([
+      makeJob({
+        type: "task.backup",
+        status: "done",
+        display_status: "done",
+        result: { download_name: "old.zip" },
+        retention: {
+          expires_at: "2000-01-01T00:00:00+00:00",
+          keep: false,
+        },
+      }),
+    ]);
+
+    const toggle = Array.from(host.querySelectorAll("button")).find(
+      (button) => button.textContent === "Показать историю",
+    )!;
+    act(() => toggle.click());
+
+    const card = host.querySelector(".operation-card")!;
+    expect(card.textContent).toContain("Бэкап задачи");
+    expect(card.textContent).not.toContain("Скачать");
+  });
+
   it("активная операция видна, даже если не попала в последнюю сотню", async () => {
     const active = makeJob({ id: "active-1", status: "running" });
     const old = makeJob({

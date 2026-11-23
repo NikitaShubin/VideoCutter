@@ -101,7 +101,12 @@ function hasResultFile(job: Job): boolean {
 // а из завершённых остаётся только последняя операция по каждой задаче.
 // Успешные system.* не показываются вовсе: они уже отражены в состоянии
 // задачи, а список нужен, чтобы открыть задачу или забрать результат.
-export function visibleJobs(jobs: Job[], now = Date.now()): Job[] {
+export function visibleJobs(
+  jobs: Job[],
+  now = Date.now(),
+  showAll = false,
+): Job[] {
+  if (showAll) return jobs;
   const active: Job[] = [];
   const latestTerminal = new Map<string, Job>();
   for (const job of jobs) {
@@ -141,6 +146,7 @@ export const OperationsPanel = forwardRef<
   const [types, setTypes] = useState<Record<string, JobTypeManifest>>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
   const activeRef = useRef(false);
 
   useEffect(() => {
@@ -163,7 +169,7 @@ export const OperationsPanel = forwardRef<
       listJobs({ active: true, limit: 100 }),
       listJobs({ limit: 100 }),
     ]);
-    return visibleJobs(mergeJobs(activePage.jobs, recentPage.jobs));
+    return mergeJobs(activePage.jobs, recentPage.jobs);
   }, []);
 
   const applyJobs = useCallback((next: Job[]) => {
@@ -238,6 +244,9 @@ export const OperationsPanel = forwardRef<
     types[job.type]?.label ?? job.type;
   const resultKind = (job: Job): string =>
     types[job.type]?.result_kind ?? "none";
+  const shown = jobs === null
+    ? null
+    : visibleJobs(jobs, Date.now(), showAll);
 
   return (
     <div className="operations-panel">
@@ -247,26 +256,28 @@ export const OperationsPanel = forwardRef<
         </div>
       )}
 
-      {jobs === null && <div className="operations-empty">Загрузка…</div>}
+      {shown === null && <div className="operations-empty">Загрузка…</div>}
 
-      {jobs !== null && jobs.length === 0 && (
+      {shown !== null && shown.length === 0 && (
         <div className="operations-empty">
-          Фоновых операций нет. Запустите экспорт или бэкап — они появятся
-          здесь.
+          {jobs !== null && jobs.length > 0
+            ? "Активных операций нет. Завершённые записи — в истории."
+            : "Фоновых операций нет. Запустите экспорт или бэкап — они появятся здесь."}
         </div>
       )}
 
-      {jobs !== null && jobs.length > 0 && (
+      {shown !== null && shown.length > 0 && (
         <ul className="operation-list" aria-label="Фоновые операции">
-          {jobs.map((job) => {
+          {shown.map((job) => {
             const total = job.progress.total;
             const current = job.progress.current;
             const percent =
               total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
             const active = ACTIVE.has(job.status) || job.display_status === "cancelling";
             const files = resultKind(job) === "files" ? exportFiles(job) : [];
+            const expired = resultExpired(job, Date.now());
             const canDownload =
-              job.status === "done" && resultKind(job) === "file";
+              job.status === "done" && resultKind(job) === "file" && !expired;
             const waiting = job.status === "queued"
               ? (job.prerequisites ?? []).filter((dep) => dep.status !== "done")
               : [];
@@ -413,6 +424,16 @@ export const OperationsPanel = forwardRef<
             );
           })}
         </ul>
+      )}
+
+      {jobs !== null && jobs.length > 0 && (
+        <button
+          className="operations-history"
+          aria-pressed={showAll}
+          onClick={() => setShowAll((value) => !value)}
+        >
+          {showAll ? "Скрыть историю" : "Показать историю"}
+        </button>
       )}
     </div>
   );
