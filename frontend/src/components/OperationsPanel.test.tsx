@@ -466,4 +466,69 @@ describe("экран фоновых операций", () => {
     act(() => target.click());
     expect(opened).toEqual(["cam-1"]);
   });
+
+  it("у выполняющейся системной операции нет перехода в задачу", async () => {
+    const { host } = await mount(
+      [
+        makeJob({
+          type: "system.validate",
+          lane: "system",
+          status: "running",
+          display_status: "running",
+        }),
+      ],
+      { onOpenTask: () => undefined },
+    );
+
+    const card = host.querySelector(".operation-card")!;
+    expect(card.textContent).toContain("cam-1");
+    expect(card.querySelector("button.operation-target")).toBeNull();
+    expect(
+      Array.from(card.querySelectorAll("button")).some(
+        (button) => button.textContent === "Открыть задачу",
+      ),
+    ).toBe(false);
+  });
+
+  it("в истории системная операция тоже не ведёт в задачу", async () => {
+    const { host } = await mount(
+      [
+        makeJob({
+          id: "validate-1",
+          type: "system.validate",
+          lane: "system",
+          status: "done",
+          display_status: "done",
+        }),
+      ],
+      { onOpenTask: () => undefined },
+    );
+
+    const toggle = Array.from(host.querySelectorAll("button")).find(
+      (button) => button.textContent === "Показать историю",
+    )!;
+    act(() => toggle.click());
+
+    const card = host.querySelector(".operation-card")!;
+    expect(card.textContent).toContain("Проверка видео");
+    expect(card.querySelector("button.operation-target")).toBeNull();
+    expect(
+      Array.from(card.querySelectorAll("button")).some(
+        (button) => button.textContent === "Открыть задачу",
+      ),
+    ).toBe(false);
+  });
+
+  it("у обычной операции остаётся кнопка открытия задачи", async () => {
+    const opened: string[] = [];
+    const { host } = await mount([makeJob()], {
+      onOpenTask: (id) => opened.push(id),
+    });
+
+    const open = Array.from(
+      host.querySelectorAll<HTMLButtonElement>(".operation-actions button"),
+    ).find((button) => button.textContent === "Открыть задачу")!;
+    act(() => open.click());
+    expect(opened).toEqual(["cam-1"]);
+  });
 });

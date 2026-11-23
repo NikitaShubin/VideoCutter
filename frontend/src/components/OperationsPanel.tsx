@@ -67,6 +67,20 @@ function targetKey(job: Job): string {
   return `${job.target.kind}:${job.target.id}`;
 }
 
+function targetLabel(job: Job): string {
+  return job.target.kind === "task" || job.target.kind === "project"
+    ? job.target.id
+    : `${job.target.kind}:${job.target.id}`;
+}
+
+// Системная операция — подготовка задачи, а не работа с её содержимым:
+// пока она идёт, задача ещё не открывается, а после успеха карточка
+// скрыта. Ссылка вела бы в заблокированную задачу или исчезала бы
+// вместе с карточкой, поэтому у system.* перехода в задачу нет.
+function targetIsNavigable(job: Job): boolean {
+  return job.lane !== "system";
+}
+
 function mergeJobs(...groups: Job[][]): Job[] {
   const seen = new Set<string>();
   const merged: Job[] = [];
@@ -100,7 +114,7 @@ function hasResultFile(job: Job): boolean {
 // Экран — не журнал всех записей: активная работа и ошибки видны всегда,
 // а из завершённых остаётся только последняя операция по каждой задаче.
 // Успешные system.* не показываются вовсе: они уже отражены в состоянии
-// задачи, а список нужен, чтобы открыть задачу или забрать результат.
+// задачи, а список нужен, чтобы забрать результат или вернуться к работе.
 export function visibleJobs(
   jobs: Job[],
   now = Date.now(),
@@ -281,12 +295,13 @@ export const OperationsPanel = forwardRef<
             const waiting = job.status === "queued"
               ? (job.prerequisites ?? []).filter((dep) => dep.status !== "done")
               : [];
+            const navigable = targetIsNavigable(job);
             return (
               <li key={job.id} className={`operation-card status-${job.display_status}`}>
                 <div className="operation-main">
                   <div className="operation-title">
                     <span className="operation-type">{label(job)}</span>
-                    {job.target.kind === "task" && onOpenTask ? (
+                    {job.target.kind === "task" && onOpenTask && navigable ? (
                       <button
                         className="operation-target"
                         onClick={() => onOpenTask(job.target.id)}
@@ -294,7 +309,7 @@ export const OperationsPanel = forwardRef<
                       >
                         {job.target.id}
                       </button>
-                    ) : job.target.kind === "project" && onOpenProject ? (
+                    ) : job.target.kind === "project" && onOpenProject && navigable ? (
                       <button
                         className="operation-target"
                         onClick={() => onOpenProject(job.target.id)}
@@ -303,9 +318,7 @@ export const OperationsPanel = forwardRef<
                         {job.target.id}
                       </button>
                     ) : (
-                      <span className="operation-target">
-                        {job.target.kind}:{job.target.id}
-                      </span>
+                      <span className="operation-target">{targetLabel(job)}</span>
                     )}
                     <span
                       className={`operation-status status-${job.display_status}`}
@@ -411,7 +424,7 @@ export const OperationsPanel = forwardRef<
                       Скачать
                     </a>
                   )}
-                  {job.target.kind === "task" && onOpenTask && (
+                  {job.target.kind === "task" && onOpenTask && navigable && (
                     <button
                       className="btn"
                       onClick={() => onOpenTask(job.target.id)}
