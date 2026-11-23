@@ -301,6 +301,30 @@ select option {
   background: var(--btn-hover);
 }
 
+.sync-btn:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+/* Пока идёт перечитка, стрелка вращается: нажатие видно сразу, а не
+ * только когда придёт ответ. */
+.sync-btn.syncing span {
+  display: inline-block;
+  animation: sync-spin 0.8s linear infinite;
+}
+
+@keyframes sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sync-btn.syncing span {
+    animation: none;
+  }
+}
+
 /* Отчёт о синхронизации: короткая заметка в углу, живёт 8 секунд. */
 .sync-toast {
   position: fixed;
@@ -475,20 +499,6 @@ select option {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.operations-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-}
-
-.operations-hint {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.9em;
 }
 
 .operations-empty {
@@ -2866,6 +2876,8 @@ kbd {
 
   .tab {
     flex: 1 1 0;
+    padding: 6px 8px;
+    font-size: 0.9em;
   }
 
   .project-create .btn {

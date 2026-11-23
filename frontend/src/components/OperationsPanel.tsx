@@ -1,7 +1,14 @@
 // Экран фоновых операций: очередь, прогресс, отмена, повтор и результат.
 // Опрос адаптивный (2 с при активных, 15 с в покое, пауза во фоне), чтобы
 // не грузить сервер на длинных задачах.
-import { useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import {
   cancelJob,
   getJobTypes,
@@ -14,6 +21,7 @@ import { pluralCount } from "../model/plural";
 import type { Job, JobTypeManifest } from "../types";
 
 const ACTIVE = new Set(["queued", "running"]);
+const NEEDS_ATTENTION = new Set(["error", "interrupted"]);
 
 const STATUS_LABEL: Record<string, string> = {
   queued: "В очереди",
@@ -55,18 +63,74 @@ function exportFiles(job: Job): Array<{ name: string; url: string }> {
   return names.map((name, index) => ({ name, url: urls[index] ?? "" }));
 }
 
-export function OperationsPanel({
-  onOpenTask,
-  onOpenProject,
-}: {
+function targetKey(job: Job): string {
+  return `${job.target.kind}:${job.target.id}`;
+}
+
+function mergeJobs(...groups: Job[][]): Job[] {
+  const seen = new Set<string>();
+  const merged: Job[] = [];
+  for (const group of groups) {
+    for (const job of group) {
+      if (seen.has(job.id)) continue;
+      seen.add(job.id);
+      merged.push(job);
+    }
+  }
+  return merged;
+}
+
+function resultExpired(job: Job, now: number): boolean {
+  const raw = job.retention?.expires_at;
+  if (!raw) return false;
+  const time = Date.parse(raw);
+  return Number.isFinite(time) && time <= now;
+}
+
+// Экран — не журнал всех записей: активная работа и ошибки видны всегда,
+// а из завершённых остаётся только последняя операция по каждой задаче.
+// Успешные system.* не показываются вовсе: они уже отражены в состоянии
+// задачи, а список нужен, чтобы открыть задачу или забрать результат.
+export function visibleJobs(jobs: Job[], now = Date.now()): Job[] {
+  const active: Job[] = [];
+  const latestTerminal = new Map<string, Job>();
+  for (const job of jobs) {
+    if (ACTIVE.has(job.status)) {
+      active.push(job);
+      continue;
+    }
+    if (job.status === "done" && job.lane === "system") continue;
+    const key = targetKey(job);
+    if (!latestTerminal.has(key)) latestTerminal.set(key, job);
+  }
+  const terminal = [...latestTerminal.values()].filter((job) => {
+    if (NEEDS_ATTENTION.has(job.status)) return true;
+    if (job.status !== "done") return false;
+    if ((job.result?.files?.length ?? 0) === 0) return false;
+    return !resultExpired(job, now);
+  });
+  const visible = new Set([...active, ...terminal].map((job) => job.id));
+  return jobs.filter((job) => visible.has(job.id));
+}
+
+export interface OperationsPanelHandle {
+  /** Перечитать список по запросу общей кнопки синхронизации. */
+  refresh: () => Promise<void>;
+}
+
+interface OperationsPanelProps {
   onOpenTask?: (id: string) => void;
   onOpenProject?: (id: string) => void;
-}) {
+}
+
+export const OperationsPanel = forwardRef<
+  OperationsPanelHandle,
+  OperationsPanelProps
+>(function OperationsPanel({ onOpenTask, onOpenProject }, ref) {
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [types, setTypes] = useState<Record<string, JobTypeManifest>>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
   const activeRef = useRef(false);
 
   useEffect(() => {
@@ -84,6 +148,30 @@ export function OperationsPanel({
     };
   }, []);
 
+  const fetchJobs = useCallback(async (): Promise<Job[]> => {
+    const [activePage, recentPage] = await Promise.all([
+      listJobs({ active: true, limit: 100 }),
+      listJobs({ limit: 100 }),
+    ]);
+    return visibleJobs(mergeJobs(activePage.jobs, recentPage.jobs));
+  }, []);
+
+  const applyJobs = useCallback((next: Job[]) => {
+    activeRef.current = next.some((job) => ACTIVE.has(job.status));
+    setJobs(next);
+    setError("");
+  }, []);
+
+  const refreshJobs = useCallback(async () => {
+    applyJobs(await fetchJobs());
+  }, [applyJobs, fetchJobs]);
+
+  useImperativeHandle(
+    ref,
+    () => ({ refresh: refreshJobs }),
+    [refreshJobs],
+  );
+
   useEffect(() => {
     let alive = true;
     let timer: number | null = null;
@@ -98,11 +186,9 @@ export function OperationsPanel({
 
     const tick = async () => {
       try {
-        const page = await listJobs({ limit: 100 });
+        const next = await fetchJobs();
         if (!alive) return;
-        activeRef.current = page.jobs.some((job) => ACTIVE.has(job.status));
-        setJobs(page.jobs);
-        setError("");
+        applyJobs(next);
       } catch (e) {
         if (!alive) return;
         activeRef.current = false;
@@ -124,13 +210,13 @@ export function OperationsPanel({
       if (timer !== null) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [reloadKey]);
+  }, [applyJobs, fetchJobs]);
 
   const runAction = async (id: string, action: () => Promise<unknown>) => {
     setBusy(id);
     try {
       await action();
-      setReloadKey((key) => key + 1);
+      await refreshJobs();
     } catch (e) {
       setError(`Не удалось выполнить действие: ${failureReason(e)}`);
     } finally {
@@ -145,19 +231,6 @@ export function OperationsPanel({
 
   return (
     <div className="operations-panel">
-      <div className="operations-head">
-        <p className="operations-hint">
-          Тяжёлые операции выполняются в фоне и переживают перезапуск сервиса.
-        </p>
-        <button
-          className="btn"
-          onClick={() => setReloadKey((key) => key + 1)}
-          title="Обновить список операций"
-        >
-          Обновить
-        </button>
-      </div>
-
       {error && (
         <div className="pair-edit-error" role="alert">
           {error}
@@ -333,4 +406,4 @@ export function OperationsPanel({
       )}
     </div>
   );
-}
+});

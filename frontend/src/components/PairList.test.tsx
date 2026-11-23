@@ -12,7 +12,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listProjects } from "../api";
+import { getJobsSummary, listJobs, listProjects } from "../api";
 import { PairList } from "./PairList";
 import { RoleField } from "./RoleFields";
 import type { VideoPair } from "../types";
@@ -21,7 +21,21 @@ import type { VideoPair } from "../types";
 // заглушкой, остальные вызовы API остаются настоящими.
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, listProjects: vi.fn(async () => []) };
+  return {
+    ...actual,
+    listProjects: vi.fn(async () => []),
+    listJobs: vi.fn(async () => ({ jobs: [], next: null })),
+    getJobsSummary: vi.fn(async () => ({
+      queued: 0,
+      running: 0,
+      done: 0,
+      error: 0,
+      cancelled: 0,
+      interrupted: 0,
+      active: 0,
+    })),
+    getJobTypes: vi.fn(async () => ({ types: [] })),
+  };
 });
 
 function makePair(overrides: Partial<VideoPair> = {}): VideoPair {
@@ -145,6 +159,18 @@ beforeEach(() => {
   // Тесты делят один jsdom: вкладка/фильтры, записанные предыдущим
   // сценарием, иначе утекают в следующий и прячут строки задач.
   window.localStorage.clear();
+  vi.mocked(listJobs).mockReset();
+  vi.mocked(listJobs).mockResolvedValue({ jobs: [], next: null });
+  vi.mocked(getJobsSummary).mockReset();
+  vi.mocked(getJobsSummary).mockResolvedValue({
+    queued: 0,
+    running: 0,
+    done: 0,
+    error: 0,
+    cancelled: 0,
+    interrupted: 0,
+    active: 0,
+  });
 });
 
 describe("сломанная задача в списке", () => {
@@ -515,6 +541,62 @@ describe("синхронизация с диском", () => {
     expect(onReload).toHaveBeenCalled();
     expect(host.textContent).not.toContain("Расхождений не найдено");
     expect(host.textContent).not.toContain("пропали нарезки");
+    unmount();
+  });
+});
+
+describe("синхронизация на вкладке операций", () => {
+  it("общая кнопка обновляет список и держит нажатой до ответа", async () => {
+    window.localStorage.setItem("vc-tab", "operations");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    vi.mocked(listJobs).mockImplementation(async () => {
+      calls += 1;
+      if (calls > 2) await gate;
+      return { jobs: [], next: null };
+    });
+
+    const { host, unmount } = mountList([makePair({ broken: false })]);
+    await act(async () => {});
+
+    const button = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Обновить список операций"]',
+    )!;
+    expect(button).toBeTruthy();
+    expect(button.title).toBe("Обновить список операций");
+
+    await act(async () => {
+      button.click();
+    });
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+
+    await act(async () => {
+      release();
+    });
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-busy")).toBe("false");
+    expect(host.textContent).toContain("Список операций обновлён");
+    unmount();
+  });
+
+  it("на вкладке задач кнопка по-прежнему перечитывает диск", async () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const onReload = vi.fn(async () => [makePair()]);
+    const { host, unmount } = mountList([makePair()], onReload);
+    const button = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Синхронизировать с диском"]',
+    )!;
+
+    await act(async () => {
+      button.click();
+    });
+
+    expect(onReload).toHaveBeenCalled();
+    expect(listJobs).not.toHaveBeenCalled();
     unmount();
   });
 });

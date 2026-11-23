@@ -1,7 +1,8 @@
 // Экран «Фоновые операции»: карточка показывает тип, цель, прогресс,
 // статус и действия; действия — отмена, повтор и скачивание результата.
 // Запуск: npm test (vitest run).
-import { act } from "react";
+import { act, createRef } from "react";
+import type { Ref } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -10,7 +11,9 @@ import {
   listJobs,
   retryJob,
 } from "../api";
+import type { JobQuery } from "../api";
 import { OperationsPanel } from "./OperationsPanel";
+import type { OperationsPanelHandle } from "./OperationsPanel";
 import type { Job, JobTypeManifest } from "../types";
 
 vi.mock("../api", async (importOriginal) => {
@@ -47,6 +50,17 @@ const TYPES: JobTypeManifest[] = [
     params_schema: {},
     has_prerequisites: false,
   },
+  {
+    key: "system.validate",
+    lane: "system",
+    label: "Проверка видео",
+    result_kind: "object",
+    cancellable: true,
+    resumable: true,
+    retention_days: null,
+    params_schema: {},
+    has_prerequisites: true,
+  },
 ];
 
 function makeJob(overrides: Partial<Job> = {}): Job {
@@ -76,14 +90,22 @@ function makeJob(overrides: Partial<Job> = {}): Job {
 
 const mounted: Array<() => void> = [];
 
+type JobsLoader = (query: JobQuery) => Job[];
+
 async function mount(
-  jobs: Job[],
+  jobs: Job[] | JobsLoader,
   callbacks: {
     onOpenTask?: (id: string) => void;
     onOpenProject?: (id: string) => void;
   } = {},
+  ref?: Ref<OperationsPanelHandle>,
 ) {
-  vi.mocked(listJobs).mockResolvedValue({ jobs, next: null });
+  vi.mocked(listJobs).mockImplementation((query = {}) =>
+    Promise.resolve({
+      jobs: typeof jobs === "function" ? jobs(query) : jobs,
+      next: null,
+    }),
+  );
   vi.mocked(getJobTypes).mockResolvedValue({ types: TYPES });
   vi.mocked(cancelJob).mockResolvedValue(makeJob());
   vi.mocked(retryJob).mockResolvedValue(makeJob({ status: "queued" }));
@@ -92,7 +114,7 @@ async function mount(
   document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(<OperationsPanel {...callbacks} />);
+    root.render(<OperationsPanel ref={ref} {...callbacks} />);
   });
   const unmount = () => {
     const i = mounted.indexOf(unmount);
@@ -119,6 +141,171 @@ describe("экран фоновых операций", () => {
   it("пустая очередь объясняет, что здесь появится", async () => {
     const { host } = await mount([]);
     expect(host.textContent).toContain("Фоновых операций нет");
+  });
+
+  it("не выводит на экран пояснение о фоновом выполнении", async () => {
+    const { host } = await mount([]);
+    expect(host.textContent).not.toContain("Тяжёлые операции");
+    expect(host.textContent).not.toContain("переживают перезапуск");
+  });
+
+  it("не занимает отдельную строку кнопкой обновления", async () => {
+    const { host } = await mount([]);
+    expect(host.querySelector(".operations-head")).toBeNull();
+    expect(host.textContent).not.toContain("Обновить");
+  });
+
+  it("обновление по общей кнопке перечитывает список", async () => {
+    const ref = createRef<OperationsPanelHandle>();
+    const { host } = await mount(
+      [
+        makeJob({
+          id: "first",
+          status: "done",
+          display_status: "done",
+          result: { files: ["first.mp4"], urls: ["/first"] },
+        }),
+      ],
+      {},
+      ref,
+    );
+    expect(host.textContent).toContain("first.mp4");
+
+    vi.mocked(listJobs).mockResolvedValue({
+      jobs: [
+        makeJob({
+          id: "second",
+          status: "done",
+          display_status: "done",
+          result: { files: ["second.mp4"], urls: ["/second"] },
+        }),
+      ],
+      next: null,
+    });
+    await act(async () => {
+      await ref.current!.refresh();
+    });
+
+    expect(host.textContent).toContain("second.mp4");
+    expect(host.textContent).not.toContain("first.mp4");
+  });
+
+  it("не показывает завершённую проверку видео", async () => {
+    const { host } = await mount([
+      makeJob({
+        id: "validate-1",
+        type: "system.validate",
+        lane: "system",
+        status: "done",
+        display_status: "done",
+        progress: { current: 1, total: 1, unit: "задача", message: "" },
+      }),
+      makeJob({
+        id: "export-1",
+        status: "done",
+        display_status: "done",
+        result: { files: ["fragment_1.mp4"], urls: ["/export-1"] },
+      }),
+    ]);
+
+    const cards = host.querySelectorAll(".operation-card");
+    expect(cards).toHaveLength(1);
+    expect(cards[0].textContent).toContain("Экспорт фрагментов");
+    expect(host.textContent).not.toContain("Проверка видео");
+  });
+
+  it("ошибка проверки видео остаётся с повтором", async () => {
+    const { host } = await mount([
+      makeJob({
+        type: "system.validate",
+        lane: "system",
+        status: "error",
+        display_status: "error",
+        error: { code: "bad_video", message: "Не удалось прочитать видео" },
+      }),
+    ]);
+
+    const card = host.querySelector(".operation-card")!;
+    expect(card.textContent).toContain("Проверка видео");
+    expect(card.textContent).toContain("Не удалось прочитать видео");
+    expect(
+      Array.from(card.querySelectorAll("button")).some(
+        (button) => button.textContent === "Повторить",
+      ),
+    ).toBe(true);
+  });
+
+  it("из завершённых операций задачи оставляет последнюю", async () => {
+    const { host } = await mount([
+      makeJob({
+        id: "new",
+        status: "done",
+        display_status: "done",
+        created_at: "2026-11-22T12:00:00Z",
+        result: { files: ["new.mp4"], urls: ["/new"] },
+      }),
+      makeJob({
+        id: "old",
+        status: "done",
+        display_status: "done",
+        created_at: "2026-11-22T11:00:00Z",
+        result: { files: ["old.mp4"], urls: ["/old"] },
+      }),
+    ]);
+
+    const cards = host.querySelectorAll(".operation-card");
+    expect(cards).toHaveLength(1);
+    expect(cards[0].textContent).toContain("new.mp4");
+    expect(cards[0].textContent).not.toContain("old.mp4");
+  });
+
+  it("не показывает завершённую операцию без файла", async () => {
+    const { host } = await mount([
+      makeJob({
+        type: "backup.import",
+        lane: "import",
+        status: "done",
+        display_status: "done",
+        result: null,
+      }),
+    ]);
+
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(0);
+  });
+
+  it("не показывает готовый результат с истёкшим сроком", async () => {
+    const { host } = await mount([
+      makeJob({
+        type: "task.backup",
+        status: "done",
+        display_status: "done",
+        result: { files: ["old.zip"], urls: ["/old.zip"] },
+        retention: {
+          expires_at: "2000-01-01T00:00:00+00:00",
+          keep: false,
+        },
+      }),
+    ]);
+
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(0);
+  });
+
+  it("активная операция видна, даже если не попала в последнюю сотню", async () => {
+    const active = makeJob({ id: "active-1", status: "running" });
+    const old = makeJob({
+      id: "done-1",
+      status: "done",
+      display_status: "done",
+      result: { files: ["old.mp4"], urls: ["/old"] },
+    });
+
+    const { host } = await mount((query) =>
+      query.active ? [active] : [old],
+    );
+
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(2);
+    expect(host.textContent).toContain("Выполняется");
+    expect(host.textContent).toContain("old.mp4");
   });
 
   it("карточка показывает тип, цель, владельца и прогресс", async () => {

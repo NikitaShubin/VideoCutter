@@ -37,6 +37,7 @@ import {
 import { defectHint, isRoleBroken, projectDefects } from "../model/defects";
 import { failureReason } from "../model/errors";
 import { OperationsPanel } from "./OperationsPanel";
+import type { OperationsPanelHandle } from "./OperationsPanel";
 import { JobAction, JobFileAction } from "./JobActions";
 import { formatPercent } from "../model/format";
 import { pluralCount } from "../model/plural";
@@ -357,6 +358,9 @@ export function PairList({
   // сервису: «посмотри на диск ещё раз» — и показывает, что изменилось.
   const [syncNote, setSyncNote] = useState<string | null>(null);
   const syncNoteTimerRef = useRef<number | null>(null);
+  const operationsRef = useRef<OperationsPanelHandle>(null);
+  const [syncing, setSyncing] = useState(false);
+  const syncingRef = useRef(false);
 
   const showSyncNote = useCallback((text: string) => {
     setSyncNote(text);
@@ -379,11 +383,27 @@ export function PairList({
   );
 
   const syncNow = useCallback(async () => {
-    const before: SyncSnapshot = {
-      pairs: pairs ?? [],
-      projects: projects ?? [],
-    };
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    setSyncing(true);
     try {
+      // На вкладке операций общая кнопка обновляет не диск, а очередь:
+      // отдельная кнопка внутри списка дублировала бы её и занимала строку.
+      if (tab === "operations") {
+        await operationsRef.current?.refresh();
+        try {
+          const summary = await getJobsSummary();
+          setActiveJobs(summary.active);
+        } catch {
+          /* бейдж не критичен: список уже обновлён */
+        }
+        showSyncNote("Список операций обновлён");
+        return;
+      }
+      const before: SyncSnapshot = {
+        pairs: pairs ?? [],
+        projects: projects ?? [],
+      };
       const nextPairs = await onReload();
       const nextProjects = await loadProjects();
       const changes = diffSync(before, {
@@ -399,9 +419,16 @@ export function PairList({
             (changes.length > 3 ? `; и ещё ${changes.length - 3}` : ""),
       );
     } catch (e) {
-      showSyncNote(`Не удалось перечитать состояние: ${failureReason(e)}`);
+      showSyncNote(
+        tab === "operations"
+          ? `Не удалось обновить операции: ${failureReason(e)}`
+          : `Не удалось перечитать состояние: ${failureReason(e)}`,
+      );
+    } finally {
+      syncingRef.current = false;
+      setSyncing(false);
     }
-  }, [pairs, projects, onReload, loadProjects, showSyncNote]);
+  }, [tab, pairs, projects, onReload, loadProjects, showSyncNote]);
 
   // Возврат к вкладке — тихая перечитка: пользователь ничего не просил,
   // значит и сообщать не о чем. Двойной сигнал (focus + visibilitychange)
@@ -1091,12 +1118,22 @@ export function PairList({
             </button>
           </div>
           <button
-            className="sync-btn"
+            className={syncing ? "sync-btn syncing" : "sync-btn"}
             onClick={() => {
               void syncNow();
             }}
-            title="Перечитать состояние с диска: задачи, проекты, нарезки"
-            aria-label="Синхронизировать с диском"
+            disabled={syncing}
+            aria-busy={syncing}
+            title={
+              tab === "operations"
+                ? "Обновить список операций"
+                : "Перечитать состояние с диска: задачи, проекты, нарезки"
+            }
+            aria-label={
+              tab === "operations"
+                ? "Обновить список операций"
+                : "Синхронизировать с диском"
+            }
           >
             <span aria-hidden="true">⟳</span>
           </button>
@@ -1344,6 +1381,7 @@ export function PairList({
           aria-labelledby="tab-operations"
         >
           <OperationsPanel
+            ref={operationsRef}
             onOpenTask={onSelect}
             onOpenProject={onProjectOpen}
           />
