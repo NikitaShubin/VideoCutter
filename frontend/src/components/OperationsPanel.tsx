@@ -87,6 +87,16 @@ function resultExpired(job: Job, now: number): boolean {
   return Number.isFinite(time) && time <= now;
 }
 
+// Результат бывает двух форм: список файлов у экспорта и один файл
+// (download_name) у бэкапа. Проверять только files нельзя — готовый
+// бэкап исчезал бы из списка сразу после завершения.
+function hasResultFile(job: Job): boolean {
+  const result = job.result;
+  if (!result) return false;
+  if ((result.files?.length ?? 0) > 0) return true;
+  return Boolean(result.download_name || result.download_path);
+}
+
 // Экран — не журнал всех записей: активная работа и ошибки видны всегда,
 // а из завершённых остаётся только последняя операция по каждой задаче.
 // Успешные system.* не показываются вовсе: они уже отражены в состоянии
@@ -106,7 +116,7 @@ export function visibleJobs(jobs: Job[], now = Date.now()): Job[] {
   const terminal = [...latestTerminal.values()].filter((job) => {
     if (NEEDS_ATTENTION.has(job.status)) return true;
     if (job.status !== "done") return false;
-    if ((job.result?.files?.length ?? 0) === 0) return false;
+    if (!hasResultFile(job)) return false;
     return !resultExpired(job, now);
   });
   const visible = new Set([...active, ...terminal].map((job) => job.id));

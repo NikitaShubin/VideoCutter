@@ -273,13 +273,29 @@ describe("экран фоновых операций", () => {
     expect(host.querySelectorAll(".operation-card")).toHaveLength(0);
   });
 
+  it("завершённый бэкап с файлом остаётся в списке", async () => {
+    const { host } = await mount([
+      makeJob({
+        type: "task.backup",
+        lane: "archive",
+        status: "done",
+        display_status: "done",
+        result: { download_name: "cam-2-backup.zip" },
+      }),
+    ]);
+
+    const card = host.querySelector(".operation-card")!;
+    expect(card.textContent).toContain("Бэкап задачи");
+    expect(card.textContent).toContain("Скачать");
+  });
+
   it("не показывает готовый результат с истёкшим сроком", async () => {
     const { host } = await mount([
       makeJob({
         type: "task.backup",
         status: "done",
         display_status: "done",
-        result: { files: ["old.zip"], urls: ["/old.zip"] },
+        result: { download_name: "old.zip" },
         retention: {
           expires_at: "2000-01-01T00:00:00+00:00",
           keep: false,
