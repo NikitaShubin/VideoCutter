@@ -282,7 +282,7 @@ export function PairList({
   // Клавиатурный паттерн табов: одна вкладка в Tab-порядке, стрелки/Home/End
   // переключают и ведут фокус за собой.
   const onTabsKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    const order: Tab[] = ["tasks", "projects", "operations"];
+    const order: Tab[] = ["projects", "tasks", "operations"];
     const i = order.indexOf(tab);
     let next: Tab | null = null;
     if (e.key === "ArrowRight" || e.key === "ArrowDown") {
@@ -1074,6 +1074,19 @@ export function PairList({
             onKeyDown={onTabsKeyDown}
           >
             <button
+              ref={projectsTabRef}
+              id="tab-projects"
+              role="tab"
+              aria-selected={tab === "projects"}
+              aria-controls="projects-panel"
+              tabIndex={tab === "projects" ? 0 : -1}
+              className={tab === "projects" ? "tab active" : "tab"}
+              onClick={() => pickTab("projects")}
+            >
+              Проекты{" "}
+              <span className="tab-count">{projects !== null ? projects.length : "…"}</span>
+            </button>
+            <button
               ref={tasksTabRef}
               id="tab-tasks"
               role="tab"
@@ -1087,19 +1100,6 @@ export function PairList({
               <span className="tab-count">
                 {listed !== null ? listed.length : "…"}
               </span>
-            </button>
-            <button
-              ref={projectsTabRef}
-              id="tab-projects"
-              role="tab"
-              aria-selected={tab === "projects"}
-              aria-controls="projects-panel"
-              tabIndex={tab === "projects" ? 0 : -1}
-              className={tab === "projects" ? "tab active" : "tab"}
-              onClick={() => pickTab("projects")}
-            >
-              Проекты{" "}
-              <span className="tab-count">{projects !== null ? projects.length : "…"}</span>
             </button>
             <button
               ref={operationsTabRef}

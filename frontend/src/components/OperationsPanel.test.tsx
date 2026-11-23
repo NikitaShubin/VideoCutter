@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cancelJob,
+  deleteJob,
   getJobTypes,
   listJobs,
   retryJob,
@@ -23,6 +24,7 @@ vi.mock("../api", async (importOriginal) => {
     listJobs: vi.fn(),
     cancelJob: vi.fn(),
     retryJob: vi.fn(),
+    deleteJob: vi.fn(),
     getJobTypes: vi.fn(),
   };
 });
@@ -109,6 +111,7 @@ async function mount(
   vi.mocked(getJobTypes).mockResolvedValue({ types: TYPES });
   vi.mocked(cancelJob).mockResolvedValue(makeJob());
   vi.mocked(retryJob).mockResolvedValue(makeJob({ status: "queued" }));
+  vi.mocked(deleteJob).mockResolvedValue({ deleted: "job-1" });
 
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -131,6 +134,7 @@ beforeEach(() => {
   vi.mocked(getJobTypes).mockReset();
   vi.mocked(cancelJob).mockReset();
   vi.mocked(retryJob).mockReset();
+  vi.mocked(deleteJob).mockReset();
 });
 
 afterEach(() => {
@@ -519,16 +523,69 @@ describe("экран фоновых операций", () => {
     ).toBe(false);
   });
 
-  it("у обычной операции остаётся кнопка открытия задачи", async () => {
-    const opened: string[] = [];
-    const { host } = await mount([makeJob()], {
-      onOpenTask: (id) => opened.push(id),
+  it("у завершённой операции корзина вместо кнопки открытия", async () => {
+    const { host } = await mount(
+      [
+        makeJob({
+          status: "done",
+          display_status: "done",
+          result: { files: ["f.mp4"], urls: ["/f"] },
+        }),
+      ],
+      { onOpenTask: () => undefined },
+    );
+
+    const card = host.querySelector(".operation-card")!;
+    expect(
+      Array.from(card.querySelectorAll("button")).some(
+        (button) => button.textContent === "Открыть задачу",
+      ),
+    ).toBe(false);
+    expect(card.querySelector(".operation-delete")).not.toBeNull();
+  });
+
+  it("корзина удаляет операцию после подтверждения", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { host } = await mount([
+      makeJob({
+        status: "done",
+        display_status: "done",
+        result: { files: ["f.mp4"], urls: ["/f"] },
+      }),
+    ]);
+
+    const trash = host.querySelector<HTMLButtonElement>(".operation-delete")!;
+    expect(trash.getAttribute("aria-label"))
+      .toBe("Удалить операцию: Экспорт фрагментов cam-1");
+    await act(async () => {
+      trash.click();
     });
 
-    const open = Array.from(
-      host.querySelectorAll<HTMLButtonElement>(".operation-actions button"),
-    ).find((button) => button.textContent === "Открыть задачу")!;
-    act(() => open.click());
-    expect(opened).toEqual(["cam-1"]);
+    expect(deleteJob).toHaveBeenCalledWith("job-1");
+    confirm.mockRestore();
+  });
+
+  it("отмена подтверждения не удаляет операцию", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { host } = await mount([
+      makeJob({
+        status: "done",
+        display_status: "done",
+        result: { files: ["f.mp4"], urls: ["/f"] },
+      }),
+    ]);
+
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>(".operation-delete")!.click();
+    });
+
+    expect(deleteJob).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("у активной операции нет корзины", async () => {
+    const { host } = await mount([makeJob()]);
+
+    expect(host.querySelector(".operation-delete")).toBeNull();
   });
 });

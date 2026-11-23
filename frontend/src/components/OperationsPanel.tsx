@@ -11,6 +11,7 @@ import {
 } from "react";
 import {
   cancelJob,
+  deleteJob,
   getJobTypes,
   listJobs,
   retryJob,
@@ -258,6 +259,20 @@ export const OperationsPanel = forwardRef<
     types[job.type]?.label ?? job.type;
   const resultKind = (job: Job): string =>
     types[job.type]?.result_kind ?? "none";
+
+  const remove = (job: Job) => {
+    const kind = resultKind(job);
+    const consequence =
+      kind === "file"
+        ? "Запись операции и готовый архив будут удалены."
+        : kind === "files"
+          ? "Запись операции будет удалена; экспортированные фрагменты останутся."
+          : "Запись операции будет удалена. Результат этой операции не хранится.";
+    const ok = window.confirm(`Удалить операцию из истории?\n${consequence}`);
+    if (!ok) return;
+    void runAction(job.id, () => deleteJob(job.id));
+  };
+
   const shown = jobs === null
     ? null
     : visibleJobs(jobs, Date.now(), showAll);
@@ -424,12 +439,15 @@ export const OperationsPanel = forwardRef<
                       Скачать
                     </a>
                   )}
-                  {job.target.kind === "task" && onOpenTask && navigable && (
+                  {!active && (
                     <button
-                      className="btn"
-                      onClick={() => onOpenTask(job.target.id)}
+                      className="btn operation-delete"
+                      disabled={busy === job.id}
+                      onClick={() => remove(job)}
+                      title="Удалить операцию"
+                      aria-label={`Удалить операцию: ${label(job)} ${job.target.id}`}
                     >
-                      Открыть задачу
+                      <span aria-hidden="true">🗑</span>
                     </button>
                   )}
                 </div>

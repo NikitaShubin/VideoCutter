@@ -591,6 +591,37 @@ class Scheduler:
             ))
             return retried
 
+    def delete(self, job_id: str) -> Job:
+        """Удаляет терминальную запись вручную (историю операции).
+
+        Кэш результата — забота обвязки: планировщик не знает, где лежит
+        файл. Активную операцию сначала отменяют: иначе исполнитель
+        продолжит писать в уже удалённую запись. Терминальную предпосылку
+        активной операции тоже не трогаем — зависимый останется без
+        причины ожидания.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            if job.active:
+                raise JobConflict("операция ещё выполняется")
+            if job_id in self._referenced_locked():
+                raise JobConflict(
+                    "операция нужна активной операции; сначала отмените её")
+            self.store.delete(job_id)
+            self._jobs.pop(job_id, None)
+            self._order_by_id.pop(job_id, None)
+            return job
+
+    def _referenced_locked(self) -> set:
+        """Id терминальных предпосылок, которые ещё ждёт активная работа."""
+        return {
+            dep_id
+            for job in self._jobs.values() if job.active
+            for dep_id in job.depends_on
+        }
+
     def set_retention(self, job_id: str, expires_at: str) -> Job:
         """Продлевает срок результата (скачивание архива)."""
         with self._lock:
@@ -682,11 +713,7 @@ class Scheduler:
         self._last_prune = time.monotonic()
         # Терминальная предпосылка ещё нужна активному зависимому:
         # удалить её — значит оставить зависимого без причины ожидания.
-        referenced = {
-            dep_id
-            for job in self._jobs.values() if job.active
-            for dep_id in job.depends_on
-        }
+        referenced = self._referenced_locked()
         removed = 0
         for job in list(self._jobs.values()):
             if not job.terminal:

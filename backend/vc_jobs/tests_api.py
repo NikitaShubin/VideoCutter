@@ -20,6 +20,7 @@ from django.test import SimpleTestCase
 import vc_jobs
 import workspace
 from vc_jobs.activity import ActivityLog
+from vc_jobs.archive_cache import ArchiveCache
 from vc_jobs.registry import JobRegistry, JobType
 from vc_jobs.scheduler import JobSpec, Scheduler
 from vc_jobs.store import JobStore
@@ -466,6 +467,127 @@ class DownloadTests(JobsApiTestBase):
         self.assertEqual(self.download("nope").status_code, 404)
 
 
+class DeleteTests(JobsApiTestBase):
+    def _cached_archive(self):
+        cache = ArchiveCache(os.path.join(vc_jobs.state_root(), "archives"))
+        return cache.store(
+            "backup.task", "cached-key", b"zipdata", "task.zip",
+            target="task:t", ttl_days=7)
+
+    def test_delete_removes_record_and_cached_archive(self):
+        entry = self._cached_archive()
+        job = self.create(type="test.archive",
+                          target={"kind": "task", "id": "t"})
+        done = self.wait_done(job["id"])
+        done.result["cache"] = {
+            "namespace": entry.namespace, "key": entry.key}
+        done.result["download_path"] = entry.archive_path
+        done.result["download_name"] = entry.download_name
+        self.store.save(done)
+
+        response = self.client.delete(f"{JOBS}/{job['id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["deleted"], job["id"])
+        self.assertIsNone(self.store.get(job["id"]))
+        self.assertIsNone(self.scheduler.get(job["id"]))
+        self.assertFalse(os.path.exists(entry.archive_path))
+        self.assertFalse(os.path.exists(entry.metadata_path))
+
+    def test_delete_keeps_archive_shared_with_other_record(self):
+        entry = self._cached_archive()
+        first = self.create(type="test.archive",
+                            target={"kind": "task", "id": "a"})
+        second = self.create(type="test.archive",
+                             target={"kind": "task", "id": "b"})
+        for job in (first, second):
+            done = self.wait_done(job["id"])
+            done.result["cache"] = {
+                "namespace": entry.namespace, "key": entry.key}
+            done.result["download_path"] = entry.archive_path
+            done.result["download_name"] = entry.download_name
+            self.store.save(done)
+
+        self.assertEqual(
+            self.client.delete(f"{JOBS}/{first['id']}").status_code, 200)
+        self.assertTrue(os.path.exists(entry.archive_path))
+
+        self.assertEqual(
+            self.client.delete(f"{JOBS}/{second['id']}").status_code, 200)
+        self.assertFalse(os.path.exists(entry.archive_path))
+
+    def test_delete_removes_legacy_archive_path_inside_cache(self):
+        archives = os.path.join(vc_jobs.state_root(), "archives")
+        os.makedirs(archives)
+        path = os.path.join(archives, "legacy.zip")
+        with open(path, "wb") as fh:
+            fh.write(b"zipdata")
+        job = self.create(type="test.archive",
+                          target={"kind": "task", "id": "t"})
+        done = self.wait_done(job["id"])
+        done.result["download_path"] = path
+        done.result.pop("cache", None)
+        self.store.save(done)
+
+        response = self.client.delete(f"{JOBS}/{job['id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(os.path.exists(path))
+
+    def test_delete_keeps_result_outside_archive_cache(self):
+        job = self.create(type="test.archive",
+                          target={"kind": "task", "id": "t"})
+        done = self.wait_done(job["id"])
+        path = done.result["download_path"]
+        self.assertTrue(os.path.isfile(path))
+
+        response = self.client.delete(f"{JOBS}/{job['id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(os.path.isfile(path))
+
+    def test_delete_active_is_409(self):
+        job = self.create(type="test.slow",
+                          target={"kind": "task", "id": "s"})
+        self.assertTrue(wait_until(
+            lambda: self.scheduler.get(job["id"]).status == "running"))
+
+        response = self.client.delete(f"{JOBS}/{job['id']}")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIsNotNone(self.scheduler.get(job["id"]))
+        self.release.set()
+
+    def test_delete_prerequisite_of_active_job_is_409(self):
+        parent = self.create(target={"kind": "task", "id": "parent"})
+        self.wait_done(parent["id"])
+        child = self.create(type="test.slow",
+                            target={"kind": "task", "id": "child"},
+                            depends_on=[parent["id"]])
+        self.assertTrue(wait_until(
+            lambda: self.scheduler.get(child["id"]).status == "running"))
+
+        response = self.client.delete(f"{JOBS}/{parent['id']}")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIsNotNone(self.scheduler.get(parent["id"]))
+        self.release.set()
+
+    def test_delete_unknown_is_404(self):
+        self.assertEqual(
+            self.client.delete(f"{JOBS}/nope").status_code, 404)
+
+    def test_delete_race_after_visibility_is_404(self):
+        job = self.create()
+        self.wait_done(job["id"])
+
+        with mock.patch.object(self.scheduler, "delete",
+                               side_effect=KeyError(job["id"])):
+            response = self.client.delete(f"{JOBS}/{job['id']}")
+
+        self.assertEqual(response.status_code, 404)
+
+
 class OwnerTests(JobsApiTestBase):
     def test_headers_ignored_without_trusted_proxy(self):
         job = self.create(headers={"HTTP_X_VC_USER": "alice"})
@@ -524,6 +646,17 @@ class OwnerTests(JobsApiTestBase):
 
         self.assertEqual(response.status_code, 404)
         self.release.set()
+
+    def test_cannot_delete_foreign_job(self):
+        os.environ["VC_TRUST_PROXY"] = "1"
+        job = self.create(headers={"HTTP_X_VC_USER": "alice"})
+        self.wait_done(job["id"])
+
+        response = self.client.delete(
+            f"{JOBS}/{job['id']}", HTTP_X_VC_USER="bob")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIsNotNone(self.scheduler.get(job["id"]))
 
 
 class UploadOwnershipTests(JobsApiTestBase):

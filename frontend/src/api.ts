@@ -545,6 +545,12 @@ export function retryJob(id: string): Promise<Job> {
   }).then((r) => json<{ job: Job }>(r).then((body) => body.job));
 }
 
+export function deleteJob(id: string): Promise<{ deleted: string }> {
+  return apiFetch(`${BASE}/jobs/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  }).then((r) => json<{ deleted: string }>(r));
+}
+
 export function getJobsSummary(): Promise<JobsSummary> {
   return apiFetch(`${BASE}/jobs/summary`).then((r) => json<JobsSummary>(r));
 }

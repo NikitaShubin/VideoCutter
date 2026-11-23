@@ -717,6 +717,22 @@ select option {
   padding: 6px 12px;
 }
 
+.operation-actions .operation-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  font-size: 1em;
+  line-height: 1;
+}
+
+.operation-actions .operation-delete:hover {
+  background: var(--red-deep);
+  border-color: #8a3a3a;
+}
+
 /* Форма загрузки: секции ролей + имя + итог, всё тянется по ширине. */
 .upload label {
   display: block;

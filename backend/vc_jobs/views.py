@@ -193,12 +193,70 @@ def jobs_collection(request):
                          "deduplicated": deduplicated}, status=202)
 
 
-@require_http_methods(["GET"])
+def _result_shared(job, scheduler) -> bool:
+    """На тот же файл кэша ссылается другая операция?
+
+    Один архив переиспользуется разными запусками одной версии. Удалять
+    файл вместе с первой записью нельзя: вторая перестанет скачиваться.
+    """
+    result = job.result or {}
+    cache = result.get("cache")
+    path = result.get("download_path")
+    for other in scheduler.all():
+        other_result = other.result or {}
+        if cache and other_result.get("cache") == cache:
+            return True
+        if path and other_result.get("download_path") == path:
+            return True
+    return False
+
+
+def _remove_result_file(job) -> None:
+    """Стирает файл результата, если он лежит в кэше архивов.
+
+    Нарезки фрагментов — конечный продукт задачи, они остаются. Кэш
+    бэкапов и разметки — производные данные, его можно удалить вручную.
+    """
+    result = job.result or {}
+    cache_info = result.get("cache")
+    archives = os.path.join(vc_jobs.state_root(), "archives")
+    if isinstance(cache_info, dict):
+        from .archive_cache import ArchiveCache
+
+        ArchiveCache(archives).remove(
+            str(cache_info.get("namespace") or ""),
+            str(cache_info.get("key") or ""),
+        )
+        return
+    path = result.get("download_path")
+    if not isinstance(path, str) or not path:
+        return
+    root = os.path.realpath(archives)
+    real = os.path.realpath(path)
+    if not real.startswith(root + os.sep):
+        return
+    try:
+        os.remove(real)
+    except OSError:
+        pass
+
+
+@require_http_methods(["GET", "DELETE"])
 def job_detail(request, job_id: str):
     scheduler = vc_jobs.get_scheduler()
     job = _job_or_404(scheduler, job_id, _owner(request))
     if job is None:
         return _error("операция не найдена", 404)
+    if request.method == "DELETE":
+        try:
+            removed = scheduler.delete(job_id)
+        except KeyError:
+            return _error("операция не найдена", 404)
+        except JobConflict as exc:
+            return _error(str(exc), 409)
+        if not _result_shared(removed, scheduler):
+            _remove_result_file(removed)
+        return JsonResponse({"deleted": removed.id})
     return JsonResponse({"job": _serialize(job, scheduler)})
 
 

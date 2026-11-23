@@ -609,6 +609,17 @@ describe("семантика страницы", () => {
     expect(html).toContain("VideoCutter");
   });
 
+  it("вкладки идут в порядке CVAT: проекты, задачи, операции", () => {
+    window.localStorage.setItem("vc-tab", "tasks");
+    const { host, unmount } = mountList([makePair({ broken: false })]);
+
+    const ids = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .map((button) => button.id);
+
+    expect(ids).toEqual(["tab-projects", "tab-tasks", "tab-operations"]);
+    unmount();
+  });
+
   it("вкладки переключаются стрелками, фокус следует за выбором", () => {
     window.localStorage.setItem("vc-tab", "tasks");
     const { host, unmount } = mountList([makePair({ broken: false })]);
@@ -623,10 +634,10 @@ describe("семантика страницы", () => {
         }),
       );
     });
-    const projects = host.querySelector<HTMLButtonElement>("#tab-projects")!;
-    expect(projects.getAttribute("aria-selected")).toBe("true");
+    const operations = host.querySelector<HTMLButtonElement>("#tab-operations")!;
+    expect(operations.getAttribute("aria-selected")).toBe("true");
     expect(tasks.getAttribute("aria-selected")).toBe("false");
-    expect(document.activeElement).toBe(projects);
+    expect(document.activeElement).toBe(operations);
     unmount();
   });
 });
