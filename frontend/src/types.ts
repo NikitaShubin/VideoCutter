@@ -156,6 +156,8 @@ export interface JobTypeManifest {
   cancellable: boolean;
   resumable: boolean;
   retention_days: number | null;
+  /** Срок жизни записи об успешной операции; null — общий срок. */
+  record_retention_days?: number | null;
   params_schema: Record<string, unknown>;
   has_prerequisites: boolean;
 }
