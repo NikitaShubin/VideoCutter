@@ -260,6 +260,31 @@ def job_detail(request, job_id: str):
     return JsonResponse({"job": _serialize(job, scheduler)})
 
 
+def _set_hidden(request, job_id: str, hidden: bool) -> JsonResponse:
+    scheduler = vc_jobs.get_scheduler()
+    if _job_or_404(scheduler, job_id, _owner(request)) is None:
+        return _error("операция не найдена", 404)
+    try:
+        job = scheduler.set_hidden(job_id, hidden)
+    except KeyError:
+        return _error("операция не найдена", 404)
+    except JobConflict as exc:
+        return _error(str(exc), 409)
+    return JsonResponse({"job": _serialize(job, scheduler)})
+
+
+@require_http_methods(["POST"])
+def job_hide(request, job_id: str):
+    """Скрыть терминальную операцию из рабочего списка (история остаётся)."""
+    return _set_hidden(request, job_id, True)
+
+
+@require_http_methods(["POST"])
+def job_show(request, job_id: str):
+    """Вернуть скрытую операцию в рабочий список."""
+    return _set_hidden(request, job_id, False)
+
+
 @require_http_methods(["POST"])
 def job_cancel(request, job_id: str):
     scheduler = vc_jobs.get_scheduler()

@@ -42,6 +42,7 @@ class JobModelTests(SimpleTestCase):
         self.assertIsNone(job.result)
         self.assertIsNone(job.error)
         self.assertFalse(job.cancel_requested)
+        self.assertFalse(job.hidden)
         self.assertTrue(job.created_at)
 
     def test_active_and_terminal_flags(self):
@@ -69,6 +70,22 @@ class JobModelTests(SimpleTestCase):
         restored = Job.from_dict(data)
 
         self.assertEqual(restored.to_dict()["future_field"], {"x": 1})
+
+    def test_hidden_flag_roundtrips(self):
+        job = make_job(status="done", hidden=True)
+
+        restored = Job.from_dict(job.to_dict())
+
+        self.assertTrue(restored.hidden)
+        self.assertTrue(restored.to_dict()["hidden"])
+
+    def test_record_without_hidden_field_is_visible(self):
+        data = make_job(status="done").to_dict()
+        data.pop("hidden")
+
+        restored = Job.from_dict(data)
+
+        self.assertFalse(restored.hidden)
 
     def test_extra_cannot_override_core_fields(self):
         job = make_job(extra={"status": "done", "id": "hacked"})

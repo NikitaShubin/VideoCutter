@@ -588,6 +588,67 @@ class DeleteTests(JobsApiTestBase):
         self.assertEqual(response.status_code, 404)
 
 
+class HideTests(JobsApiTestBase):
+    def test_hide_done_job_persists_flag(self):
+        job = self.create()
+        self.wait_done(job["id"])
+
+        response = self.client.post(f"{JOBS}/{job['id']}/hide")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["job"]["hidden"])
+        self.assertTrue(self.store.get(job["id"]).hidden)
+
+    def test_show_hidden_job_clears_flag(self):
+        job = self.create()
+        self.wait_done(job["id"])
+        self.client.post(f"{JOBS}/{job['id']}/hide")
+
+        response = self.client.post(f"{JOBS}/{job['id']}/show")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["job"]["hidden"])
+        self.assertFalse(self.store.get(job["id"]).hidden)
+
+    def test_hide_keeps_result_file(self):
+        job = self.create(type="test.archive",
+                          target={"kind": "task", "id": "t"})
+        done = self.wait_done(job["id"])
+        path = done.result["download_path"]
+
+        response = self.client.post(f"{JOBS}/{job['id']}/hide")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(os.path.isfile(path))
+
+    def test_hide_active_is_409(self):
+        job = self.create(type="test.slow",
+                          target={"kind": "task", "id": "s"})
+        self.assertTrue(wait_until(
+            lambda: self.scheduler.get(job["id"]).status == "running"))
+
+        response = self.client.post(f"{JOBS}/{job['id']}/hide")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(self.scheduler.get(job["id"]).hidden)
+        self.release.set()
+
+    def test_hide_unknown_is_404(self):
+        self.assertEqual(
+            self.client.post(f"{JOBS}/nope/hide").status_code, 404)
+
+    def test_cannot_hide_foreign_job(self):
+        os.environ["VC_TRUST_PROXY"] = "1"
+        job = self.create(headers={"HTTP_X_VC_USER": "alice"})
+        self.wait_done(job["id"])
+
+        response = self.client.post(
+            f"{JOBS}/{job['id']}/hide", HTTP_X_VC_USER="bob")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(self.scheduler.get(job["id"]).hidden)
+
+
 class OwnerTests(JobsApiTestBase):
     def test_headers_ignored_without_trusted_proxy(self):
         job = self.create(headers={"HTTP_X_VC_USER": "alice"})

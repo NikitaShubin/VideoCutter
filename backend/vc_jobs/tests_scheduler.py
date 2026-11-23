@@ -926,6 +926,48 @@ class ListSummaryTests(SchedulerTestBase):
         with self.assertRaises(KeyError):
             s.retry("missing")
 
+    def test_hiding_done_job_persists_flag(self):
+        self.make()
+        s = self.scheduler()
+        job, _ = self.submit(s)
+        self.assertTrue(wait_until(lambda: s.get(job.id).status == "done"))
+
+        s.set_hidden(job.id, True)
+
+        self.assertTrue(s.get(job.id).hidden)
+        self.assertTrue(self.store.get(job.id).hidden)
+
+    def test_showing_hidden_job_clears_flag(self):
+        self.make()
+        s = self.scheduler()
+        job, _ = self.submit(s)
+        self.assertTrue(wait_until(lambda: s.get(job.id).status == "done"))
+        s.set_hidden(job.id, True)
+
+        s.set_hidden(job.id, False)
+
+        self.assertFalse(s.get(job.id).hidden)
+        self.assertFalse(self.store.get(job.id).hidden)
+
+    def test_hiding_active_job_conflicts(self):
+        gate = Gate()
+        self.make(executor=gate)
+        s = self.scheduler()
+        job, _ = self.submit(s)
+        self.assertTrue(gate.started.wait(2))
+
+        with self.assertRaises(JobConflict):
+            s.set_hidden(job.id, True)
+        self.assertFalse(self.store.get(job.id).hidden)
+        gate.release.set()
+
+    def test_hiding_unknown_is_not_found(self):
+        self.make()
+        s = self.scheduler()
+
+        with self.assertRaises(KeyError):
+            s.set_hidden("missing", True)
+
     def test_set_retention_unknown_is_not_found(self):
         self.make()
         s = self.scheduler()

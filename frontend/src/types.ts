@@ -142,6 +142,8 @@ export interface Job {
   result: JobResult | null;
   error: JobError | null;
   cancel_requested: boolean;
+  /** Терминальная операция убрана из рабочего списка; в истории видна. */
+  hidden: boolean;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;

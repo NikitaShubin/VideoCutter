@@ -29,8 +29,8 @@ TERMINAL_STATUSES = frozenset({DONE, ERROR, CANCELLED, INTERRUPTED})
 CORE_FIELDS = (
     "v", "id", "type", "lane", "status", "dedupe_key", "owner", "target",
     "params", "priority", "depends_on", "attempt", "progress", "result",
-    "error", "cancel_requested", "created_at", "started_at", "finished_at",
-    "heartbeat_at", "retention",
+    "error", "cancel_requested", "hidden", "created_at", "started_at",
+    "finished_at", "heartbeat_at", "retention",
 )
 
 
@@ -82,6 +82,8 @@ class Job:
     result: Optional[Dict[str, Any]] = None
     error: Optional[Dict[str, Any]] = None
     cancel_requested: bool = False
+    #: Убрана из рабочего списка вручную; в истории остаётся.
+    hidden: bool = False
     created_at: str = field(default_factory=now_iso)
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
@@ -153,6 +155,7 @@ class Job:
             "result": self.result,
             "error": self.error,
             "cancel_requested": self.cancel_requested,
+            "hidden": self.hidden,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -207,6 +210,7 @@ class Job:
             result=data.get("result"),
             error=data.get("error"),
             cancel_requested=bool(data.get("cancel_requested", False)),
+            hidden=bool(data.get("hidden", False)),
             created_at=data.get("created_at") or now_iso(),
             started_at=data.get("started_at"),
             finished_at=data.get("finished_at"),

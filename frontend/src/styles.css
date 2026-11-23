@@ -717,7 +717,7 @@ select option {
   padding: 6px 12px;
 }
 
-.operation-actions .operation-delete {
+.operation-actions .operation-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -726,6 +726,11 @@ select option {
   padding: 0;
   font-size: 1em;
   line-height: 1;
+}
+
+.operation-actions .operation-icon:hover {
+  background: #33507a;
+  border-color: #4a6a9a;
 }
 
 .operation-actions .operation-delete:hover {

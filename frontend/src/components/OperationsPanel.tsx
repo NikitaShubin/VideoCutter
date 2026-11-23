@@ -15,6 +15,7 @@ import {
   getJobTypes,
   listJobs,
   retryJob,
+  setJobHidden,
   withTokenQuery,
 } from "../api";
 import { failureReason } from "../model/errors";
@@ -82,6 +83,59 @@ function targetIsNavigable(job: Job): boolean {
   return job.lane !== "system";
 }
 
+function EyeIcon({ off = false }: { off?: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {off ? (
+        <>
+          <path d="M3 3l18 18" />
+          <path d="M10.6 10.6a3 3 0 0 0 4.2 4.2" />
+          <path d="M9.9 5.2A10.7 10.7 0 0 1 12 5c6.5 0 10 7 10 7a17.8 17.8 0 0 1-3.2 4.2" />
+          <path d="M6.1 6.1A17.3 17.3 0 0 0 2 12s3.5 7 10 7a10.7 10.7 0 0 0 4.9-1.2" />
+        </>
+      ) : (
+        <>
+          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+          <circle cx="12" cy="12" r="3" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M19 6l-1 14H6L5 6" />
+      <path d="M10 11v5M14 11v5" />
+    </svg>
+  );
+}
+
 function mergeJobs(...groups: Job[][]): Job[] {
   const seen = new Set<string>();
   const merged: Job[] = [];
@@ -140,7 +194,7 @@ export function visibleJobs(
     return !resultExpired(job, now);
   });
   const visible = new Set([...active, ...terminal].map((job) => job.id));
-  return jobs.filter((job) => visible.has(job.id));
+  return jobs.filter((job) => visible.has(job.id) && !job.hidden);
 }
 
 export interface OperationsPanelHandle {
@@ -439,15 +493,41 @@ export const OperationsPanel = forwardRef<
                       Скачать
                     </a>
                   )}
+                  {!active && !showAll && (
+                    <button
+                      className="btn operation-icon operation-hide"
+                      disabled={busy === job.id}
+                      onClick={() =>
+                        void runAction(job.id, () => setJobHidden(job.id, true))
+                      }
+                      title="Скрыть из списка"
+                      aria-label={`Скрыть операцию: ${label(job)} ${job.target.id}`}
+                    >
+                      <EyeIcon off />
+                    </button>
+                  )}
+                  {!active && showAll && job.hidden && (
+                    <button
+                      className="btn operation-icon operation-show"
+                      disabled={busy === job.id}
+                      onClick={() =>
+                        void runAction(job.id, () => setJobHidden(job.id, false))
+                      }
+                      title="Вернуть в список"
+                      aria-label={`Показать операцию: ${label(job)} ${job.target.id}`}
+                    >
+                      <EyeIcon />
+                    </button>
+                  )}
                   {!active && (
                     <button
-                      className="btn operation-delete"
+                      className="btn operation-icon operation-delete"
                       disabled={busy === job.id}
                       onClick={() => remove(job)}
                       title="Удалить операцию"
                       aria-label={`Удалить операцию: ${label(job)} ${job.target.id}`}
                     >
-                      <span aria-hidden="true">🗑</span>
+                      <TrashIcon />
                     </button>
                   )}
                 </div>

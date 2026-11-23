@@ -551,6 +551,14 @@ export function deleteJob(id: string): Promise<{ deleted: string }> {
   }).then((r) => json<{ deleted: string }>(r));
 }
 
+/** Скрыть терминальную операцию из списка или вернуть её обратно. */
+export function setJobHidden(id: string, hidden: boolean): Promise<Job> {
+  const action = hidden ? "hide" : "show";
+  return apiFetch(`${BASE}/jobs/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+  }).then((r) => json<{ job: Job }>(r).then((body) => body.job));
+}
+
 export function getJobsSummary(): Promise<JobsSummary> {
   return apiFetch(`${BASE}/jobs/summary`).then((r) => json<JobsSummary>(r));
 }

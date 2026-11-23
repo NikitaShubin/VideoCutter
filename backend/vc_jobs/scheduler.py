@@ -622,6 +622,23 @@ class Scheduler:
             for dep_id in job.depends_on
         }
 
+    def set_hidden(self, job_id: str, hidden: bool) -> Job:
+        """Убирает терминальную запись из рабочего списка.
+
+        Запись остаётся на диске и в истории. Активную операцию скрывать
+        нельзя: она должна быть видна, пока идёт работа.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            if job.active:
+                raise JobConflict("активную операцию нельзя скрыть")
+            if job.hidden != bool(hidden):
+                job.hidden = bool(hidden)
+                self._save_locked(job)
+            return job
+
     def set_retention(self, job_id: str, expires_at: str) -> Job:
         """Продлевает срок результата (скачивание архива)."""
         with self._lock:

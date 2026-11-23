@@ -11,6 +11,7 @@ import {
   getJobTypes,
   listJobs,
   retryJob,
+  setJobHidden,
 } from "../api";
 import type { JobQuery } from "../api";
 import { OperationsPanel } from "./OperationsPanel";
@@ -25,6 +26,7 @@ vi.mock("../api", async (importOriginal) => {
     cancelJob: vi.fn(),
     retryJob: vi.fn(),
     deleteJob: vi.fn(),
+    setJobHidden: vi.fn(),
     getJobTypes: vi.fn(),
   };
 });
@@ -82,6 +84,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     result: null,
     error: null,
     cancel_requested: false,
+    hidden: false,
     created_at: "2026-11-22T10:00:00Z",
     started_at: "2026-11-22T10:00:01Z",
     finished_at: null,
@@ -112,6 +115,7 @@ async function mount(
   vi.mocked(cancelJob).mockResolvedValue(makeJob());
   vi.mocked(retryJob).mockResolvedValue(makeJob({ status: "queued" }));
   vi.mocked(deleteJob).mockResolvedValue({ deleted: "job-1" });
+  vi.mocked(setJobHidden).mockResolvedValue(makeJob({ hidden: true }));
 
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -135,6 +139,7 @@ beforeEach(() => {
   vi.mocked(cancelJob).mockReset();
   vi.mocked(retryJob).mockReset();
   vi.mocked(deleteJob).mockReset();
+  vi.mocked(setJobHidden).mockReset();
 });
 
 afterEach(() => {
@@ -336,6 +341,45 @@ describe("экран фоновых операций", () => {
   it("не предлагает историю, когда записей нет вовсе", async () => {
     const { host } = await mount([]);
     expect(host.textContent).not.toContain("Показать историю");
+  });
+
+  it("скрытая операция остаётся только в истории", async () => {
+    const { host } = await mount([
+      makeJob({
+        status: "done",
+        display_status: "done",
+        hidden: true,
+        result: { files: ["f.mp4"], urls: ["/f"] },
+      }),
+    ]);
+
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(0);
+    const toggle = Array.from(host.querySelectorAll("button")).find(
+      (button) => button.textContent === "Показать историю",
+    )!;
+    act(() => toggle.click());
+
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(1);
+  });
+
+  it("скрытие последней операции не показывает более старую", async () => {
+    const { host } = await mount([
+      makeJob({
+        id: "new",
+        status: "done",
+        display_status: "done",
+        hidden: true,
+        result: { files: ["new.mp4"], urls: ["/new"] },
+      }),
+      makeJob({
+        id: "old",
+        status: "done",
+        display_status: "done",
+        result: { files: ["old.mp4"], urls: ["/old"] },
+      }),
+    ]);
+
+    expect(host.querySelectorAll(".operation-card")).toHaveLength(0);
   });
 
   it("в истории не предлагает скачать истёкший бэкап", async () => {
@@ -587,5 +631,55 @@ describe("экран фоновых операций", () => {
     const { host } = await mount([makeJob()]);
 
     expect(host.querySelector(".operation-delete")).toBeNull();
+  });
+
+  it("глаз скрывает завершённую операцию", async () => {
+    const { host } = await mount([
+      makeJob({
+        status: "done",
+        display_status: "done",
+        result: { files: ["f.mp4"], urls: ["/f"] },
+      }),
+    ]);
+
+    const hide = host.querySelector<HTMLButtonElement>(".operation-hide")!;
+    expect(hide.getAttribute("aria-label"))
+      .toBe("Скрыть операцию: Экспорт фрагментов cam-1");
+    await act(async () => {
+      hide.click();
+    });
+
+    expect(setJobHidden).toHaveBeenCalledWith("job-1", true);
+  });
+
+  it("в истории скрытую операцию можно вернуть", async () => {
+    const { host } = await mount([
+      makeJob({
+        status: "done",
+        display_status: "done",
+        hidden: true,
+        result: { files: ["f.mp4"], urls: ["/f"] },
+      }),
+    ]);
+    const toggle = Array.from(host.querySelectorAll("button")).find(
+      (button) => button.textContent === "Показать историю",
+    )!;
+    act(() => toggle.click());
+
+    const show = host.querySelector<HTMLButtonElement>(".operation-show")!;
+    expect(show.getAttribute("aria-label"))
+      .toBe("Показать операцию: Экспорт фрагментов cam-1");
+    await act(async () => {
+      show.click();
+    });
+
+    expect(setJobHidden).toHaveBeenCalledWith("job-1", false);
+  });
+
+  it("у активной операции нет глаза", async () => {
+    const { host } = await mount([makeJob()]);
+
+    expect(host.querySelector(".operation-hide")).toBeNull();
+    expect(host.querySelector(".operation-show")).toBeNull();
   });
 });

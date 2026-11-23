@@ -34,6 +34,7 @@ function makeJob(type: string): Job {
     result: null,
     error: null,
     cancel_requested: false,
+    hidden: false,
     created_at: "2026-11-22T10:00:00Z",
     started_at: null,
     finished_at: null,

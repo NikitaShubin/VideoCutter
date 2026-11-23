@@ -50,6 +50,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     result: null,
     error: null,
     cancel_requested: false,
+    hidden: false,
     created_at: "2026-11-22T10:00:00Z",
     started_at: "2026-11-22T10:00:01Z",
     finished_at: null,
